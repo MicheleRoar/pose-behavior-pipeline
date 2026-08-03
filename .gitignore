@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+
+# Model weights (scaricati automaticamente al primo avvio, vedi README)
+src/yolov8n-pose.pt
+src/face_landmarker.task
+src/hand_landmarker.task
+
+# Output generati dai demo/dalla live_demo (dati di sessione, non codice)
+demo/demo_outputs/
+src/live_session.csv
