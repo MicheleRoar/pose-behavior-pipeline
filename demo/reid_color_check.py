@@ -39,7 +39,7 @@ import numpy as np
 from keypoints import KP
 from reid import (
     ReIdentifier, COLOR_SEGMENTS, compute_color_signature, color_similarity,
-    hair_corners,
+    hair_corners, MAX_POSITION_GAP_SECONDS,
 )
 from reid_check import make_skeleton, PERSON_A
 
@@ -105,12 +105,14 @@ def part2_color_similarity_sane():
 def _run_reentry_scenario(*, reentry_scale: float, reentry_shirt: tuple, reentry_pants: tuple,
                            use_color: bool) -> tuple[int | None, int]:
     """Persona presente 20 frame (proporzioni normali, vestiti rossi/blu),
-    esce per 60 frame, rientra con un nuovo raw track_id per 15 frame con
-    le proporzioni/vestiti indicati. Ritorna (person_id_originale,
-    person_id_al_rientro) — se il reid non scatta, il secondo sara' un id
-    nuovo (diverso dal primo).
+    esce abbastanza a lungo da azzerare anche il segnale posizionale
+    (oltre `MAX_POSITION_GAP_SECONDS`, per isolare questo test sul solo
+    contributo di proporzioni+colore), poi rientra con un nuovo raw
+    track_id per 15 frame con le proporzioni/vestiti indicati. Ritorna
+    (person_id_originale, person_id_al_rientro) — se il reid non scatta,
+    il secondo sara' un id nuovo (diverso dal primo).
     """
-    reid = ReIdentifier(max_lost_seconds=30.0, max_signature_dist=0.12,
+    reid = ReIdentifier(max_lost_seconds=60.0, max_signature_dist=0.12,
                          min_signature_frames=15, color_bonus_weight=0.5)
     rng = np.random.default_rng(1)
     frame_t = 0
@@ -124,8 +126,16 @@ def _run_reentry_scenario(*, reentry_scale: float, reentry_shirt: tuple, reentry
         person_id_initial = resolved[0][0]
         frame_t += 1
 
-    for _ in range(60):
-        frame_t += 1  # assente dall'inquadratura
+    absence_frames = int(FPS * (MAX_POSITION_GAP_SECONDS + 5))
+    for _ in range(absence_frames):
+        # resolve() con lista vuota ad ogni frame, non solo un incremento di
+        # frame_t: serve perche' il "lost_time" viene registrato quando il
+        # sistema SI ACCORGE dell'assenza (prossima resolve() senza quel
+        # raw_id), non quando l'assenza inizia -- senza queste chiamate
+        # lost_time coinciderebbe con il rientro, azzerando artificialmente
+        # il gap che vogliamo simulare.
+        reid.resolve([], frame_t / FPS)
+        frame_t += 1  # assente dall'inquadratura (abbastanza a lungo da azzerare il bonus posizionale)
 
     distorted = dict(PERSON_A)
     distorted["shoulder_w"] *= reentry_scale

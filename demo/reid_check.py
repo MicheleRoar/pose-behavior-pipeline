@@ -21,7 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
 from keypoints import KP
-from reid import ReIdentifier, SIGNATURE_COLS, compute_signature_frame
+from reid import (
+    ReIdentifier, SIGNATURE_COLS, compute_signature_frame,
+    MAX_POSITION_DIST_TORSOS,
+)
 
 N_JOINTS = 17  # schema COCO-17
 
@@ -138,6 +141,76 @@ def noisy_reentry_recovers_via_retry():
           "il retry sui frame successivi, piu' puliti, recupera il match) — OK")
 
 
+def _run_in_place_scenario(*, reentry_tx: float, absence_seconds: float) -> tuple[int, int]:
+    """Persona presente 20 frame a tx=300 (proporzioni normali), assente per
+    `absence_seconds` (simulate chiamando resolve([], now) ad ogni frame,
+    cosi' lost_time riflette il momento vero della scomparsa, non quello
+    del rientro), poi rientra con proporzioni distorte (troppo diverse per
+    un match sulla sola firma) a `reentry_tx`. Nessun colore passato: se il
+    rientro viene comunque recuperato, e' merito solo della posizione."""
+    reid = ReIdentifier(max_lost_seconds=60.0, max_signature_dist=0.12, min_signature_frames=15)
+    rng = np.random.default_rng(7)
+    frame_t = 0
+    person_id_initial = None
+
+    for _ in range(20):
+        now = frame_t / FPS
+        kxy = make_skeleton(**PERSON_A, tx=300, ty=150, jitter=0.01, rng=rng)
+        resolved = reid.resolve([(1, kxy, CONF)], now)
+        person_id_initial = resolved[0][0]
+        frame_t += 1
+
+    for _ in range(int(FPS * absence_seconds)):
+        reid.resolve([], frame_t / FPS)
+        frame_t += 1
+
+    distorted = dict(PERSON_A)
+    distorted["shoulder_w"] *= 1.6
+    distorted["hip_w"] /= 1.6
+    distorted["upper_arm"] *= 1.6
+    distorted["thigh"] /= 1.6
+
+    rng2 = np.random.default_rng(8)
+    person_id_reentry = None
+    for _ in range(15):
+        now = frame_t / FPS
+        kxy = make_skeleton(**distorted, tx=reentry_tx, ty=150, jitter=0.01, rng=rng2)
+        resolved = reid.resolve([(2, kxy, CONF)], now)
+        person_id_reentry = resolved[0][0]
+        frame_t += 1
+
+    return person_id_initial, person_id_reentry
+
+
+def position_signal_recovers_in_place_reentry():
+    """Scenario "cambio giacca": il bambino non esce dall'inquadratura ma
+    resta occluso ~10s (es. mentre lo vestono), poi ricompare NELLO STESSO
+    PUNTO con proporzioni troppo distorte per un match sulla sola firma
+    (nessun colore passato). Deve comunque essere ri-associato grazie alla
+    sola posizione. Controllo negativo: stesse proporzioni distorte ma
+    rientro LONTANO dall'ultima posizione nota -- non deve scattare, a
+    riprova che la posizione aiuta solo quando e' davvero vicina, non
+    forza un match a prescindere."""
+    initial, reentry = _run_in_place_scenario(reentry_tx=300, absence_seconds=10.0)
+    assert reentry == initial, (
+        f"atteso un match grazie alla sola posizione (persona non spostata, ~10s di assenza) "
+        f"(person_id_initial={initial}, person_id_reentry={reentry})"
+    )
+    print(f"Rientro sul posto dopo occlusione (~10s, es. cambio giacca), senza colore: "
+          f"person_id iniziale={initial}, al rientro={reentry} -> ri-associato grazie alla posizione")
+
+    far_tx = 300 + (MAX_POSITION_DIST_TORSOS + 2) * 100  # ben oltre il raggio di 4 lunghezze di busto (torso=100)
+    initial, reentry = _run_in_place_scenario(reentry_tx=far_tx, absence_seconds=10.0)
+    assert reentry != initial, (
+        "controllo negativo fallito: un rientro lontano con proporzioni distorte non deve "
+        f"essere ri-associato solo perche' il tempo di assenza e' breve "
+        f"(person_id_initial={initial}, person_id_reentry={reentry})"
+    )
+    print(f"Controllo negativo (stesso gap, ma rientro lontano dall'ultima posizione nota): "
+          f"person_id iniziale={initial}, al rientro={reentry} -> NON ri-associato (atteso, "
+          "la posizione non forza mai un match")
+
+
 def main():
     reid = ReIdentifier(max_lost_seconds=30.0, max_signature_dist=0.12, min_signature_frames=15)
     rng_a = np.random.default_rng(1)
@@ -215,6 +288,7 @@ def main():
 
     head_segments_computed_correctly()
     noisy_reentry_recovers_via_retry()
+    position_signal_recovers_in_place_reentry()
 
     print("\nVerifica completata senza errori: re-identificazione in tempo reale "
           "funziona su un'uscita/rientro simulata, senza confondere una persona estranea.")

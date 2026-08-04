@@ -80,6 +80,28 @@ piu' facile recuperare un match vero anche con proporzioni un po' rumorose,
 senza mai peggiorare la robusta invarianza al vestiario che era l'obiettivo
 originale del prototipo.
 
+Segnale opzionale: posizione
+------------------------------
+Pensato per il caso concreto di un cambio vestiti "in scena" (es. mettere
+una giacca/grembiule a un bambino durante un'attivita', tipicamente una
+decina di secondi): il bambino non esce mai dall'inquadratura, ma
+l'occlusione parziale da parte di chi lo veste puo' far perdere il track e
+generarne uno nuovo al distacco. In questo caso il bambino non si e' quasi
+spostato, quindi l'ultima posizione nota (centro-bacino) prima della
+perdita e la prima posizione del nuovo track sono molto vicine -- stesso
+principio anche per un'uscita/rientro dalla stessa porta. Ogni frame si
+memorizza posizione e scala (lunghezza busto) della persona corrente; alla
+perdita, quella posizione viene congelata insieme alla firma. Un nuovo
+track viene confrontato su vicinanza spaziale (in lunghezze di busto,
+`MAX_POSITION_DIST_TORSOS`) E vicinanza temporale (`MAX_POSITION_GAP_SECONDS`)
+-- entrambe devono valere qualcosa, non basta una sola.
+
+Stesso principio del colore: la posizione puo' solo scontare la distanza,
+MAI bloccare un match ne' sostituirsi alla firma. Colore e posizione non si
+sommano tra loro -- si prende il PIU' FORTE dei due sconti disponibili,
+non la somma, per evitare che due segnali solo mediocri si accumulino a una
+fiducia che nessuno dei due giustificherebbe da solo.
+
 Limiti onesti
 -------------
   - La firma ha bisogno di un numero minimo di frame con confidenza
@@ -92,6 +114,12 @@ Limiti onesti
     motivo puo' aumentare il rischio di falso positivo se due persone
     diverse indossano vestiti di colore simile E hanno proporzioni corporee
     vicine -- e' un compromesso esplicito, non un problema nascosto.
+  - La posizione e' un'arma a doppio taglio in scene con due persone
+    vicine (es. bambino+caregiver): SOLO lo sconto (mai la forzatura) tiene
+    a bada il rischio, ma se le proporzioni di due persone sono gia'
+    ambigue di per se', la vicinanza spaziale puo' spingere un confronto
+    borderline oltre soglia nella direzione sbagliata -- scelta deliberata,
+    non un problema nascosto.
   - Il merge, una volta deciso, e' applicato automaticamente (non c'e' modo
     di chiedere conferma a un umano in tempo reale) -- per questo l'evento
     resta sempre nel log, invece di sparire silenziosamente.
@@ -106,7 +134,7 @@ import cv2
 import numpy as np
 
 from keypoints import KP
-from features import torso_length
+from features import torso_length, hip_center
 
 # ---------------------------------------------------------------------------
 # Firma antropometrica (adattata da reid_signature.py, schema COCO-17)
@@ -242,6 +270,42 @@ def color_similarity(a: np.ndarray, b: np.ndarray) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Posizione (segnale opzionale, complementare alla firma antropometrica --
+# vedi "Segnale opzionale: posizione" nel docstring del modulo)
+# ---------------------------------------------------------------------------
+
+# Raggio spaziale (in lunghezze di busto, quindi invariante alla distanza
+# dalla camera) oltre il quale la posizione non conta piu' come "stesso
+# punto". 4 lunghezze di busto copre sia un rientro dalla stessa porta
+# (piccolo spostamento) sia un bambino fermo mentre gli mettono una giacca
+# (spostamento quasi nullo).
+MAX_POSITION_DIST_TORSOS = 4.0
+
+# Tempo oltre il quale il segnale posizionale si azzera. Un cambio di
+# giacca dura tipicamente una decina di secondi: a 20s il peso e' zero, a
+# 10s e' ancora a meta' -- non ai margini della validita'.
+MAX_POSITION_GAP_SECONDS = 20.0
+
+
+def position_similarity(pos_a: np.ndarray, pos_b: np.ndarray, torso_scale: float,
+                         gap_seconds: float) -> float | None:
+    """Similarita' posizionale 0..1 (1 = stesso punto, appena successo) tra
+    due posizioni (centro-bacino), combinando vicinanza spaziale (in
+    lunghezze di busto, decadimento lineare fino a `MAX_POSITION_DIST_TORSOS`)
+    e vicinanza temporale (decadimento lineare fino a
+    `MAX_POSITION_GAP_SECONDS`). `None` se una posizione manca o la scala
+    non e' valida."""
+    if np.isnan(pos_a).any() or np.isnan(pos_b).any():
+        return None
+    if torso_scale < 1e-6 or np.isnan(torso_scale):
+        return None
+    dist_torsos = float(np.linalg.norm(pos_a - pos_b)) / torso_scale
+    spatial = max(0.0, 1.0 - dist_torsos / MAX_POSITION_DIST_TORSOS)
+    temporal = max(0.0, 1.0 - gap_seconds / MAX_POSITION_GAP_SECONDS)
+    return spatial * temporal
+
+
+# ---------------------------------------------------------------------------
 # Stato per persona/traccia
 # ---------------------------------------------------------------------------
 
@@ -250,6 +314,8 @@ class _LostPerson:
     signature: np.ndarray
     lost_time: float
     color: np.ndarray | None = None
+    position: np.ndarray | None = None    # ultimo centro-bacino noto
+    last_torso: float | None = None       # scala per normalizzare la posizione
 
 
 @dataclass
@@ -260,6 +326,7 @@ class _MergeEvent:
     distance: float
     frame_time: float
     color_used: bool = False
+    position_used: bool = False
 
 
 class ReIdentifier:
@@ -289,17 +356,20 @@ class ReIdentifier:
     def __init__(self, max_lost_seconds: float = 30.0,
                  max_signature_dist: float = 0.12,
                  min_signature_frames: int = 15,
-                 color_bonus_weight: float = 0.5):
+                 color_bonus_weight: float = 0.5,
+                 position_bonus_weight: float = 0.5):
         self.max_lost_seconds = max_lost_seconds
         self.max_signature_dist = max_signature_dist
         self.min_signature_frames = min_signature_frames
         self.color_bonus_weight = color_bonus_weight
+        self.position_bonus_weight = position_bonus_weight
 
         self.raw_to_person: dict[int, int] = {}
         self.buffers: dict[int, deque] = {}
         self.color_buffers: dict[int, deque] = {}
         self.pending_check: set[int] = set()  # raw_track_id ancora da valutare
         self.pending_since: dict[int, float] = {}  # raw_track_id -> now al primo avvistamento
+        self.last_position: dict[int, tuple[np.ndarray, float]] = {}  # person_id -> (hip_xy, torso)
         self.lost: dict[int, _LostPerson] = {}
         self.merge_log: list[_MergeEvent] = []
         self._next_person_id = 1
@@ -334,9 +404,14 @@ class ReIdentifier:
             if frame is not None:
                 self.color_buffers[person_id].append(compute_color_signature(frame, kxy))
 
+            hip, torso = hip_center(kxy), torso_length(kxy)
+            if not np.isnan(hip).any() and not np.isnan(torso) and torso > 1e-6:
+                self.last_position[person_id] = (hip, torso)
+
             if raw_id in self.pending_check and len(self.buffers[person_id]) >= self.min_signature_frames:
                 match = self._find_lost_match(self.buffers[person_id], self.color_buffers[person_id],
-                                               self.pending_since[raw_id])
+                                               self.pending_since[raw_id], now,
+                                               self.last_position.get(person_id))
                 if match is None:
                     if now - self.pending_since[raw_id] > self._PENDING_RETRY_SECONDS:
                         # rinuncia: oltre questa persona non viene piu'
@@ -345,15 +420,16 @@ class ReIdentifier:
                         self.pending_check.discard(raw_id)
                 else:
                     self.pending_check.discard(raw_id)
-                    matched_person_id, dist, color_used = match
+                    matched_person_id, dist, color_used, position_used = match
                     self.merge_log.append(_MergeEvent(
                         raw_track_id=raw_id, provisional_person_id=person_id,
                         matched_person_id=matched_person_id, distance=dist, frame_time=now,
-                        color_used=color_used,
+                        color_used=color_used, position_used=position_used,
                     ))
+                    assist = ", ".join(s for s, used in (("color", color_used), ("position", position_used)) if used)
                     print(f"[reid] track {raw_id}: provisional person_id {person_id} "
                           f"re-matched to person_id {matched_person_id} "
-                          f"(distance={dist:.3f}{', color-assisted' if color_used else ''})")
+                          f"(distance={dist:.3f}{f', {assist}-assisted' if assist else ''})")
                     del self.lost[matched_person_id]
                     del self.buffers[person_id]
                     self.color_buffers.pop(person_id, None)
@@ -384,11 +460,14 @@ class ReIdentifier:
         self.pending_since[raw_id] = now
 
     def _find_lost_match(self, buffer: deque, color_buffer: deque,
-                          pending_since: float) -> tuple[int, float, bool] | None:
+                          pending_since: float, now: float,
+                          current_position: tuple[np.ndarray, float] | None,
+                          ) -> tuple[int, float, bool, bool] | None:
         median_sig = np.nanmedian(np.array(buffer), axis=0)
         median_color = np.nanmedian(np.array(color_buffer), axis=0) if color_buffer else None
 
-        best_person_id, best_dist, best_color_used = None, self.max_signature_dist, False
+        best_person_id, best_dist = None, self.max_signature_dist
+        best_color_used, best_position_used = False, False
         for person_id, lost in self.lost.items():
             if lost.lost_time > pending_since:
                 # causalita': questa persona e' sparita DOPO che il track
@@ -402,20 +481,37 @@ class ReIdentifier:
             if prop_dist is None:
                 continue
 
-            color_used = False
-            dist = prop_dist
+            # Due sconti indipendenti (colore, posizione): si prende il
+            # PIU' FORTE dei due, non si sommano/moltiplicano insieme --
+            # due segnali solo mediocri non devono sommarsi a una fiducia
+            # che nessuno dei due giustificherebbe da solo. Nessuno dei due
+            # puo' MAI alzare la distanza: nel peggiore dei casi (nessun
+            # segnale utilizzabile) il comportamento e' identico alla sola
+            # firma antropometrica.
+            color_bonus, color_used = 0.0, False
             if median_color is not None and lost.color is not None:
                 sim = color_similarity(median_color, lost.color)
                 if sim is not None:
-                    # il colore puo' solo AVVICINARE (mai allontanare) --
-                    # resta clothing-invariant quando i vestiti cambiano
-                    # davvero (sim bassa -> dist ~ invariata).
-                    dist = prop_dist * (1.0 - self.color_bonus_weight * sim)
-                    color_used = True
+                    color_bonus, color_used = self.color_bonus_weight * sim, True
+
+            position_bonus, position_used = 0.0, False
+            if current_position is not None and lost.position is not None:
+                cur_xy, cur_torso = current_position
+                scale = cur_torso if lost.last_torso is None else (cur_torso + lost.last_torso) / 2.0
+                sim = position_similarity(cur_xy, lost.position, scale, now - lost.lost_time)
+                if sim is not None:
+                    position_bonus, position_used = self.position_bonus_weight * sim, True
+
+            if color_bonus >= position_bonus:
+                dist, used_color, used_position = prop_dist * (1.0 - color_bonus), color_used, False
+            else:
+                dist, used_color, used_position = prop_dist * (1.0 - position_bonus), False, position_used
 
             if dist < best_dist:
-                best_person_id, best_dist, best_color_used = person_id, dist, color_used
-        return (best_person_id, best_dist, best_color_used) if best_person_id is not None else None
+                best_person_id, best_dist = person_id, dist
+                best_color_used, best_position_used = used_color, used_position
+        return ((best_person_id, best_dist, best_color_used, best_position_used)
+                if best_person_id is not None else None)
 
     def _retire_disappeared_tracks(self, current_raw_ids: set[int], now: float) -> None:
         gone_raw_ids = [rid for rid in self.raw_to_person if rid not in current_raw_ids]
@@ -425,6 +521,7 @@ class ReIdentifier:
             self.pending_since.pop(raw_id, None)
             buffer = self.buffers.pop(person_id, None)
             color_buffer = self.color_buffers.pop(person_id, None)
+            last_pos = self.last_position.pop(person_id, None)
             if buffer and len(buffer) > 0:
                 median_sig = np.nanmedian(np.array(buffer), axis=0)
                 if not np.isnan(median_sig).all():
@@ -433,8 +530,10 @@ class ReIdentifier:
                         cand = np.nanmedian(np.array(color_buffer), axis=0)
                         if not np.isnan(cand).all():
                             median_color = cand
+                    position, last_torso = (last_pos if last_pos is not None else (None, None))
                     self.lost[person_id] = _LostPerson(
-                        signature=median_sig, lost_time=now, color=median_color)
+                        signature=median_sig, lost_time=now, color=median_color,
+                        position=position, last_torso=last_torso)
 
     def _expire_old_lost_people(self, now: float) -> None:
         expired = [pid for pid, lost in self.lost.items()

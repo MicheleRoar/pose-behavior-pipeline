@@ -138,7 +138,7 @@ def run_live(source, fps: float, model_name: str, device: str,
              with_reid: bool = False, reid_max_lost_seconds: float = 30.0,
              reid_max_signature_dist: float = 0.12,
              reid_min_signature_frames: int = 15,
-             reid_color_weight: float = 0.5,
+             reid_color_weight: float = 0.5, reid_position_weight: float = 0.5,
              with_chuv_features: bool = False) -> pd.DataFrame:
     tracker = PoseTracker(model_name=model_name, device=device)
     window_len = max(8, int(window_seconds * fps))
@@ -152,16 +152,17 @@ def run_live(source, fps: float, model_name: str, device: str,
 
     # --- re-identificazione (opzionale): ri-associa una persona che rientra
     # nell'inquadratura con un nuovo track_id (ByteTrack) alla sua identita'
-    # precedente, in base alla firma antropometrica + colore maglia/pantaloni
-    # (vedi reid.py). Punto di wiring unico: se attiva, sostituisce subito
-    # frame_result.people con la versione a person_id stabile, cosi' tutto il
-    # resto della funzione (che tratta gia' l'id come una chiave generica)
-    # non richiede altre modifiche.
+    # precedente, in base alla firma antropometrica + colore maglia/pantaloni/
+    # capelli + posizione (vedi reid.py). Punto di wiring unico: se attiva,
+    # sostituisce subito frame_result.people con la versione a person_id
+    # stabile, cosi' tutto il resto della funzione (che tratta gia' l'id
+    # come una chiave generica) non richiede altre modifiche.
     reidentifier = ReIdentifier(
         max_lost_seconds=reid_max_lost_seconds,
         max_signature_dist=reid_max_signature_dist,
         min_signature_frames=reid_min_signature_frames,
         color_bonus_weight=reid_color_weight,
+        position_bonus_weight=reid_position_weight,
     ) if with_reid else None
 
     kpt_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))
@@ -527,6 +528,14 @@ def main():
                               "(0=color ignored, as before; 1=maximum effect). Can never "
                               "block a match that's already valid on proportions alone if "
                               "clothing looks different (requires --with-reid).")
+    parser.add_argument("--reid-position-weight", type=float, default=0.5,
+                         help="How much being in roughly the same spot, shortly after "
+                              "disappearing, can 'discount' the distance between body "
+                              "proportions (0=position ignored; 1=maximum effect). Useful when "
+                              "someone is briefly occluded in place (e.g. a jacket put on over "
+                              "existing clothes) rather than fully leaving and re-entering the "
+                              "frame. Can never block a match that's valid on proportions alone "
+                              "(requires --with-reid).")
     parser.add_argument("--with-chuv-features", action="store_true",
                          help="Add to the CSV the same features (angles, distances, symmetry, "
                               "center of mass, velocity/acceleration) computed by the "
@@ -551,6 +560,7 @@ def main():
               reid_max_signature_dist=args.reid_max_signature_dist,
               reid_min_signature_frames=args.reid_min_signature_frames,
               reid_color_weight=args.reid_color_weight,
+              reid_position_weight=args.reid_position_weight,
               with_chuv_features=args.with_chuv_features)
 
 

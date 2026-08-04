@@ -71,16 +71,20 @@ defaults.
   camera, so treat as a rough proxy, not 3D gaze tracking.
 - **`hands.py`** — 21 landmarks/hand, finger flexion, open/closed index,
   fingertip repetitiveness. Matched to the nearest YOLO wrist.
-- **`reid.py`** — restores a person's ID after they fully leave and
-  re-enter frame, using a clothing-invariant body-proportion signature
+- **`reid.py`** — restores a person's ID after they leave and re-enter
+  frame (or get briefly occluded in place, e.g. someone putting a jacket
+  on them), using a clothing-invariant body-proportion signature
   (shoulders/hips/limbs + head geometry), optionally boosted by
-  shirt/pants/hair color signals. Retries the match every frame with a
-  rolling window instead of once, and only compares against people who
-  went missing before the current track appeared (avoids false matches
-  between someone present the whole time and someone else who leaves
-  later). Verified on synthetic scenarios in `demo/reid_check.py` /
-  `demo/reid_color_check.py`; default thresholds aren't validated on real
-  footage and need on-camera calibration.
+  shirt/pants/hair color and by being in roughly the same spot shortly
+  after disappearing. Retries the match every frame with a rolling window
+  instead of once, and only compares against people who went missing
+  before the current track appeared (avoids false matches between someone
+  present the whole time and someone else who leaves later). All auxiliary
+  signals only ever discount the distance, never force a match — the
+  strongest single signal wins, they don't stack. Verified on synthetic
+  scenarios in `demo/reid_check.py` / `demo/reid_color_check.py`; default
+  thresholds aren't validated on real footage and need on-camera
+  calibration.
 - **`chuv_features.py`** — real-time reimplementation of the reference
   pipeline's feature formulas (angles, distances, symmetry, COM, temporal
   derivatives), for testing that strategy without CUDA or clinical video.
