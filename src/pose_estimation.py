@@ -17,7 +17,7 @@ Esempio d'uso:
 
     from pose_estimation import PoseTracker
 
-    tracker = PoseTracker(model_name="yolov8n-pose.pt", device="mps")
+    tracker = PoseTracker(model_name="yolo26n-pose.pt", device="mps")
     for result in tracker.run(source=0):   # 0 = prima webcam disponibile
         for track_id, kpts, conf in result.people:
             ...  # kpts: array (17, 2), conf: array (17,)
@@ -44,8 +44,8 @@ class PoseTracker:
 
     Parameters
     ----------
-    model_name : nome/percorso del modello (es. "yolov8n-pose.pt" per il
-        modello nano, più veloce; "yolov8s-pose.pt" per maggiore accuratezza
+    model_name : nome/percorso del modello (es. "yolo26n-pose.pt" per il
+        modello nano, più veloce; "yolo26s-pose.pt" per maggiore accuratezza
         a scapito della velocità).
     device : "mps" su Apple Silicon, "cpu" come fallback, "cuda" se
         disponibile una GPU NVIDIA.
@@ -54,7 +54,7 @@ class PoseTracker:
     tracker : algoritmo di tracking Ultralytics ("bytetrack.yaml" di default).
     """
 
-    def __init__(self, model_name: str = "yolov8n-pose.pt", device: str = "mps",
+    def __init__(self, model_name: str = "yolo26n-pose.pt", device: str = "mps",
                  conf_threshold: float = 0.4, tracker: str = "bytetrack.yaml"):
         # Import ritardato: così il resto del pacchetto (features.py,
         # anonymize.py) resta utilizzabile/testabile anche senza

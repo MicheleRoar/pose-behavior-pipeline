@@ -28,7 +28,7 @@ from features import build_person_features, repetitive_motion_score, symmetry_in
 from pose_estimation import PoseTracker
 
 
-def run_pipeline(source, fps: float, model_name: str = "yolov8n-pose.pt",
+def run_pipeline(source, fps: float, model_name: str = "yolo26n-pose.pt",
                   device: str = "mps") -> pd.DataFrame:
     """Esegue l'intera pipeline e restituisce una tabella tidy con una riga
     per (frame, persona), pronta per l'analisi in pandas.
@@ -67,15 +67,15 @@ def run_pipeline(source, fps: float, model_name: str = "yolov8n-pose.pt",
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Pipeline pose estimation -> feature comportamentali")
-    parser.add_argument("--source", required=True, help="Percorso video o indice webcam (es. 0)")
-    parser.add_argument("--fps", type=float, required=True, help="Frame rate della sorgente")
-    parser.add_argument("--model", default="yolov8n-pose.pt", help="Modello YOLO-pose Ultralytics")
+    parser = argparse.ArgumentParser(description="Pose estimation -> behavioural feature pipeline")
+    parser.add_argument("--source", required=True, help="Video path or webcam index (e.g. 0)")
+    parser.add_argument("--fps", type=float, required=True, help="Frame rate of the source")
+    parser.add_argument("--model", default="yolo26n-pose.pt", help="Ultralytics YOLO-pose model")
     parser.add_argument("--device", default="mps", help="mps | cpu | cuda")
-    parser.add_argument("--out", default="features.csv", help="Percorso CSV di output")
+    parser.add_argument("--out", default="features.csv", help="Output CSV path")
     args = parser.parse_args()
 
-    # Permette di passare un intero (webcam) o una stringa (file/stream)
+    # Allows passing an integer (webcam) or a string (file/stream)
     source = int(args.source) if args.source.isdigit() else args.source
 
     df = run_pipeline(source, fps=args.fps, model_name=args.model, device=args.device)

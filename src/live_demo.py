@@ -17,7 +17,7 @@ Sorgenti supportate:
 
 Esempio (solo scheletro):
 
-    python live_demo.py --source 0 --fps 30 --model yolov8n-pose.pt --device mps \\
+    python live_demo.py --source 0 --fps 30 --model yolo26n-pose.pt --device mps \\
         --window-seconds 3 --blur-faces --out live_session.csv
 
 Esempio con head-pose/sguardo e mani a livello di dita (richiede mediapipe
@@ -88,42 +88,42 @@ def format_metrics(track_id: int, angles: dict, energy: float, rep_score: dict,
                     gaze: dict | None = None, hands_info: dict | None = None,
                     posture: dict | None = None) -> list[str]:
     lines = [f"ID {track_id}"]
-    lines.append(f"energia mov.: {energy:6.1f}")
+    lines.append(f"movement energy: {energy:6.1f}")
     if not np.isnan(rep_score.get("peak_power_ratio", np.nan)):
-        lines.append(f"ripetitivita' polso: {rep_score['peak_power_ratio']:.2f} @ {rep_score['peak_freq_hz']:.1f}Hz")
+        lines.append(f"wrist repetitiveness: {rep_score['peak_power_ratio']:.2f} @ {rep_score['peak_freq_hz']:.1f}Hz")
     for name in ("left_elbow_angle", "right_elbow_angle"):
         if name in angles and not np.isnan(angles[name]):
             lines.append(f"{name}: {angles[name]:5.0f} deg")
     if posture:
         if not np.isnan(posture.get("vertical_excursion", np.nan)):
-            lines.append(f"escursione verticale: {posture['vertical_excursion']:.2f}")
+            lines.append(f"vertical excursion: {posture['vertical_excursion']:.2f}")
         if not np.isnan(posture.get("activity_ratio", np.nan)):
-            lines.append(f"tempo in movimento: {posture['activity_ratio']*100:4.0f}%")
+            lines.append(f"time in motion: {posture['activity_ratio']*100:4.0f}%")
         if not np.isnan(posture.get("self_touch_ratio", np.nan)):
-            lines.append(f"auto-contatto: {posture['self_touch_ratio']*100:4.0f}%")
+            lines.append(f"self-touch: {posture['self_touch_ratio']*100:4.0f}%")
     if gaze:
         if not np.isnan(gaze.get("yaw", np.nan)):
             lines.append(f"head yaw: {gaze['yaw']:5.0f} deg")
         if gaze.get("attention_target") is not None:
-            lines.append(f"guarda ID {gaze['attention_target']}: {gaze['attention_score']:.2f}")
+            lines.append(f"looking at ID {gaze['attention_target']}: {gaze['attention_score']:.2f}")
         if not np.isnan(gaze.get("mouth_ratio", np.nan)):
-            lines.append(f"apertura bocca: {gaze['mouth_ratio']:.2f}")
+            lines.append(f"mouth opening: {gaze['mouth_ratio']:.2f}")
         if not np.isnan(gaze.get("mouth_rep_power_ratio", np.nan)):
-            lines.append(f"bocca ripetitiva: {gaze['mouth_rep_power_ratio']:.2f} @ {gaze['mouth_rep_freq_hz']:.1f}Hz")
+            lines.append(f"mouth repetitiveness: {gaze['mouth_rep_power_ratio']:.2f} @ {gaze['mouth_rep_freq_hz']:.1f}Hz")
         if not np.isnan(gaze.get("yaw_rep_power_ratio", np.nan)):
-            lines.append(f"scuotimento testa: {gaze['yaw_rep_power_ratio']:.2f} @ {gaze['yaw_rep_freq_hz']:.1f}Hz")
+            lines.append(f"head shake: {gaze['yaw_rep_power_ratio']:.2f} @ {gaze['yaw_rep_freq_hz']:.1f}Hz")
         if not np.isnan(gaze.get("pitch_rep_power_ratio", np.nan)):
-            lines.append(f"annuimento testa: {gaze['pitch_rep_power_ratio']:.2f} @ {gaze['pitch_rep_freq_hz']:.1f}Hz")
+            lines.append(f"head nod: {gaze['pitch_rep_power_ratio']:.2f} @ {gaze['pitch_rep_freq_hz']:.1f}Hz")
         if not np.isnan(gaze.get("blink_rate_per_min", np.nan)):
             lines.append(f"blink/min: {gaze['blink_rate_per_min']:.0f}")
         left_b, right_b = gaze.get("left_eyebrow_raise", np.nan), gaze.get("right_eyebrow_raise", np.nan)
         if not (np.isnan(left_b) and np.isnan(right_b)):
-            lines.append(f"sopracciglia: sx={left_b:.2f} dx={right_b:.2f}")
+            lines.append(f"eyebrows: L={left_b:.2f} R={right_b:.2f}")
     if hands_info:
         for side, info in hands_info.items():
-            lines.append(f"mano {side}: apertura={info['openness']:.2f}")
+            lines.append(f"{side} hand: openness={info['openness']:.2f}")
             if not np.isnan(info.get("rep_power_ratio", np.nan)):
-                lines.append(f"  dita ripetitive: {info['rep_power_ratio']:.2f} @ {info['rep_freq_hz']:.1f}Hz")
+                lines.append(f"  finger repetitiveness: {info['rep_power_ratio']:.2f} @ {info['rep_freq_hz']:.1f}Hz")
     return lines
 
 
@@ -474,66 +474,66 @@ def run_live(source, fps: float, model_name: str, device: str,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Riconoscimento realtime dei movimenti (Canon R8 / webcam / video)")
-    parser.add_argument("--source", default="0", help="Indice webcam (es. 0) o percorso file video")
-    parser.add_argument("--fps", type=float, default=30.0, help="Frame rate atteso della sorgente")
-    parser.add_argument("--model", default="yolov8n-pose.pt", help="Modello YOLO-pose Ultralytics")
+    parser = argparse.ArgumentParser(description="Real-time movement recognition (Canon R8 / webcam / video)")
+    parser.add_argument("--source", default="0", help="Webcam index (e.g. 0) or video file path")
+    parser.add_argument("--fps", type=float, default=30.0, help="Expected frame rate of the source")
+    parser.add_argument("--model", default="yolo26n-pose.pt", help="Ultralytics YOLO-pose model")
     parser.add_argument("--device", default="mps", help="mps | cpu | cuda")
-    parser.add_argument("--window-seconds", type=float, default=3.0, help="Finestra rolling per le metriche")
-    parser.add_argument("--blur-faces", action="store_true", help="Offusca i volti in tempo reale (privacy)")
-    parser.add_argument("--out", default="live_session.csv", help="CSV di output")
-    parser.add_argument("--no-window", action="store_true", help="Esegui senza finestra video (solo logging)")
+    parser.add_argument("--window-seconds", type=float, default=3.0, help="Rolling window for the metrics")
+    parser.add_argument("--blur-faces", action="store_true", help="Blur faces in real time (privacy)")
+    parser.add_argument("--out", default="live_session.csv", help="Output CSV")
+    parser.add_argument("--no-window", action="store_true", help="Run without a video window (logging only)")
     parser.add_argument("--with-gaze", action="store_true",
-                         help="Abilita head-pose + proxy di attenzione condivisa (richiede mediapipe + face_landmarker.task)")
+                         help="Enable head pose + shared-attention proxy (requires mediapipe + face_landmarker.task)")
     parser.add_argument("--face-model", default="face_landmarker.task",
-                         help="Percorso del modello MediaPipe FaceLandmarker")
+                         help="Path to the MediaPipe FaceLandmarker model")
     parser.add_argument("--with-hands", action="store_true",
-                         help="Abilita tracking mani a livello di dita (richiede mediapipe + hand_landmarker.task)")
+                         help="Enable finger-level hand tracking (requires mediapipe + hand_landmarker.task)")
     parser.add_argument("--hand-model", default="hand_landmarker.task",
-                         help="Percorso del modello MediaPipe HandLandmarker")
+                         help="Path to the MediaPipe HandLandmarker model")
     parser.add_argument("--activity-threshold", type=float, default=40.0,
-                         help="Soglia di energia di movimento sopra la quale un frame conta come 'attivo' (va calibrata)")
+                         help="Movement-energy threshold above which a frame counts as 'active' (needs calibration)")
     parser.add_argument("--self-touch-threshold", type=float, default=0.5,
-                         help="Soglia (0-1) sopra la quale un polso vicino alla testa conta come auto-contatto")
+                         help="Threshold (0-1) above which a wrist near the head counts as self-touch")
     parser.add_argument("--blink-ear-threshold", type=float, default=0.2,
-                         help="Soglia di Eye Aspect Ratio sotto la quale l'occhio è considerato chiuso (richiede --with-gaze)")
+                         help="Eye Aspect Ratio threshold below which the eye is considered closed (requires --with-gaze)")
     parser.add_argument("--target-track-id", type=int, default=None,
-                         help="Se impostato, calcola i segnali di volto/mani (blink, bocca, "
-                              "sopracciglia, scuotimento/annuimento testa, dita) solo per questo "
-                              "track_id, ignorando altre persone nell'inquadratura (es. il "
-                              "caregiver). Lo scheletro/postura restano tracciati per tutti. "
-                              "L'ID di ogni persona viene stampato a console la prima volta che "
-                              "compare — fai una prova senza questo flag per scoprirlo, poi "
-                              "rilancia con --target-track-id N.")
+                         help="If set, compute face/hand signals (blink, mouth, "
+                              "eyebrows, head shake/nod, fingers) only for this "
+                              "track_id, ignoring other people in frame (e.g. the "
+                              "caregiver). Skeleton/posture keep being tracked for everyone. "
+                              "Each person's ID is printed to the console the first time they "
+                              "appear — run once without this flag to find it out, then "
+                              "relaunch with --target-track-id N.")
     parser.add_argument("--with-reid", action="store_true",
-                         help="Abilita la re-identificazione via firma antropometrica (vedi "
-                              "reid.py): se una persona esce dall'inquadratura e rientra con un "
-                              "nuovo track_id (es. dopo un cambio vestiti o un'assenza), prova a "
-                              "ripristinare il suo person_id precedente invece di trattarla come "
-                              "nuova. Il merge, quando avviene, e' stampato a console e loggato.")
+                         help="Enable re-identification via anthropometric signature (see "
+                              "reid.py): if a person leaves the frame and re-enters with a "
+                              "new track_id (e.g. after a change of clothes or an absence), try to "
+                              "restore their previous person_id instead of treating them as "
+                              "new. When a merge happens, it's printed to the console and logged.")
     parser.add_argument("--reid-max-lost-seconds", type=float, default=30.0,
-                         help="Per quanti secondi una persona scomparsa resta in memoria come "
-                              "candidata al rientro prima di essere dimenticata (richiede --with-reid).")
+                         help="How many seconds a disappeared person stays in memory as a "
+                              "re-entry candidate before being forgotten (requires --with-reid).")
     parser.add_argument("--reid-max-signature-dist", type=float, default=0.12,
-                         help="Soglia di distanza tra firme sotto la quale un rientro viene "
-                              "considerato un match; valore prudente, non validato su dati reali "
-                              "(richiede --with-reid).")
+                         help="Distance threshold between signatures below which a re-entry is "
+                              "considered a match; a conservative value, not validated on real "
+                              "data (requires --with-reid).")
     parser.add_argument("--reid-min-signature-frames", type=int, default=15,
-                         help="Numero minimo di frame validi per calcolare una firma affidabile "
-                              "(richiede --with-reid).")
+                         help="Minimum number of valid frames to compute a reliable signature "
+                              "(requires --with-reid).")
     parser.add_argument("--reid-color-weight", type=float, default=0.5,
-                         help="Quanto il colore di maglia/pantaloni puo' 'scontare' la distanza "
-                              "tra proporzioni corporee quando i vestiti sembrano gli stessi "
-                              "(0=colore ignorato, come prima; 1=massimo effetto). Non puo' mai "
-                              "bloccare un match valido sulle sole proporzioni se i vestiti "
-                              "risultano diversi (richiede --with-reid).")
+                         help="How much the shirt/pants/hair color can 'discount' the distance "
+                              "between body proportions when clothing looks the same "
+                              "(0=color ignored, as before; 1=maximum effect). Can never "
+                              "block a match that's already valid on proportions alone if "
+                              "clothing looks different (requires --with-reid).")
     parser.add_argument("--with-chuv-features", action="store_true",
-                         help="Aggiunge al CSV le stesse feature (angoli, distanze, simmetria, "
-                              "centro di massa, velocita'/accelerazione) calcolate dal "
-                              "repository CHUV (Video-Annotation-System), qui ricalcolate in "
-                              "tempo reale su COCO-17/YOLO invece di BODY-25/SAM3 (vedi "
-                              "chuv_features.py per i dettagli e cosa NON viene replicato). "
-                              "Colonne con prefisso 'chuv_'.")
+                         help="Add to the CSV the same features (angles, distances, symmetry, "
+                              "center of mass, velocity/acceleration) computed by the "
+                              "reference pipeline (Video-Annotation-System), recomputed here in "
+                              "real time on COCO-17/YOLO instead of BODY-25/SAM3 (see "
+                              "chuv_features.py for details and what's NOT replicated). "
+                              "Columns prefixed with 'chuv_'.")
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source

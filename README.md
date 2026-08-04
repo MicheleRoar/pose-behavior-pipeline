@@ -2,7 +2,7 @@
 
 Real-time and batch pipeline for extracting quantitative behavioural
 markers from interaction video, using multi-person pose estimation
-(YOLO-pose + ByteTrack) and time-series feature engineering on keypoints.
+(YOLO26-pose + ByteTrack) and time-series feature engineering on keypoints.
 Runs on Apple Silicon (MPS, no CUDA) as a fast-iterating companion to a
 CUDA/SAM3-based production pipeline for video-based child neurodevelopment
 research — new modules and re-identification strategies get prototyped and
