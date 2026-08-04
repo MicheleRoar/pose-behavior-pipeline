@@ -34,6 +34,7 @@ on hold.
 pose-behavior-pipeline/
 ├── src/
 │   ├── seg_estimation.py  # YOLO26-seg + ByteTrack wrapper (ACTIVE, silhouettes only)
+│   ├── seg_reid.py        # hard-capped id linking for the segmentation pipeline
 │   ├── segmentation_demo.py      # main CLI right now: overlay + CSV, no keypoints
 │   ├── track_stability_check.py  # diagnostic: id count/lifespan, no overlay/CSV
 │   ├── tracking_common.py # shared max_people cap logic
@@ -78,6 +79,16 @@ churn (overhead camera, fast motion, artificial lighting) — see that file
 for details. Keep `--conf-threshold` at or below 0.1: ByteTrack's own
 low-confidence recovery stage expects to see weak detections, a higher
 value strips them out first.
+
+For a small, certain headcount (1-2 people), `--with-seg-reid` goes
+further: it links every raw ByteTrack id to a fixed pool of `--max-people`
+identities (position/color/shape of the silhouette, see `seg_reid.py`),
+guaranteeing — not just discouraging — that no more than `--max-people`
+ids are ever created in the whole session. Unlike `reid.py`'s optional
+`max_people` fallback, there's no escape valve here: when the cap is hit,
+an unmatched track is always bound to the closest known identity, even on
+a weak signal. Defensible specifically because the headcount is small and
+certain; read `seg_reid.py`'s docstring for the trade-off this accepts.
 
 **Pose-based pipeline (on hold — keypoints, all behavioural features):**
 
