@@ -29,7 +29,9 @@ pose-behavior-pipeline/
 │   ├── anonymize.py       # face blurring
 │   ├── viz.py              # overlay drawing
 │   ├── pipeline.py        # batch CLI (recorded video)
-│   └── live_demo.py       # real-time CLI (Canon R8 / webcam)
+│   ├── live_demo.py       # real-time CLI (Canon R8 / webcam)
+│   └── track_stability_check.py  # diagnostic: id churn with a segmentation
+│                                  # model instead of pose, no keypoints
 └── demo/                  # camera-free tests for every module above
 ```
 
