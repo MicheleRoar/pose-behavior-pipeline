@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
 from keypoints import KP
-from reid import ReIdentifier
+from reid import ReIdentifier, SIGNATURE_COLS, compute_signature_frame
 
 N_JOINTS = 17  # schema COCO-17
 
@@ -74,6 +74,68 @@ PERSON_C = dict(shoulder_w=0.60, hip_w=0.52, upper_arm=0.42, forearm=0.38, thigh
 
 FPS = 30.0
 CONF = np.ones(N_JOINTS)  # confidenza piena su tutti i giunti, non e' oggetto di questo test
+
+
+def head_segments_computed_correctly():
+    """Verifica unitaria dei due segmenti-testa (eye_to_eye/ear_to_ear)
+    aggiunti alla firma: `make_skeleton` posiziona gli occhi a +-3 e le
+    orecchie a +-6 dal centro, quindi ci si attende 6/torso e 12/torso."""
+    kxy = make_skeleton(**PERSON_A, torso=100.0, tx=0, ty=0, jitter=0.0, rng=None)
+    sig = compute_signature_frame(kxy)
+    eye_val = sig[SIGNATURE_COLS.index("eye_to_eye")]
+    ear_val = sig[SIGNATURE_COLS.index("ear_to_ear")]
+    assert np.isclose(eye_val, 6.0 / 100.0, atol=1e-6), f"eye_to_eye atteso 0.06, trovato {eye_val}"
+    assert np.isclose(ear_val, 12.0 / 100.0, atol=1e-6), f"ear_to_ear atteso 0.12, trovato {ear_val}"
+    print(f"Segmenti testa: eye_to_eye={eye_val:.3f}, ear_to_ear={ear_val:.3f} — OK")
+
+
+def noisy_reentry_recovers_via_retry():
+    """Verifica che il match NON venga tentato una volta sola: un rientro
+    con i primi frame rumorosi (persona ancora ai bordi dell'inquadratura,
+    proporzioni distorte) non deve restare "perso per sempre" -- una volta
+    che la finestra scorrevole si ripulisce con frame corretti, il match
+    deve comunque scattare, senza bisogno di un nuovo track_id."""
+    reid = ReIdentifier(max_lost_seconds=30.0, max_signature_dist=0.12, min_signature_frames=15)
+    rng = np.random.default_rng(42)
+    frame_t = 0
+
+    for _ in range(50):
+        now = frame_t / FPS
+        kxy = make_skeleton(**PERSON_A, tx=0, ty=0, jitter=0.01, rng=rng)
+        resolved = reid.resolve([(1, kxy, CONF)], now)
+        person_id_initial = resolved[0][0]
+        frame_t += 1
+
+    for _ in range(100):
+        frame_t += 1  # A fuori dall'inquadratura
+
+    distorted = dict(PERSON_A)
+    distorted["shoulder_w"] *= 1.45
+    distorted["hip_w"] /= 1.45
+    distorted["upper_arm"] *= 1.45
+    distorted["thigh"] /= 1.45
+
+    matched_at = None
+    for i in range(30):
+        now = frame_t / FPS
+        # primi 10 frame del rientro: proporzioni rumorose (persona ancora
+        # ai bordi dell'inquadratura); dal frame 11 in poi: pulite.
+        params = distorted if i < 10 else PERSON_A
+        kxy = make_skeleton(**params, tx=0, ty=0, jitter=0.01, rng=rng)
+        resolved = reid.resolve([(5, kxy, CONF)], now)
+        if matched_at is None and resolved[0][0] == person_id_initial:
+            matched_at = i
+        frame_t += 1
+
+    assert matched_at is not None, "il rientro non e' mai stato ri-associato, nemmeno dopo che i frame si sono ripuliti"
+    assert matched_at >= 10, (
+        f"il match e' scattato al frame {matched_at}, prima che i dati rumorosi (frame 0-9) "
+        "potessero uscire dalla finestra -- suggerisce che la soglia sia troppo permissiva "
+        "per essere un test valido, non che il retry funzioni davvero"
+    )
+    print(f"Rientro rumoroso poi pulito: ri-associato al frame relativo {matched_at} "
+          "(il tentativo iniziale a 15 frame, con dati ancora rumorosi, fallisce; "
+          "il retry sui frame successivi, piu' puliti, recupera il match) — OK")
 
 
 def main():
@@ -150,6 +212,9 @@ def main():
     print(f"Evento di merge registrato: raw_track={event.raw_track_id}, "
           f"provvisorio={event.provisional_person_id} -> "
           f"ripristinato={event.matched_person_id}, distanza={event.distance:.3f}")
+
+    head_segments_computed_correctly()
+    noisy_reentry_recovers_via_retry()
 
     print("\nVerifica completata senza errori: re-identificazione in tempo reale "
           "funziona su un'uscita/rientro simulata, senza confondere una persona estranea.")

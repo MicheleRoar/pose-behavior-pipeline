@@ -39,6 +39,7 @@ import numpy as np
 from keypoints import KP
 from reid import (
     ReIdentifier, COLOR_SEGMENTS, compute_color_signature, color_similarity,
+    hair_corners,
 )
 from reid_check import make_skeleton, PERSON_A
 
@@ -47,14 +48,18 @@ CONF = np.ones(17)
 CANVAS = (400, 700, 3)  # (h, w, 3)
 
 
-def draw_person_patches(kxy: np.ndarray, shirt_bgr: tuple, pants_bgr: tuple) -> np.ndarray:
-    """Frame sintetico (sfondo grigio) con maglia/pantaloni colorati nella
-    stessa regione campionata da `compute_color_signature`."""
+def draw_person_patches(kxy: np.ndarray, shirt_bgr: tuple, pants_bgr: tuple,
+                         hair_bgr: tuple | None = None) -> np.ndarray:
+    """Frame sintetico (sfondo grigio) con maglia/pantaloni/capelli colorati
+    nella stessa regione campionata da `compute_color_signature`."""
     frame = np.full(CANVAS, 128, dtype=np.uint8)
     for region, color in (("shirt", shirt_bgr), ("pants", pants_bgr)):
         corners = COLOR_SEGMENTS[region]
         pts = np.round(kxy[[KP[c] for c in corners]]).astype(np.int32)
         cv2.fillPoly(frame, [pts], color)
+    if hair_bgr is not None:
+        pts = np.round(hair_corners(kxy)).astype(np.int32)
+        cv2.fillPoly(frame, [pts], hair_bgr)
     return frame
 
 
@@ -67,28 +72,31 @@ def expected_hs(bgr: tuple) -> tuple[float, float]:
 RED = (0, 0, 220)      # BGR
 BLUE = (200, 30, 0)
 GREEN = (0, 180, 0)
+BROWN = (19, 69, 139)  # proxy colore capelli
 
 
 def part1_signature_matches_drawn_color():
     kxy = make_skeleton(**PERSON_A, tx=300, ty=150, jitter=0.0, rng=None)
-    frame = draw_person_patches(kxy, RED, BLUE)
+    frame = draw_person_patches(kxy, RED, BLUE, hair_bgr=BROWN)
     sig = compute_color_signature(frame, kxy)
 
     exp_shirt = expected_hs(RED)
     exp_pants = expected_hs(BLUE)
+    exp_hair = expected_hs(BROWN)
     assert np.allclose(sig[:2], exp_shirt, atol=0.02), f"shirt {sig[:2]} vs atteso {exp_shirt}"
-    assert np.allclose(sig[2:], exp_pants, atol=0.02), f"pants {sig[2:]} vs atteso {exp_pants}"
+    assert np.allclose(sig[2:4], exp_pants, atol=0.02), f"pants {sig[2:4]} vs atteso {exp_pants}"
+    assert np.allclose(sig[4:], exp_hair, atol=0.02), f"hair {sig[4:]} vs atteso {exp_hair}"
     print(f"Parte 1: colore campionato maglia={sig[:2]} (atteso {exp_shirt}), "
-          f"pantaloni={sig[2:]} (atteso {exp_pants}) — OK")
+          f"pantaloni={sig[2:4]} (atteso {exp_pants}), capelli={sig[4:]} (atteso {exp_hair}) — OK")
 
 
 def part2_color_similarity_sane():
-    a = np.array([*expected_hs(RED), *expected_hs(BLUE)])
-    b = np.array([*expected_hs(RED), *expected_hs(BLUE)])
+    a = np.array([*expected_hs(RED), *expected_hs(BLUE), *expected_hs(BROWN)])
+    b = np.array([*expected_hs(RED), *expected_hs(BLUE), *expected_hs(BROWN)])
     same = color_similarity(a, b)
     assert same is not None and same > 0.98, f"colore identico dovrebbe dare similarita' ~1, trovato {same}"
 
-    c = np.array([*expected_hs(GREEN), *expected_hs(BLUE)])
+    c = np.array([*expected_hs(GREEN), *expected_hs(BLUE), *expected_hs(BROWN)])
     diff = color_similarity(a, c)
     assert diff is not None and diff < same, "maglia rossa vs verde deve avere similarita' minore di rossa vs rossa"
     print(f"Parte 2: similarita' stesso colore={same:.3f}, maglia rossa-vs-verde={diff:.3f} — OK")
@@ -111,7 +119,7 @@ def _run_reentry_scenario(*, reentry_scale: float, reentry_shirt: tuple, reentry
     for _ in range(20):
         now = frame_t / FPS
         kxy = make_skeleton(**PERSON_A, tx=300, ty=150, jitter=0.01, rng=rng)
-        frame = draw_person_patches(kxy, RED, BLUE) if use_color else None
+        frame = draw_person_patches(kxy, RED, BLUE, hair_bgr=BROWN) if use_color else None
         resolved = reid.resolve([(1, kxy, CONF)], now, frame=frame)
         person_id_initial = resolved[0][0]
         frame_t += 1
@@ -129,7 +137,7 @@ def _run_reentry_scenario(*, reentry_scale: float, reentry_shirt: tuple, reentry
     for _ in range(15):
         now = frame_t / FPS
         kxy = make_skeleton(**distorted, tx=300, ty=150, jitter=0.01, rng=rng2)
-        frame = draw_person_patches(kxy, reentry_shirt, reentry_pants) if use_color else None
+        frame = draw_person_patches(kxy, reentry_shirt, reentry_pants, hair_bgr=BROWN) if use_color else None
         resolved = reid.resolve([(2, kxy, CONF)], now, frame=frame)
         person_id_reentry = resolved[0][0]
         frame_t += 1
@@ -140,7 +148,7 @@ def _run_reentry_scenario(*, reentry_scale: float, reentry_shirt: tuple, reentry
 def part3_color_recovers_noisy_reentry():
     # (a) keypoint rumorosi al rientro, SENZA colore: deve FALLIRE
     initial, reentry = _run_reentry_scenario(
-        reentry_scale=1.45, reentry_shirt=RED, reentry_pants=BLUE, use_color=False)
+        reentry_scale=1.6, reentry_shirt=RED, reentry_pants=BLUE, use_color=False)
     assert reentry != initial, (
         "atteso un fallimento del reid basato solo su proporzioni rumorose "
         f"(person_id_initial={initial}, person_id_reentry={reentry})"
@@ -150,7 +158,7 @@ def part3_color_recovers_noisy_reentry():
 
     # (b) stessi keypoint rumorosi, CON colore (stessi vestiti): deve RIUSCIRE
     initial, reentry = _run_reentry_scenario(
-        reentry_scale=1.45, reentry_shirt=RED, reentry_pants=BLUE, use_color=True)
+        reentry_scale=1.6, reentry_shirt=RED, reentry_pants=BLUE, use_color=True)
     assert reentry == initial, (
         f"atteso match grazie al colore (person_id_initial={initial}, person_id_reentry={reentry})"
     )
