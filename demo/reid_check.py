@@ -211,6 +211,74 @@ def position_signal_recovers_in_place_reentry():
           "la posizione non forza mai un match")
 
 
+def max_people_forces_capacity_reentry():
+    """Sessione 1v1 (max_people=2): A e B presenti insieme (roster al
+    tetto), A esce e rientra con proporzioni troppo distorte E lontano
+    dall'ultima posizione nota -- nessun segnale normale (firma, posizione,
+    colore non passato) porterebbe a un match. Con max_people=2 e B ancora
+    attivo (unico candidato "perso" e' A), il rientro deve comunque essere
+    forzato su A: non puo' trattarsi di una terza persona per definizione.
+    Vedi il controllo negativo in position_signal_recovers_in_place_reentry
+    per lo stesso scenario SENZA max_people, dove il match non scatta."""
+    reid = ReIdentifier(max_lost_seconds=60.0, max_signature_dist=0.12,
+                         min_signature_frames=15, max_people=2)
+    rng_a = np.random.default_rng(11)
+    rng_b = np.random.default_rng(12)
+    frame_t = 0
+
+    # A e B presenti insieme: il roster raggiunge il tetto di 2.
+    by_raw = {}
+    for _ in range(20):
+        now = frame_t / FPS
+        people = [
+            (1, make_skeleton(**PERSON_A, tx=0, ty=0, jitter=0.01, rng=rng_a), CONF),
+            (2, make_skeleton(**PERSON_B, tx=200, ty=0, jitter=0.01, rng=rng_b), CONF),
+        ]
+        resolved = reid.resolve(people, now)
+        by_raw = {1: resolved[0][0], 2: resolved[1][0]}
+        frame_t += 1
+    person_id_a_initial, person_id_b = by_raw[1], by_raw[2]
+
+    # A esce dall'inquadratura, B resta sola.
+    for _ in range(int(FPS * 5)):
+        now = frame_t / FPS
+        reid.resolve([(2, make_skeleton(**PERSON_B, tx=200, ty=0, jitter=0.01, rng=rng_b), CONF)], now)
+        frame_t += 1
+
+    # A rientra: proporzioni troppo distorte per la firma, posizione troppo
+    # lontana per il segnale posizionale, nessun colore passato -- nessun
+    # segnale "onesto" porterebbe a un match.
+    distorted = dict(PERSON_A)
+    distorted["shoulder_w"] *= 1.6
+    distorted["hip_w"] /= 1.6
+    distorted["upper_arm"] *= 1.6
+    distorted["thigh"] /= 1.6
+    far_tx = (MAX_POSITION_DIST_TORSOS + 2) * 100
+
+    rng_a2 = np.random.default_rng(13)
+    person_id_a_reentry = None
+    for _ in range(int(FPS * 3)):  # oltre _PENDING_RETRY_SECONDS, cosi' scatta il fallback forzato
+        now = frame_t / FPS
+        people = [
+            (2, make_skeleton(**PERSON_B, tx=200, ty=0, jitter=0.01, rng=rng_b), CONF),
+            (3, make_skeleton(**distorted, tx=far_tx, ty=0, jitter=0.01, rng=rng_a2), CONF),
+        ]
+        resolved = reid.resolve(people, now)
+        by_raw = {raw_id: pid for (raw_id, *_rest), (pid, *_rest2) in zip(people, resolved)}
+        person_id_a_reentry = by_raw[3]
+        frame_t += 1
+
+    assert person_id_a_reentry == person_id_a_initial, (
+        f"con max_people=2 e roster al tetto, il rientro doveva essere forzato su A "
+        f"(person_id_a_initial={person_id_a_initial}, person_id_a_reentry={person_id_a_reentry})"
+    )
+    forced_events = [e for e in reid.merge_log if e.forced]
+    assert len(forced_events) == 1, f"atteso esattamente 1 evento forzato, trovati {len(forced_events)}"
+    print(f"max_people=2, rientro senza segnali normali disponibili: "
+          f"person_id iniziale={person_id_a_initial}, al rientro={person_id_a_reentry} "
+          "-> ri-associato FORZATO (roster al tetto, unico candidato perso)")
+
+
 def main():
     reid = ReIdentifier(max_lost_seconds=30.0, max_signature_dist=0.12, min_signature_frames=15)
     rng_a = np.random.default_rng(1)
@@ -289,6 +357,7 @@ def main():
     head_segments_computed_correctly()
     noisy_reentry_recovers_via_retry()
     position_signal_recovers_in_place_reentry()
+    max_people_forces_capacity_reentry()
 
     print("\nVerifica completata senza errori: re-identificazione in tempo reale "
           "funziona su un'uscita/rientro simulata, senza confondere una persona estranea.")

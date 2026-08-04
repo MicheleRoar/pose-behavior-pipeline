@@ -30,12 +30,14 @@ from pose_estimation import PoseTracker
 
 def run_pipeline(source, fps: float, model_name: str = "yolo26n-pose.pt",
                   device: str = "mps", conf_threshold: float = 0.1,
-                  tracker_config: str = "bytetrack.yaml") -> pd.DataFrame:
+                  tracker_config: str = "bytetrack.yaml",
+                  max_people: int | None = None) -> pd.DataFrame:
     """Esegue l'intera pipeline e restituisce una tabella tidy con una riga
     per (frame, persona), pronta per l'analisi in pandas.
     """
     tracker = PoseTracker(model_name=model_name, device=device,
-                           conf_threshold=conf_threshold, tracker=tracker_config)
+                           conf_threshold=conf_threshold, tracker=tracker_config,
+                           max_people=max_people)
 
     # Buffer per accumulare la sequenza di keypoint di ciascun track_id
     buffers: dict[int, list[np.ndarray]] = defaultdict(list)
@@ -90,6 +92,11 @@ def main():
                               "(overhead camera, fast motion, artificial lighting) — longer "
                               "track_buffer and more tolerant thresholds, at the cost of a "
                               "slightly higher risk of ID switches on close interaction.")
+    parser.add_argument("--max-people", type=int, default=None,
+                         help="Known headcount for the session (e.g. 2 for a 1v1 child-caregiver "
+                              "session, up to ~10 for a group session). When set, only the "
+                              "N most confident detections per frame are kept, suppressing "
+                              "spurious extra tracks from noise/reflections above that count.")
     parser.add_argument("--out", default="features.csv", help="Output CSV path")
     args = parser.parse_args()
 
@@ -97,7 +104,8 @@ def main():
     source = int(args.source) if args.source.isdigit() else args.source
 
     df = run_pipeline(source, fps=args.fps, model_name=args.model, device=args.device,
-                       conf_threshold=args.conf_threshold, tracker_config=args.tracker)
+                       conf_threshold=args.conf_threshold, tracker_config=args.tracker,
+                       max_people=args.max_people)
     df.to_csv(args.out, index=False)
     print(f"Saved {len(df)} rows to {args.out}")
 

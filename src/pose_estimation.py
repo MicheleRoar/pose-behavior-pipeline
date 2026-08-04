@@ -62,10 +62,20 @@ class PoseTracker:
         oppure "bytetrack_permissive.yaml" per scene con cali di confidenza
         frequenti e non dovuti a vera occlusione — vedi quel file per i
         dettagli sui parametri).
+    max_people : se impostato, limita il numero di persone per frame a
+        questo valore, tenendo solo le detection con confidenza più alta
+        (utile quando si conosce a priori il numero di partecipanti alla
+        sessione, es. 2 per 1v1 bambino-caregiver, o una decina per una
+        sessione di gruppo: sopprime detection spurie da rumore/riflessi/
+        doppie-detection sopra quel numero prima che diventino un track).
+        Non risolve il problema di una persona reale che perde e riprende
+        un ID dopo una vera occlusione — per quello vedi reid.py e
+        bytetrack_permissive.yaml. None (default) = nessun limite.
     """
 
     def __init__(self, model_name: str = "yolo26n-pose.pt", device: str = "mps",
-                 conf_threshold: float = 0.1, tracker: str = "bytetrack.yaml"):
+                 conf_threshold: float = 0.1, tracker: str = "bytetrack.yaml",
+                 max_people: int | None = None):
         # Import ritardato: così il resto del pacchetto (features.py,
         # anonymize.py) resta utilizzabile/testabile anche senza
         # ultralytics/torch installati (utile per test unitari leggeri).
@@ -75,6 +85,7 @@ class PoseTracker:
         self.device = device
         self.conf_threshold = conf_threshold
         self.tracker = tracker
+        self.max_people = max_people
 
     def run(self, source, stream: bool = True):
         """Esegue la pose estimation + tracking sulla sorgente indicata.
@@ -100,9 +111,19 @@ class PoseTracker:
             if r.keypoints is not None and r.boxes is not None and r.boxes.id is not None:
                 kpts_xy = r.keypoints.xy.cpu().numpy()       # (n_people, 17, 2)
                 kpts_conf = r.keypoints.conf.cpu().numpy()   # (n_people, 17)
+                box_conf = r.boxes.conf.cpu().numpy()        # (n_people,) confidenza detection
                 track_ids = r.boxes.id.cpu().numpy().astype(int)
-                for tid, kxy, kconf in zip(track_ids, kpts_xy, kpts_conf):
-                    people.append((int(tid), kxy, kconf))
+
+                order = range(len(track_ids))
+                if self.max_people is not None and len(track_ids) > self.max_people:
+                    # Tiene solo le `max_people` detection più sicure di
+                    # questo frame: sopprime il rumore in eccesso senza
+                    # mai scartare persone reali quando il numero rientra
+                    # nel limite (il filtro non scatta sotto la soglia).
+                    order = np.argsort(-box_conf)[: self.max_people]
+
+                for idx in order:
+                    people.append((int(track_ids[idx]), kpts_xy[idx], kpts_conf[idx]))
             yield FrameResult(frame_index=i, frame=r.orig_img, people=people)
 
 

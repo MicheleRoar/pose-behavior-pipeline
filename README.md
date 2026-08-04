@@ -66,7 +66,13 @@ lighting): use `--tracker bytetrack_permissive.yaml` (longer track memory,
 more tolerant thresholds — see that file for details), keep
 `--conf-threshold` at or below 0.1, and in batch mode try a bigger model
 (`--model yolo26s-pose.pt` or `yolo26m-pose.pt`) since there's no real-time
-constraint.
+constraint. If the session headcount is fixed and known (e.g. 2 for a 1v1
+child-caregiver session, up to ~10 for a group), `--max-people N` caps
+detections per frame to the N most confident, and, with `--with-reid`, once
+N identities are confirmed it forces an unmatched re-entry onto the closest
+missing identity instead of minting a new one — the one deliberate
+exception to reid.py's "discount, never force" rule (see `reid.py` for the
+safety guardrails).
 
 ## Modules, briefly
 

@@ -102,6 +102,30 @@ sommano tra loro -- si prende il PIU' FORTE dei due sconti disponibili,
 non la somma, per evitare che due segnali solo mediocri si accumulino a una
 fiducia che nessuno dei due giustificherebbe da solo.
 
+Segnale opzionale: numero massimo di persone (sessione chiusa)
+------------------------------------------------------------------
+Quando si conosce a priori quante persone possono comparire nella sessione
+(es. 2 per un 1v1 bambino-caregiver, fino a una decina per una sessione di
+gruppo), quel numero diventa un vincolo forte, non solo un altro "sconto":
+se sono gia' state confermate `max_people` identita' distinte e un nuovo
+track non trova match con le soglie normali, NON puo' comunque trattarsi di
+un'undicesima persona -- deve per forza essere una delle persone gia' note
+che al momento risulta "persa". In questo caso, e solo in questo caso, si
+FORZA il merge con la persona persa piu' vicina per firma (anche sopra
+`max_signature_dist`), invece di rinunciare e coniare un nuovo person_id.
+
+Due paletti tengono la forzatura sicura: (1) vale la stessa regola di
+causalita' delle altre corrispondenze -- non si puo' forzare un match con
+qualcuno che era gia' visibile insieme a questo track sotto un altro id;
+(2) si forza SOLO contro persone attualmente "perse" (fuori inquadratura),
+mai contro persone attive in quel momento -- due persone visibili
+contemporaneamente restano sempre due identita' distinte, il tetto massimo
+non le fonde mai. Se il tetto e' raggiunto ma non c'e' nessuno "perso" da
+recuperare, si rinuncia comunque a forzare (nessun candidato sensato) e si
+conia un nuovo person_id stampando un avviso -- segnale che il conteggio
+configurato potrebbe essere sbagliato o che una detection spuria ha
+superato il filtro `max_people` di `pose_estimation.py`.
+
 Limiti onesti
 -------------
   - La firma ha bisogno di un numero minimo di frame con confidenza
@@ -123,6 +147,11 @@ Limiti onesti
   - Il merge, una volta deciso, e' applicato automaticamente (non c'e' modo
     di chiedere conferma a un umano in tempo reale) -- per questo l'evento
     resta sempre nel log, invece di sparire silenziosamente.
+  - `max_people` e' una forzatura vera (unica eccezione a "mai forzare" nel
+    modulo): se il numero configurato e' sbagliato (es. un adulto in piu'
+    entra brevemente in scena, fuori dal conteggio previsto) il merge
+    forzato puo' attribuire i suoi frame alla persona persa sbagliata --
+    va usato solo quando il numero di partecipanti e' davvero fisso e noto.
 """
 
 from __future__ import annotations
@@ -327,6 +356,7 @@ class _MergeEvent:
     frame_time: float
     color_used: bool = False
     position_used: bool = False
+    forced: bool = False  # match forzato da max_people (vedi docstring del modulo)
 
 
 class ReIdentifier:
@@ -357,12 +387,14 @@ class ReIdentifier:
                  max_signature_dist: float = 0.12,
                  min_signature_frames: int = 15,
                  color_bonus_weight: float = 0.5,
-                 position_bonus_weight: float = 0.5):
+                 position_bonus_weight: float = 0.5,
+                 max_people: int | None = None):
         self.max_lost_seconds = max_lost_seconds
         self.max_signature_dist = max_signature_dist
         self.min_signature_frames = min_signature_frames
         self.color_bonus_weight = color_bonus_weight
         self.position_bonus_weight = position_bonus_weight
+        self.max_people = max_people
 
         self.raw_to_person: dict[int, int] = {}
         self.buffers: dict[int, deque] = {}
@@ -412,24 +444,29 @@ class ReIdentifier:
                 match = self._find_lost_match(self.buffers[person_id], self.color_buffers[person_id],
                                                self.pending_since[raw_id], now,
                                                self.last_position.get(person_id))
-                if match is None:
-                    if now - self.pending_since[raw_id] > self._PENDING_RETRY_SECONDS:
-                        # rinuncia: oltre questa persona non viene piu'
-                        # ricontrollata contro le identita' perse (vedi
-                        # _PENDING_RETRY_SECONDS)
-                        self.pending_check.discard(raw_id)
-                else:
+                if match is None and now - self.pending_since[raw_id] > self._PENDING_RETRY_SECONDS:
+                    # rinuncia al match normale: prima di coniare un nuovo
+                    # person_id per sempre, se e' impostato un tetto noto di
+                    # persone e quel tetto e' gia' raggiunto, si prova un
+                    # ultimo tentativo forzato (vedi "Segnale opzionale:
+                    # numero massimo di persone" nel docstring del modulo).
                     self.pending_check.discard(raw_id)
-                    matched_person_id, dist, color_used, position_used = match
+                    if self.max_people is not None:
+                        match = self._force_match_at_capacity(
+                            self.buffers[person_id], self.pending_since[raw_id], person_id)
+                if match is not None:
+                    self.pending_check.discard(raw_id)
+                    matched_person_id, dist, color_used, position_used, forced = match
                     self.merge_log.append(_MergeEvent(
                         raw_track_id=raw_id, provisional_person_id=person_id,
                         matched_person_id=matched_person_id, distance=dist, frame_time=now,
-                        color_used=color_used, position_used=position_used,
+                        color_used=color_used, position_used=position_used, forced=forced,
                     ))
                     assist = ", ".join(s for s, used in (("color", color_used), ("position", position_used)) if used)
+                    tag = "FORCED (max_people reached)" if forced else (f'{assist}-assisted' if assist else None)
                     print(f"[reid] track {raw_id}: provisional person_id {person_id} "
                           f"re-matched to person_id {matched_person_id} "
-                          f"(distance={dist:.3f}{f', {assist}-assisted' if assist else ''})")
+                          f"(distance={dist:.3f}{f', {tag}' if tag else ''})")
                     del self.lost[matched_person_id]
                     del self.buffers[person_id]
                     self.color_buffers.pop(person_id, None)
@@ -462,7 +499,7 @@ class ReIdentifier:
     def _find_lost_match(self, buffer: deque, color_buffer: deque,
                           pending_since: float, now: float,
                           current_position: tuple[np.ndarray, float] | None,
-                          ) -> tuple[int, float, bool, bool] | None:
+                          ) -> tuple[int, float, bool, bool, bool] | None:
         median_sig = np.nanmedian(np.array(buffer), axis=0)
         median_color = np.nanmedian(np.array(color_buffer), axis=0) if color_buffer else None
 
@@ -510,8 +547,59 @@ class ReIdentifier:
             if dist < best_dist:
                 best_person_id, best_dist = person_id, dist
                 best_color_used, best_position_used = used_color, used_position
-        return ((best_person_id, best_dist, best_color_used, best_position_used)
+        return ((best_person_id, best_dist, best_color_used, best_position_used, False)
                 if best_person_id is not None else None)
+
+    def _force_match_at_capacity(self, buffer: deque, pending_since: float,
+                                  pending_person_id: int,
+                                  ) -> tuple[int, float, bool, bool, bool] | None:
+        """Ultimo tentativo, solo quando `max_people` e' impostato: se,
+        SENZA CONTARE la persona provvisoria in valutazione, il numero di
+        identita' note (attive + perse) ha gia' raggiunto il tetto, allora
+        questa non puo' essere una persona in piu' -- deve essere una di
+        quelle attualmente "perse". Sceglie la piu' vicina per firma anche
+        sopra `max_signature_dist` (vedi "Segnale opzionale: numero massimo
+        di persone" nel docstring del modulo). Non forza mai contro persone
+        attualmente attive, solo contro quelle perse, e rispetta la stessa
+        regola di causalita' dei match normali. Nessun candidato idoneo ->
+        None (si rinuncia, non si forza a vuoto).
+
+        Il conteggio esclude deliberatamente `pending_person_id`: se non lo
+        facesse, anche la prima apparizione in assoluto di una persona
+        genuinamente nuova (es. la seconda di una sessione 1v1, mai persa
+        da nessuno) scatterebbe come "al tetto" appena il suo stesso
+        retry scade, rischiando un merge forzato sbagliato con chiunque
+        risulti perso in quel momento -- il tetto deve riferirsi a QUANTE
+        ALTRE identita' esistono gia', non contare se stessa.
+        """
+        roster_size = len((set(self.raw_to_person.values()) | set(self.lost.keys()))
+                           - {pending_person_id})
+        if roster_size < self.max_people:
+            return None
+        if not self.lost:
+            print(f"[reid] warning: max_people={self.max_people} raggiunto ma nessuna "
+                  f"persona 'persa' da recuperare -- conio comunque un nuovo person_id "
+                  f"(controlla il numero configurato, o una detection spuria ha superato "
+                  f"il filtro max_people di pose_estimation.py)")
+            return None
+
+        median_sig = np.nanmedian(np.array(buffer), axis=0)
+        best_person_id, best_dist = None, None
+        for person_id, lost in self.lost.items():
+            if lost.lost_time > pending_since:
+                continue  # stessa regola di causalita' dei match normali
+            prop_dist = signature_distance(median_sig, lost.signature)
+            if prop_dist is None:
+                continue
+            if best_dist is None or prop_dist < best_dist:
+                best_person_id, best_dist = person_id, prop_dist
+
+        if best_person_id is None:
+            print(f"[reid] warning: max_people={self.max_people} raggiunto ma nessun "
+                  f"candidato idoneo (regola di causalita') -- conio comunque un nuovo "
+                  f"person_id")
+            return None
+        return (best_person_id, best_dist, False, False, True)
 
     def _retire_disappeared_tracks(self, current_raw_ids: set[int], now: float) -> None:
         gone_raw_ids = [rid for rid in self.raw_to_person if rid not in current_raw_ids]

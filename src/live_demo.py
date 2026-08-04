@@ -140,9 +140,11 @@ def run_live(source, fps: float, model_name: str, device: str,
              reid_min_signature_frames: int = 15,
              reid_color_weight: float = 0.5, reid_position_weight: float = 0.5,
              with_chuv_features: bool = False, conf_threshold: float = 0.1,
-             tracker_config: str = "bytetrack.yaml") -> pd.DataFrame:
+             tracker_config: str = "bytetrack.yaml",
+             max_people: int | None = None) -> pd.DataFrame:
     tracker = PoseTracker(model_name=model_name, device=device,
-                           conf_threshold=conf_threshold, tracker=tracker_config)
+                           conf_threshold=conf_threshold, tracker=tracker_config,
+                           max_people=max_people)
     window_len = max(8, int(window_seconds * fps))
     seen_track_ids: set[int] = set()
 
@@ -165,6 +167,7 @@ def run_live(source, fps: float, model_name: str, device: str,
         min_signature_frames=reid_min_signature_frames,
         color_bonus_weight=reid_color_weight,
         position_bonus_weight=reid_position_weight,
+        max_people=max_people,
     ) if with_reid else None
 
     kpt_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))
@@ -556,6 +559,16 @@ def main():
                               "existing clothes) rather than fully leaving and re-entering the "
                               "frame. Can never block a match that's valid on proportions alone "
                               "(requires --with-reid).")
+    parser.add_argument("--max-people", type=int, default=None,
+                         help="Known headcount for the session (e.g. 2 for a 1v1 child-caregiver "
+                              "session, up to ~10 for a group session). Caps detections per frame "
+                              "to the N most confident (suppresses spurious extra tracks from "
+                              "noise/reflections), and, with --with-reid, once that many identities "
+                              "have been confirmed, forces a re-entering track that finds no normal "
+                              "match to reclaim the closest currently-missing identity instead of "
+                              "minting a new one (it can only be one of the known N people) — the "
+                              "one deliberate exception to reid.py's 'discount, never force' rule, "
+                              "see reid.py docstring for the safety guardrails.")
     parser.add_argument("--with-chuv-features", action="store_true",
                          help="Add to the CSV the same features (angles, distances, symmetry, "
                               "center of mass, velocity/acceleration) computed by the "
@@ -568,6 +581,7 @@ def main():
     source = int(args.source) if args.source.isdigit() else args.source
     run_live(source, fps=args.fps, model_name=args.model, device=args.device,
               conf_threshold=args.conf_threshold, tracker_config=args.tracker,
+              max_people=args.max_people,
               window_seconds=args.window_seconds, blur_faces=args.blur_faces,
               out_csv=args.out, show_window=not args.no_window,
               with_gaze=args.with_gaze, face_model=args.face_model,
