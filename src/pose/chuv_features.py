@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from keypoints import KP
+from pose.keypoints import KP
 
 # ---------------------------------------------------------------------------
 # Keypoint "virtuali" BODY-25 ricostruiti da COCO-17

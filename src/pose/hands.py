@@ -37,7 +37,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from geometry import angle_at
+from pose.geometry import angle_at
 
 WRIST = 0
 FINGER_TIPS = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}

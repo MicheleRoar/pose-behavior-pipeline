@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
-from seg_reid import SegReIdentifier
+from segmentation.seg_reid import SegReIdentifier
 
 FPS = 15.0
 

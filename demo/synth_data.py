@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
-from keypoints import KP
+from pose.keypoints import KP
 
 
 def base_skeleton(center_x: float, center_y: float, scale: float = 1.0) -> np.ndarray:

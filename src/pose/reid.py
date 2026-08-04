@@ -162,8 +162,8 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from keypoints import KP
-from features import torso_length, hip_center
+from pose.keypoints import KP
+from pose.features import torso_length, hip_center
 
 # ---------------------------------------------------------------------------
 # Firma antropometrica (adattata da reid_signature.py, schema COCO-17)

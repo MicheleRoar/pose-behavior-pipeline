@@ -64,7 +64,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from seg_estimation import mask_area, mask_centroid
+from segmentation.seg_estimation import mask_area, mask_centroid
 
 
 def _mask_mean_hs(frame: np.ndarray, poly: np.ndarray) -> tuple[float, float]:

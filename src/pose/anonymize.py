@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import cv2
 
-from keypoints import KP, HEAD_KEYPOINTS
+from pose.keypoints import KP, HEAD_KEYPOINTS
 
 
 def _valid_points(frame_kpts: np.ndarray, conf: np.ndarray | None, names: list[str],

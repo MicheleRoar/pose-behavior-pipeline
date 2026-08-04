@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
-from gaze_head import rotation_matrix_to_euler, euler_to_rotation_matrix, joint_attention_score, bearing_to_target
+from pose.gaze_head import rotation_matrix_to_euler, euler_to_rotation_matrix, joint_attention_score, bearing_to_target
 
 
 def check_rotation_roundtrip():

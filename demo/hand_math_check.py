@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
-from hands import compute_finger_curls, hand_openness, match_hands_to_wrists, FINGER_CURL_TRIPLETS
+from pose.hands import compute_finger_curls, hand_openness, match_hands_to_wrists, FINGER_CURL_TRIPLETS
 
 
 def make_open_hand(origin: np.ndarray) -> np.ndarray:

@@ -24,8 +24,8 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-from features import build_person_features, repetitive_motion_score, symmetry_index
-from pose_estimation import PoseTracker
+from pose.features import build_person_features, repetitive_motion_score, symmetry_index
+from pose.pose_estimation import PoseTracker
 
 
 def run_pipeline(source, fps: float, model_name: str = "yolo26n-pose.pt",
@@ -87,7 +87,7 @@ def main():
                               "low-confidence recovery stage ever sees them, causing unnecessary "
                               "new IDs on confidence dips (e.g. overhead camera, fast motion).")
     parser.add_argument("--tracker", default="bytetrack.yaml",
-                         help="Ultralytics tracker config. Use bytetrack_permissive.yaml for "
+                         help="Ultralytics tracker config. Use configs/bytetrack_permissive.yaml for "
                               "scenes with frequent brief confidence dips without real occlusion "
                               "(overhead camera, fast motion, artificial lighting) — longer "
                               "track_buffer and more tolerant thresholds, at the cost of a "

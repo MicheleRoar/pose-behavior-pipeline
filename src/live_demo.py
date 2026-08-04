@@ -60,19 +60,19 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from features import (
+from pose.features import (
     compute_joint_angles, repetitive_motion_score,
     vertical_excursion, activity_ratio, self_touch_score, torso_length,
 )
-from pose_estimation import PoseTracker
-from anonymize import blur_face
-from viz import (
+from pose.pose_estimation import PoseTracker
+from pose.anonymize import blur_face
+from common.viz import (
     draw_skeleton, draw_text_block, draw_fps, draw_hand, draw_face_signals,
     get_track_color, draw_person_label, text_block_size,
 )
-from keypoints import KP
-from reid import ReIdentifier
-from chuv_features import ChuvFeatureTracker, compute_chuv_features
+from pose.keypoints import KP
+from pose.reid import ReIdentifier
+from pose.chuv_features import ChuvFeatureTracker, compute_chuv_features
 
 
 def head_center(kxy: np.ndarray) -> np.ndarray:
@@ -184,7 +184,7 @@ def run_live(source, fps: float, model_name: str, device: str,
     if with_gaze:
         # Import ritardato: gaze_head richiede mediapipe + il modello
         # face_landmarker.task, non necessari per il resto della pipeline.
-        from gaze_head import (
+        from pose.gaze_head import (
             HeadGazeEstimator, match_faces_to_tracks, joint_attention_score,
             MOUTH_TOP, MOUTH_BOTTOM, MOUTH_LEFT, MOUTH_RIGHT,
             LEFT_EYE_EAR_IDX, RIGHT_EYE_EAR_IDX,
@@ -196,7 +196,7 @@ def run_live(source, fps: float, model_name: str, device: str,
     if with_hands:
         # Import ritardato: hands richiede mediapipe + il modello
         # hand_landmarker.task, non necessari per il resto della pipeline.
-        from hands import HandTracker, match_hands_to_wrists, compute_finger_curls, hand_openness
+        from pose.hands import HandTracker, match_hands_to_wrists, compute_finger_curls, hand_openness
         hand_tracker = HandTracker(model_path=hand_model, num_hands=4)
 
     prev_t = time.time()
@@ -497,7 +497,7 @@ def main():
                               "low-confidence recovery stage ever sees them, causing unnecessary "
                               "new IDs on confidence dips (e.g. overhead camera, fast motion).")
     parser.add_argument("--tracker", default="bytetrack.yaml",
-                         help="Ultralytics tracker config. Use bytetrack_permissive.yaml for "
+                         help="Ultralytics tracker config. Use configs/bytetrack_permissive.yaml for "
                               "scenes with frequent brief confidence dips without real occlusion "
                               "(overhead camera, fast motion, artificial lighting) — longer "
                               "track_buffer and more tolerant thresholds, at the cost of a "

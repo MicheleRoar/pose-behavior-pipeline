@@ -30,8 +30,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from keypoints import KP, LR_PAIRS, JOINT_ANGLE_TRIPLETS
-from geometry import angle_at as _angle_at
+from pose.keypoints import KP, LR_PAIRS, JOINT_ANGLE_TRIPLETS
+from pose.geometry import angle_at as _angle_at
 
 
 def compute_joint_angles(frame_kpts: np.ndarray) -> dict[str, float]:

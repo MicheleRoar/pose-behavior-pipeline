@@ -30,9 +30,9 @@ import numpy as np
 import pandas as pd
 import cv2
 
-from keypoints import KP
-from features import compute_joint_angles, repetitive_motion_score
-from viz import draw_skeleton, draw_text_block, draw_fps
+from pose.keypoints import KP
+from pose.features import compute_joint_angles, repetitive_motion_score
+from common.viz import draw_skeleton, draw_text_block, draw_fps
 from synth_data import make_child_sequence, make_caregiver_sequence
 
 OUT_DIR = Path(__file__).resolve().parent / "demo_outputs"

@@ -15,8 +15,9 @@
 # - match_thresh 0.8 -> 0.7: more permissive IoU association, tolerates the
 #   larger frame-to-frame box jumps typical of fast motion / overhead angles.
 #
-# Use with: PoseTracker(tracker="bytetrack_permissive.yaml") or
-# --tracker bytetrack_permissive.yaml on pipeline.py / live_demo.py.
+# Use with: PoseTracker(tracker="configs/bytetrack_permissive.yaml") or
+# --tracker configs/bytetrack_permissive.yaml on any CLI script (run from
+# the src/ directory).
 # Pair with a lower --conf-threshold (e.g. 0.1): the stock 0.4 default
 # strips out detections in the 0.1-0.25 range before ByteTrack's own
 # low-confidence recovery stage (track_low_thresh) ever sees them.

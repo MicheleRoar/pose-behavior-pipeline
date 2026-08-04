@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
-from gaze_head import (
+from pose.gaze_head import (
     mouth_aspect_ratio, eye_aspect_ratio, mean_eye_aspect_ratio,
     mean_eyebrow_raise,
     MOUTH_TOP, MOUTH_BOTTOM, MOUTH_LEFT, MOUTH_RIGHT,

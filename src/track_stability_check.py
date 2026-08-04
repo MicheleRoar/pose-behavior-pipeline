@@ -30,7 +30,7 @@ qui con quello osservato nel CSV/log della pipeline normale.
 
 Uso:
     python track_stability_check.py --source video.mp4 --fps 15 \
-        --model yolo26s-seg.pt --tracker bytetrack_permissive.yaml \
+        --model yolo26s-seg.pt --tracker configs/bytetrack_permissive.yaml \
         --conf-threshold 0.1 --max-people 2
 """
 
@@ -46,7 +46,7 @@ def run(source, fps: float, model_name: str, device: str, conf_threshold: float,
     # pacchetto resta testabile senza ultralytics/torch installati.
     from ultralytics import YOLO
 
-    from tracking_common import cap_by_confidence
+    from common.tracking_common import cap_by_confidence
 
     model = YOLO(model_name)
     id_frame_count: dict[int, int] = defaultdict(int)
@@ -114,7 +114,7 @@ def main():
                          help="Stessa raccomandazione di pose_estimation.py: tenere a o "
                               "sotto track_low_thresh (0.1 di default in bytetrack.yaml)")
     parser.add_argument("--tracker", default="bytetrack.yaml",
-                         help="Config tracker Ultralytics, es. bytetrack_permissive.yaml")
+                         help="Config tracker Ultralytics, es. configs/bytetrack_permissive.yaml")
     parser.add_argument("--max-people", type=int, default=None,
                          help="Come in pose_estimation.py: tiene solo le N detection piu' "
                               "sicure per frame, se il numero di partecipanti e' noto")

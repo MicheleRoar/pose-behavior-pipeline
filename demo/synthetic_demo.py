@@ -29,7 +29,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from features import (
+from pose.features import (
     build_person_features, symmetry_index, repetitive_motion_score,
     proximity_series, windowed_synchrony,
 )

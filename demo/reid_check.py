@@ -20,8 +20,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
-from keypoints import KP
-from reid import (
+from pose.keypoints import KP
+from pose.reid import (
     ReIdentifier, SIGNATURE_COLS, compute_signature_frame,
     MAX_POSITION_DIST_TORSOS,
 )

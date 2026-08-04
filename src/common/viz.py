@@ -13,7 +13,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from keypoints import KP, SKELETON_EDGES
+from pose.keypoints import KP, SKELETON_EDGES
 
 # Palette di colori distinti (BGR, come OpenCV) assegnati ciclicamente per
 # track_id, cosi' ogni persona nell'inquadratura ha un colore diverso e
@@ -124,7 +124,7 @@ def draw_hand(frame: np.ndarray, hand_xy: np.ndarray, color: tuple[int, int, int
     Import di HAND_CONNECTIONS ritardato per evitare un import pesante di
     `hands.py` (e quindi di mediapipe) quando non serve.
     """
-    from hands import HAND_CONNECTIONS
+    from pose.hands import HAND_CONNECTIONS
 
     for a_idx, b_idx in HAND_CONNECTIONS:
         a, b = hand_xy[a_idx], hand_xy[b_idx]

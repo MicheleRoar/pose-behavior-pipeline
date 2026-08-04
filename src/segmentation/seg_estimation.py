@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from tracking_common import cap_by_confidence
+from common.tracking_common import cap_by_confidence
 
 COCO_PERSON_CLASS_ID = 0
 
@@ -69,7 +69,7 @@ class SegTracker:
         pose_estimation.py (tenere a o sotto track_low_thresh di ByteTrack,
         0.1 di default in bytetrack.yaml).
     tracker : config di tracking Ultralytics ("bytetrack.yaml" di default,
-        oppure "bytetrack_permissive.yaml" per scene difficili).
+        oppure "configs/bytetrack_permissive.yaml" per scene difficili).
     max_people : come in pose_estimation.py, tiene solo le N detection piu'
         sicure per frame quando il numero di partecipanti alla sessione e'
         noto (vedi pose_estimation.py per il razionale completo).

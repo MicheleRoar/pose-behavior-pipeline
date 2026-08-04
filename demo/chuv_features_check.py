@@ -17,8 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
-from keypoints import KP
-from chuv_features import (
+from pose.keypoints import KP
+from pose.chuv_features import (
     normalize_keypoints, compute_derived_features, ChuvFeatureTracker,
     compute_chuv_features,
 )

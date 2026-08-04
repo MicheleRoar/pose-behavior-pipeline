@@ -12,7 +12,7 @@ completo e il piano).
 Uso, su un video gia' registrato:
 
     python segmentation_demo.py --source video.mp4 --fps 15 \\
-        --model yolo26s-seg.pt --tracker bytetrack_permissive.yaml \\
+        --model yolo26s-seg.pt --tracker configs/bytetrack_permissive.yaml \\
         --conf-threshold 0.1 --max-people 2 --out session_seg.csv
 
 Con --no-window elabora senza aprire una finestra (piu' veloce, utile per
@@ -29,9 +29,9 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from seg_estimation import SegTracker, mask_area, mask_centroid
-from seg_reid import SegReIdentifier
-from viz import draw_fps, draw_person_label, get_track_color
+from segmentation.seg_estimation import SegTracker, mask_area, mask_centroid
+from segmentation.seg_reid import SegReIdentifier
+from common.viz import draw_fps, draw_person_label, get_track_color
 
 
 def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
@@ -144,7 +144,7 @@ def main():
     parser.add_argument("--conf-threshold", type=float, default=0.1,
                          help="Tenere a o sotto track_low_thresh di ByteTrack (0.1 di default)")
     parser.add_argument("--tracker", default="bytetrack.yaml",
-                         help="Config tracker Ultralytics, es. bytetrack_permissive.yaml")
+                         help="Config tracker Ultralytics, es. configs/bytetrack_permissive.yaml")
     parser.add_argument("--max-people", type=int, default=None,
                          help="Numero noto di partecipanti alla sessione (2 per 1v1, fino a "
                               "una decina per un gruppo): tiene solo le N detection piu' "

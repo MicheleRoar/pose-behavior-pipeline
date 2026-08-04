@@ -8,10 +8,18 @@ __pycache__/
 
 # Model weights (scaricati automaticamente al primo avvio, vedi README)
 src/yolo26n-pose.pt
+src/yolo26s-pose.pt
+src/yolo26m-pose.pt
 src/yolov8n-pose.pt
+src/yolo26n-seg.pt
+src/yolo26s-seg.pt
+src/yolo26m-seg.pt
 src/face_landmarker.task
 src/hand_landmarker.task
 
-# Output generati dai demo/dalla live_demo (dati di sessione, non codice)
+# Output generati dai demo/dalla live_demo/dalla segmentation_demo (dati di
+# sessione, non codice)
 demo/demo_outputs/
 src/live_session.csv
+src/segmentation_session.csv
+src/session_seg.csv

@@ -36,8 +36,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import cv2
 import numpy as np
 
-from keypoints import KP
-from reid import (
+from pose.keypoints import KP
+from pose.reid import (
     ReIdentifier, COLOR_SEGMENTS, compute_color_signature, color_similarity,
     hair_corners, MAX_POSITION_GAP_SECONDS,
 )

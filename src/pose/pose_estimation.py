@@ -5,9 +5,10 @@ Wrapper sottile su Ultralytics YOLO-pose per estrarre keypoint COCO-17
 multi-persona con tracking, da un file video o da una sorgente live
 (es. webcam / Canon R8 via EOS Webcam Utility, o capture card HDMI).
 
-Stato attuale: la pipeline principale usa TEMPORANEAMENTE seg_estimation.py
-(solo sagome, niente keypoint) invece di questo modulo -- vedi il docstring
-di seg_estimation.py per il perche' e il piano per ricollegare la pose
+Stato attuale: la pipeline principale usa TEMPORANEAMENTE
+segmentation/seg_estimation.py (solo sagome, niente keypoint) invece di
+questo modulo -- vedi il docstring di quel file per il perche' e il piano
+per ricollegare la pose
 (applicata dentro la sagoma tracciata, non sull'intero box) una volta
 verificata la stabilita' del tracking di base. Questo modulo resta
 funzionante e testato, non e' stato rimosso.
@@ -22,7 +23,7 @@ nell'ambiente sandbox usato per sviluppare/testare `features.py`
 
 Esempio d'uso:
 
-    from pose_estimation import PoseTracker
+    from pose.pose_estimation import PoseTracker
 
     tracker = PoseTracker(model_name="yolo26n-pose.pt", device="mps")
     for result in tracker.run(source=0):   # 0 = prima webcam disponibile
@@ -36,7 +37,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from tracking_common import cap_by_confidence
+from common.tracking_common import cap_by_confidence
 
 
 @dataclass
@@ -68,9 +69,9 @@ class PoseTracker:
         che ByteTrack possa usarle, causando ID spuri su scene difficili
         (visione dall'alto, movimento rapido, illuminazione artificiale).
     tracker : config di tracking Ultralytics ("bytetrack.yaml" di default,
-        oppure "bytetrack_permissive.yaml" per scene con cali di confidenza
-        frequenti e non dovuti a vera occlusione — vedi quel file per i
-        dettagli sui parametri).
+        oppure "configs/bytetrack_permissive.yaml" per scene con cali di
+        confidenza frequenti e non dovuti a vera occlusione — vedi quel
+        file per i dettagli sui parametri).
     max_people : se impostato, limita il numero di persone per frame a
         questo valore, tenendo solo le detection con confidenza più alta
         (utile quando si conosce a priori il numero di partecipanti alla
@@ -79,7 +80,7 @@ class PoseTracker:
         doppie-detection sopra quel numero prima che diventino un track).
         Non risolve il problema di una persona reale che perde e riprende
         un ID dopo una vera occlusione — per quello vedi reid.py e
-        bytetrack_permissive.yaml. None (default) = nessun limite.
+        configs/bytetrack_permissive.yaml. None (default) = nessun limite.
     """
 
     def __init__(self, model_name: str = "yolo26n-pose.pt", device: str = "mps",
