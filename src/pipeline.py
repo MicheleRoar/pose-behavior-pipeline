@@ -29,11 +29,13 @@ from pose_estimation import PoseTracker
 
 
 def run_pipeline(source, fps: float, model_name: str = "yolo26n-pose.pt",
-                  device: str = "mps") -> pd.DataFrame:
+                  device: str = "mps", conf_threshold: float = 0.1,
+                  tracker_config: str = "bytetrack.yaml") -> pd.DataFrame:
     """Esegue l'intera pipeline e restituisce una tabella tidy con una riga
     per (frame, persona), pronta per l'analisi in pandas.
     """
-    tracker = PoseTracker(model_name=model_name, device=device)
+    tracker = PoseTracker(model_name=model_name, device=device,
+                           conf_threshold=conf_threshold, tracker=tracker_config)
 
     # Buffer per accumulare la sequenza di keypoint di ciascun track_id
     buffers: dict[int, list[np.ndarray]] = defaultdict(list)
@@ -70,15 +72,32 @@ def main():
     parser = argparse.ArgumentParser(description="Pose estimation -> behavioural feature pipeline")
     parser.add_argument("--source", required=True, help="Video path or webcam index (e.g. 0)")
     parser.add_argument("--fps", type=float, required=True, help="Frame rate of the source")
-    parser.add_argument("--model", default="yolo26n-pose.pt", help="Ultralytics YOLO-pose model")
+    parser.add_argument("--model", default="yolo26n-pose.pt",
+                         help="Ultralytics YOLO-pose model. Batch mode has no real-time "
+                              "constraint, so for hard footage (overhead camera, fast motion) "
+                              "consider a bigger model, e.g. yolo26s-pose.pt or yolo26m-pose.pt, "
+                              "for more stable keypoints and fewer tracking-related ID switches.")
     parser.add_argument("--device", default="mps", help="mps | cpu | cuda")
+    parser.add_argument("--conf-threshold", type=float, default=0.1,
+                         help="Minimum detection confidence passed to YOLO/ByteTrack. Keep this "
+                              "at or below ByteTrack's track_low_thresh (0.1 by default): a higher "
+                              "value strips out low-confidence detections before ByteTrack's own "
+                              "low-confidence recovery stage ever sees them, causing unnecessary "
+                              "new IDs on confidence dips (e.g. overhead camera, fast motion).")
+    parser.add_argument("--tracker", default="bytetrack.yaml",
+                         help="Ultralytics tracker config. Use bytetrack_permissive.yaml for "
+                              "scenes with frequent brief confidence dips without real occlusion "
+                              "(overhead camera, fast motion, artificial lighting) — longer "
+                              "track_buffer and more tolerant thresholds, at the cost of a "
+                              "slightly higher risk of ID switches on close interaction.")
     parser.add_argument("--out", default="features.csv", help="Output CSV path")
     args = parser.parse_args()
 
     # Allows passing an integer (webcam) or a string (file/stream)
     source = int(args.source) if args.source.isdigit() else args.source
 
-    df = run_pipeline(source, fps=args.fps, model_name=args.model, device=args.device)
+    df = run_pipeline(source, fps=args.fps, model_name=args.model, device=args.device,
+                       conf_threshold=args.conf_threshold, tracker_config=args.tracker)
     df.to_csv(args.out, index=False)
     print(f"Saved {len(df)} rows to {args.out}")
 

@@ -45,17 +45,27 @@ class PoseTracker:
     Parameters
     ----------
     model_name : nome/percorso del modello (es. "yolo26n-pose.pt" per il
-        modello nano, più veloce; "yolo26s-pose.pt" per maggiore accuratezza
-        a scapito della velocità).
+        modello nano, più veloce; "yolo26s-pose.pt"/"yolo26m-pose.pt" per
+        maggiore accuratezza a scapito della velocità — in batch offline,
+        senza vincolo di tempo reale, conviene usare il modello più grande
+        che il device riesce a sostenere).
     device : "mps" su Apple Silicon, "cpu" come fallback, "cuda" se
         disponibile una GPU NVIDIA.
     conf_threshold : soglia di confidenza minima per considerare valida una
-        detection.
-    tracker : algoritmo di tracking Ultralytics ("bytetrack.yaml" di default).
+        detection. Di default 0.1 (non 0.4): ByteTrack ha una fase di
+        recupero a bassa confidenza (track_low_thresh, 0.1 di default in
+        bytetrack.yaml) pensata apposta per gestire detection deboli senza
+        perdere l'identità — un conf_threshold troppo alto le scarta prima
+        che ByteTrack possa usarle, causando ID spuri su scene difficili
+        (visione dall'alto, movimento rapido, illuminazione artificiale).
+    tracker : config di tracking Ultralytics ("bytetrack.yaml" di default,
+        oppure "bytetrack_permissive.yaml" per scene con cali di confidenza
+        frequenti e non dovuti a vera occlusione — vedi quel file per i
+        dettagli sui parametri).
     """
 
     def __init__(self, model_name: str = "yolo26n-pose.pt", device: str = "mps",
-                 conf_threshold: float = 0.4, tracker: str = "bytetrack.yaml"):
+                 conf_threshold: float = 0.1, tracker: str = "bytetrack.yaml"):
         # Import ritardato: così il resto del pacchetto (features.py,
         # anonymize.py) resta utilizzabile/testabile anche senza
         # ultralytics/torch installati (utile per test unitari leggeri).

@@ -1,0 +1,30 @@
+# Custom ByteTrack config for hard scenes: overhead/top-down camera, fast
+# movement, artificial lighting — conditions where detection confidence dips
+# often and briefly even without real occlusion, causing excessive new-ID
+# spawning with Ultralytics' stock bytetrack.yaml.
+#
+# Diffs vs stock defaults (track_high_thresh=0.25, track_low_thresh=0.1,
+# new_track_thresh=0.25, track_buffer=30, match_thresh=0.8, fuse_score=True):
+# - track_buffer 30 -> 150: keep a lost track's predicted position alive
+#   for ~10s at 15fps instead of ~2s, enough to bridge a jacket change or a
+#   confidence dip without ByteTrack itself giving up and forcing a new ID.
+# - new_track_thresh 0.25 -> 0.45: require higher confidence before
+#   spawning a brand-new ID, so a noisy low-confidence blip is more likely
+#   to be tried against existing lost tracks (via track_low_thresh) than to
+#   become yet another spurious identity.
+# - match_thresh 0.8 -> 0.7: more permissive IoU association, tolerates the
+#   larger frame-to-frame box jumps typical of fast motion / overhead angles.
+#
+# Use with: PoseTracker(tracker="bytetrack_permissive.yaml") or
+# --tracker bytetrack_permissive.yaml on pipeline.py / live_demo.py.
+# Pair with a lower --conf-threshold (e.g. 0.1): the stock 0.4 default
+# strips out detections in the 0.1-0.25 range before ByteTrack's own
+# low-confidence recovery stage (track_low_thresh) ever sees them.
+
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.45
+track_buffer: 150
+match_thresh: 0.7
+fuse_score: True

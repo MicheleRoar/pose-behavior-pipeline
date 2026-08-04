@@ -139,8 +139,10 @@ def run_live(source, fps: float, model_name: str, device: str,
              reid_max_signature_dist: float = 0.12,
              reid_min_signature_frames: int = 15,
              reid_color_weight: float = 0.5, reid_position_weight: float = 0.5,
-             with_chuv_features: bool = False) -> pd.DataFrame:
-    tracker = PoseTracker(model_name=model_name, device=device)
+             with_chuv_features: bool = False, conf_threshold: float = 0.1,
+             tracker_config: str = "bytetrack.yaml") -> pd.DataFrame:
+    tracker = PoseTracker(model_name=model_name, device=device,
+                           conf_threshold=conf_threshold, tracker=tracker_config)
     window_len = max(8, int(window_seconds * fps))
     seen_track_ids: set[int] = set()
 
@@ -478,8 +480,25 @@ def main():
     parser = argparse.ArgumentParser(description="Real-time movement recognition (Canon R8 / webcam / video)")
     parser.add_argument("--source", default="0", help="Webcam index (e.g. 0) or video file path")
     parser.add_argument("--fps", type=float, default=30.0, help="Expected frame rate of the source")
-    parser.add_argument("--model", default="yolo26n-pose.pt", help="Ultralytics YOLO-pose model")
+    parser.add_argument("--model", default="yolo26n-pose.pt",
+                         help="Ultralytics YOLO-pose model. On a recorded video (not truly live) "
+                              "there's no real-time constraint, so for hard footage (overhead "
+                              "camera, fast motion) consider a bigger model, e.g. yolo26s-pose.pt "
+                              "or yolo26m-pose.pt, for more stable keypoints and fewer "
+                              "tracking-related ID switches.")
     parser.add_argument("--device", default="mps", help="mps | cpu | cuda")
+    parser.add_argument("--conf-threshold", type=float, default=0.1,
+                         help="Minimum detection confidence passed to YOLO/ByteTrack. Keep this "
+                              "at or below ByteTrack's track_low_thresh (0.1 by default): a higher "
+                              "value strips out low-confidence detections before ByteTrack's own "
+                              "low-confidence recovery stage ever sees them, causing unnecessary "
+                              "new IDs on confidence dips (e.g. overhead camera, fast motion).")
+    parser.add_argument("--tracker", default="bytetrack.yaml",
+                         help="Ultralytics tracker config. Use bytetrack_permissive.yaml for "
+                              "scenes with frequent brief confidence dips without real occlusion "
+                              "(overhead camera, fast motion, artificial lighting) — longer "
+                              "track_buffer and more tolerant thresholds, at the cost of a "
+                              "slightly higher risk of ID switches on close interaction.")
     parser.add_argument("--window-seconds", type=float, default=3.0, help="Rolling window for the metrics")
     parser.add_argument("--blur-faces", action="store_true", help="Blur faces in real time (privacy)")
     parser.add_argument("--out", default="live_session.csv", help="Output CSV")
@@ -548,6 +567,7 @@ def main():
 
     source = int(args.source) if args.source.isdigit() else args.source
     run_live(source, fps=args.fps, model_name=args.model, device=args.device,
+              conf_threshold=args.conf_threshold, tracker_config=args.tracker,
               window_seconds=args.window_seconds, blur_faces=args.blur_faces,
               out_csv=args.out, show_window=not args.no_window,
               with_gaze=args.with_gaze, face_model=args.face_model,

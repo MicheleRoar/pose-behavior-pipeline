@@ -61,6 +61,13 @@ exit/re-entry), `--with-chuv-features` (reference feature set),
 `--blur-faces`. See `--help` on each script for the full flag list and
 defaults.
 
+For scenes with heavy ID churn (overhead camera, fast motion, artificial
+lighting): use `--tracker bytetrack_permissive.yaml` (longer track memory,
+more tolerant thresholds — see that file for details), keep
+`--conf-threshold` at or below 0.1, and in batch mode try a bigger model
+(`--model yolo26s-pose.pt` or `yolo26m-pose.pt`) since there's no real-time
+constraint.
+
 ## Modules, briefly
 
 - **`features.py`** — joint angles, movement energy, left/right symmetry,
