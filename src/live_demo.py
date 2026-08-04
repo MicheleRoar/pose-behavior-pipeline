@@ -135,7 +135,7 @@ def run_live(source, fps: float, model_name: str, device: str,
              activity_threshold: float = 40.0, self_touch_threshold: float = 0.5,
              blink_ear_threshold: float = 0.2,
              target_track_id: int | None = None,
-             with_reid: bool = False, reid_max_lost_seconds: float = 30.0,
+             with_reid: bool = False, reid_max_lost_seconds: float = 180.0,
              reid_max_signature_dist: float = 0.12,
              reid_min_signature_frames: int = 15,
              reid_color_weight: float = 0.5, reid_position_weight: float = 0.5,
@@ -512,9 +512,10 @@ def main():
                               "new track_id (e.g. after a change of clothes or an absence), try to "
                               "restore their previous person_id instead of treating them as "
                               "new. When a merge happens, it's printed to the console and logged.")
-    parser.add_argument("--reid-max-lost-seconds", type=float, default=30.0,
+    parser.add_argument("--reid-max-lost-seconds", type=float, default=180.0,
                          help="How many seconds a disappeared person stays in memory as a "
-                              "re-entry candidate before being forgotten (requires --with-reid).")
+                              "re-entry candidate before being forgotten (default 3 minutes, "
+                              "e.g. a bathroom break; requires --with-reid).")
     parser.add_argument("--reid-max-signature-dist", type=float, default=0.12,
                          help="Distance threshold between signatures below which a re-entry is "
                               "considered a match; a conservative value, not validated on real "

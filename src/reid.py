@@ -353,7 +353,7 @@ class ReIdentifier:
     # un limite, non solo "ritenta finche' non trovi qualcosa").
     _PENDING_RETRY_SECONDS = 2.0
 
-    def __init__(self, max_lost_seconds: float = 30.0,
+    def __init__(self, max_lost_seconds: float = 180.0,
                  max_signature_dist: float = 0.12,
                  min_signature_frames: int = 15,
                  color_bonus_weight: float = 0.5,
