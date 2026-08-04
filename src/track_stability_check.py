@@ -44,8 +44,9 @@ def run(source, fps: float, model_name: str, device: str, conf_threshold: float,
         tracker_config: str, max_people: int | None) -> None:
     # Import ritardato, stessa ragione di pose_estimation.py: il resto del
     # pacchetto resta testabile senza ultralytics/torch installati.
-    import numpy as np
     from ultralytics import YOLO
+
+    from tracking_common import cap_by_confidence
 
     model = YOLO(model_name)
     id_frame_count: dict[int, int] = defaultdict(int)
@@ -69,13 +70,7 @@ def run(source, fps: float, model_name: str, device: str, conf_threshold: float,
         box_conf = r.boxes.conf.cpu().numpy()
         track_ids = r.boxes.id.cpu().numpy().astype(int)
 
-        order = range(len(track_ids))
-        if max_people is not None and len(track_ids) > max_people:
-            # stessa logica di cap per-frame di PoseTracker.run(): tiene
-            # solo le `max_people` detection piu' sicure di questo frame.
-            order = np.argsort(-box_conf)[:max_people]
-
-        for idx in order:
+        for idx in cap_by_confidence(box_conf, max_people):
             tid = int(track_ids[idx])
             id_frame_count[tid] += 1
             id_first_frame.setdefault(tid, i)

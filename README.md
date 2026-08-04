@@ -15,12 +15,29 @@ classification accuracy). Features here are exploratory and technical, not
 validated diagnostic markers — any clinical use requires ethics-committee
 approval and validation on annotated data.
 
+**Current status:** on real footage (overhead camera, fast motion,
+artificial lighting) the pose model produced too many spurious ids (50+ in
+a few minutes even with tracker/threshold tuning). The active pipeline is
+temporarily `segmentation_demo.py` (YOLO26-seg + ByteTrack, silhouettes
+only, no keypoints) to test whether a model that only has to outline a
+person — instead of regressing 17 precise keypoints — tracks more
+continuously. If confirmed, the plan is to reattach pose *inside* the
+tracked silhouette rather than replace it permanently — see
+`seg_estimation.py`. The pose-based pipeline (`pipeline.py`, `live_demo.py`,
+and everything that depends on keypoints: `features.py`, `gaze_head.py`,
+`hands.py`, `reid.py`, `chuv_features.py`) stays in the repository, tested,
+on hold.
+
 ## Structure
 
 ```
 pose-behavior-pipeline/
 ├── src/
-│   ├── pose_estimation.py # YOLO-pose + ByteTrack wrapper
+│   ├── seg_estimation.py  # YOLO26-seg + ByteTrack wrapper (ACTIVE, silhouettes only)
+│   ├── segmentation_demo.py      # main CLI right now: overlay + CSV, no keypoints
+│   ├── track_stability_check.py  # diagnostic: id count/lifespan, no overlay/CSV
+│   ├── tracking_common.py # shared max_people cap logic
+│   ├── pose_estimation.py # YOLO-pose + ByteTrack wrapper (ON HOLD, see status above)
 │   ├── features.py        # angles, velocity, symmetry, repetitiveness, synchrony
 │   ├── gaze_head.py       # head pose, mouth/eye/eyebrow signals (MediaPipe FaceLandmarker)
 │   ├── hands.py           # finger-level tracking (MediaPipe HandLandmarker)
@@ -28,10 +45,8 @@ pose-behavior-pipeline/
 │   ├── chuv_features.py   # reference-pipeline feature set, replicated in real time
 │   ├── anonymize.py       # face blurring
 │   ├── viz.py              # overlay drawing
-│   ├── pipeline.py        # batch CLI (recorded video)
-│   ├── live_demo.py       # real-time CLI (Canon R8 / webcam)
-│   └── track_stability_check.py  # diagnostic: id churn with a segmentation
-│                                  # model instead of pose, no keypoints
+│   ├── pipeline.py        # batch CLI (recorded video, pose-based, on hold)
+│   └── live_demo.py       # real-time CLI (Canon R8 / webcam, pose-based, on hold)
 └── demo/                  # camera-free tests for every module above
 ```
 
@@ -44,15 +59,30 @@ pip install -r requirements.txt
 
 ## Usage
 
-Batch, on a recorded video:
+**Active pipeline (segmentation, no keypoints):**
+
+```bash
+cd src && python segmentation_demo.py --source video.mp4 --fps 15 \
+    --model yolo26s-seg.pt --tracker bytetrack_permissive.yaml \
+    --conf-threshold 0.1 --max-people 2 --out session_seg.csv
+```
+
+Add `--no-window` to skip the live overlay (faster, log + CSV only). Same
+flags as the diagnostic-only `track_stability_check.py`, plus the overlay
+and the CSV (frame, track_id, bbox, mask centroid, mask area, box
+confidence). `--max-people N`: known session headcount (2 for a 1v1
+child-caregiver session, up to ~10 for a group) — keeps only the N most
+confident detections per frame. `--tracker bytetrack_permissive.yaml`:
+longer track memory and more tolerant thresholds for scenes with heavy ID
+churn (overhead camera, fast motion, artificial lighting) — see that file
+for details. Keep `--conf-threshold` at or below 0.1: ByteTrack's own
+low-confidence recovery stage expects to see weak detections, a higher
+value strips them out first.
+
+**Pose-based pipeline (on hold — keypoints, all behavioural features):**
 
 ```bash
 cd src && python pipeline.py --source video.mp4 --fps 30 --out features.csv
-```
-
-Live, from a webcam or capture card:
-
-```bash
 cd src && python live_demo.py --source 0 --fps 30 --device mps --out live_session.csv
 ```
 
@@ -60,21 +90,12 @@ Optional flags stack freely: `--with-gaze` (head pose, mouth, eyes, eyebrows),
 `--with-hands` (finger tracking), `--with-reid` (re-identification across
 exit/re-entry), `--with-chuv-features` (reference feature set),
 `--target-track-id N` (restrict face/hand signals to one person),
-`--blur-faces`. See `--help` on each script for the full flag list and
-defaults.
-
-For scenes with heavy ID churn (overhead camera, fast motion, artificial
-lighting): use `--tracker bytetrack_permissive.yaml` (longer track memory,
-more tolerant thresholds — see that file for details), keep
-`--conf-threshold` at or below 0.1, and in batch mode try a bigger model
-(`--model yolo26s-pose.pt` or `yolo26m-pose.pt`) since there's no real-time
-constraint. If the session headcount is fixed and known (e.g. 2 for a 1v1
-child-caregiver session, up to ~10 for a group), `--max-people N` caps
-detections per frame to the N most confident, and, with `--with-reid`, once
-N identities are confirmed it forces an unmatched re-entry onto the closest
-missing identity instead of minting a new one — the one deliberate
-exception to reid.py's "discount, never force" rule (see `reid.py` for the
-safety guardrails).
+`--blur-faces`, plus the same `--tracker`/`--conf-threshold`/`--max-people`
+as above (with `--with-reid`, once `--max-people` identities are confirmed,
+an unmatched re-entry is forced onto the closest missing identity instead
+of minting a new one — the one deliberate exception to reid.py's "discount,
+never force" rule, see `reid.py` for the safety guardrails). See `--help`
+on each script for the full flag list and defaults.
 
 ## Modules, briefly
 

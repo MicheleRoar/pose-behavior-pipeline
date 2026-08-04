@@ -5,6 +5,13 @@ Wrapper sottile su Ultralytics YOLO-pose per estrarre keypoint COCO-17
 multi-persona con tracking, da un file video o da una sorgente live
 (es. webcam / Canon R8 via EOS Webcam Utility, o capture card HDMI).
 
+Stato attuale: la pipeline principale usa TEMPORANEAMENTE seg_estimation.py
+(solo sagome, niente keypoint) invece di questo modulo -- vedi il docstring
+di seg_estimation.py per il perche' e il piano per ricollegare la pose
+(applicata dentro la sagoma tracciata, non sull'intero box) una volta
+verificata la stabilita' del tracking di base. Questo modulo resta
+funzionante e testato, non e' stato rimosso.
+
 Pensato per girare su Apple Silicon (M1/M2/...) sfruttando il backend MPS
 (`device="mps"`); su altre macchine cade automaticamente su CPU/CUDA se
 disponibile.
@@ -28,6 +35,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from tracking_common import cap_by_confidence
 
 
 @dataclass
@@ -114,15 +123,7 @@ class PoseTracker:
                 box_conf = r.boxes.conf.cpu().numpy()        # (n_people,) confidenza detection
                 track_ids = r.boxes.id.cpu().numpy().astype(int)
 
-                order = range(len(track_ids))
-                if self.max_people is not None and len(track_ids) > self.max_people:
-                    # Tiene solo le `max_people` detection più sicure di
-                    # questo frame: sopprime il rumore in eccesso senza
-                    # mai scartare persone reali quando il numero rientra
-                    # nel limite (il filtro non scatta sotto la soglia).
-                    order = np.argsort(-box_conf)[: self.max_people]
-
-                for idx in order:
+                for idx in cap_by_confidence(box_conf, self.max_people):
                     people.append((int(track_ids[idx]), kpts_xy[idx], kpts_conf[idx]))
             yield FrameResult(frame_index=i, frame=r.orig_img, people=people)
 
