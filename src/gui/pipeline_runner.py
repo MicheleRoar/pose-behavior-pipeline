@@ -10,15 +10,19 @@ segmentation_demo.py) -- le stesse funzioni gia' usate dai rispettivi CLI,
 cosi' GUI e CLI restano garantiti identici nel comportamento (vedi i
 docstring di quelle due funzioni per il perche' di questa scelta).
 
-Modalita' "both" (v1): le due pipeline girano in parallelo, ciascuna con la
+Modalita' "both": le due pipeline girano in parallelo, ciascuna con la
 propria istanza di tracker/reid -- NESSUNA identita' condivisa tra pose e
-segmentazione per ora (limitazione nota, da affrontare in futuro). I due
-overlay vengono mostrati AFFIANCATI (side-by-side: pose a sinistra,
-segmentazione a destra) invece che sovrapposti sullo stesso frame: fondere
-pixel-per-pixel due tracker indipendenti che decodificano la sorgente
-separatamente richiederebbe assumere che le due decodifiche restino
-byte-identiche frame per frame, un'assunzione fragile che preferiamo non
-fare silenziosamente.
+segmentazione per ora (limitazione nota, da affrontare in futuro: le
+etichette "ID N" disegnate dalla segmentazione e i track_id della pose non
+si corrispondono). Lo scheletro pose viene disegnato SOPRA il frame gia'
+annotato dalla segmentazione (non piu' affiancati in due pannelli), per
+richiesta esplicita e perche' qui non c'e' alcun vincolo di privacy/
+copyright da preservare nel farlo (video pubblici, non clinici). Questo
+richiede che le due sorgenti indipendenti (due `cv2.VideoCapture` separati
+sullo stesso file) restino sincronizzate frame-per-frame -- assunzione
+ragionevole per un file registrato decodificato in sequenza da entrambe
+senza salti, ma non garantita se una delle due pipeline scartasse
+internamente dei frame (nessuna lo fa oggi).
 
 Nota sul timestamp `now` restituito: la pipeline pose usa `time.time()`
 (orologio di sistema, coerente con live_demo.py pensato anche per sorgenti
@@ -35,12 +39,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterator
 
-import cv2
 import numpy as np
 
-from live_demo import iter_live_frames
+from live_demo import iter_live_frames, head_center
 from segmentation_demo import iter_segmentation_frames
 from segmentation.seg_reid import SegReIdentifier
+from common.viz import draw_skeleton, draw_face_signals, draw_hand, get_track_color
+import cv2
 
 
 @dataclass
@@ -103,7 +108,7 @@ def iter_pipeline_frames(
 def _iter_pose(*, source, fps, device, pose_model, with_hands, hand_model,
                with_face, face_model, with_reid, max_people, blur_faces,
                window_seconds, conf_threshold, tracker_config) -> Iterator[RunnerFrame]:
-    for frame, rows, now, _smoothed_fps in iter_live_frames(
+    for frame, rows, now, _smoothed_fps, _people, _gaze, _hands in iter_live_frames(
         source=source, fps=fps, model_name=pose_model, device=device,
         window_seconds=window_seconds, blur_faces=blur_faces,
         with_gaze=with_face, face_model=face_model,
@@ -132,38 +137,78 @@ def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
                with_face, face_model, with_reid, blur_faces, window_seconds,
                seg_model, with_seg_reid, max_people, conf_threshold,
                tracker_config) -> Iterator[RunnerFrame]:
-    pose_iter = _iter_pose(
-        source=source, fps=fps, device=device, pose_model=pose_model,
+    """Fa girare le due pipeline in parallelo e disegna lo scheletro pose
+    (+ mani/viso se attivi) DIRETTAMENTE sul frame gia' annotato dalla
+    segmentazione, invece di affiancare due pannelli -- vedi il docstring
+    del modulo. Non chiama `_iter_pose()`/`_iter_segmentation()` (che
+    restituirebbero solo il frame gia' composito, senza i dati grezzi per
+    ridisegnare): usa direttamente `iter_live_frames()` per avere
+    `people`/`gaze_by_track`/`hands_by_track`, e le stesse funzioni di
+    disegno di `common/viz.py` gia' usate da `iter_live_frames()` -- niente
+    logica di disegno duplicata, solo un secondo richiamo delle stesse
+    funzioni su un frame diverso.
+
+    Etichette/pannello metriche della pose NON vengono ridisegnati qui
+    (solo scheletro/mani/viso): l'etichetta "ID N" gia' presente sul frame
+    di segmentazione resta l'unico riferimento di identita' visibile,
+    evitando due numerazioni diverse sovrapposte per la stessa persona.
+    """
+    if with_seg_reid and max_people is None:
+        raise ValueError("with_seg_reid richiede max_people (il tetto rigido ha senso "
+                          "solo con un numero di persone noto)")
+    seg_reidentifier = SegReIdentifier(max_people=max_people) if with_seg_reid else None
+
+    pose_gen = iter_live_frames(
+        source=source, fps=fps, model_name=pose_model, device=device,
+        window_seconds=window_seconds, blur_faces=blur_faces,
+        with_gaze=with_face, face_model=face_model,
         with_hands=with_hands, hand_model=hand_model,
-        with_face=with_face, face_model=face_model,
-        with_reid=with_reid, max_people=max_people, blur_faces=blur_faces,
-        window_seconds=window_seconds, conf_threshold=conf_threshold,
-        tracker_config=tracker_config,
+        with_reid=with_reid, conf_threshold=conf_threshold,
+        tracker_config=tracker_config, max_people=max_people,
     )
-    seg_iter = _iter_segmentation(
-        source=source, fps=fps, device=device, seg_model=seg_model,
-        max_people=max_people, with_seg_reid=with_seg_reid,
+    seg_gen = iter_segmentation_frames(
+        source=source, fps=fps, model_name=seg_model, device=device,
         conf_threshold=conf_threshold, tracker_config=tracker_config,
+        max_people=max_people, seg_reidentifier=seg_reidentifier,
     )
+
     # zip() (non zip_longest): se le due sorgenti indipendenti finissero con
     # un numero di frame diverso per qualche motivo, ci si ferma alla piu'
     # corta piuttosto che restituire un frame "both" con meta' mancante.
-    for pose_result, seg_result in zip(pose_iter, seg_iter):
-        combined = _hstack_same_height(pose_result.frame, seg_result.frame)
+    for (pose_frame, pose_rows, pose_now, _pose_fps, people, gaze_by_track, hands_by_track), \
+            (seg_vis, seg_rows, _seg_now, _frame_index, _raw_ids) in zip(pose_gen, seg_gen):
+        canvas = seg_vis
+        if canvas.shape[:2] != pose_frame.shape[:2]:
+            # non dovrebbe succedere per due tracker sulla stessa sorgente,
+            # ma se capitasse disegnare coordinate pose su un canvas di
+            # dimensioni diverse le sposterebbe fuori posto -- meglio
+            # saltare l'overlay pose per questo frame che disegnare punti
+            # sbagliati silenziosamente.
+            yield RunnerFrame(
+                frame=canvas,
+                rows=[{**r, "pipeline": "segmentation"} for r in seg_rows],
+                now=pose_now, mode="both",
+            )
+            continue
+
+        for track_id, kxy, kconf in people:
+            color = get_track_color(track_id)
+            draw_skeleton(canvas, kxy, kconf, color=color)
+            gaze = gaze_by_track.get(track_id)
+            if gaze and "mouth_pts" in gaze:
+                draw_face_signals(canvas, gaze.get("mouth_pts"),
+                                   gaze.get("left_eye_pts"), gaze.get("right_eye_pts"),
+                                   gaze.get("left_eyebrow_pts"), gaze.get("right_eyebrow_pts"))
+            if gaze and not np.isnan(gaze.get("yaw", np.nan)):
+                hc = head_center(kxy)
+                ang = np.radians(gaze["yaw"])
+                tip = (int(hc[0] + 60 * np.sin(ang)), int(hc[1] - 60 * np.cos(ang)))
+                cv2.arrowedLine(canvas, tuple(hc.astype(int)), tip, (255, 0, 255), 2, tipLength=0.3)
+            for info in hands_by_track.get(track_id, {}).values():
+                draw_hand(canvas, info["landmarks"])
+
         rows = (
-            [{**r, "pipeline": "pose"} for r in pose_result.rows]
-            + [{**r, "pipeline": "segmentation"} for r in seg_result.rows]
+            [{**r, "pipeline": "pose"} for r in pose_rows]
+            + [{**r, "pipeline": "segmentation"} for r in seg_rows]
         )
-        yield RunnerFrame(frame=combined, rows=rows, now=pose_result.now, mode="both")
-
-
-def _hstack_same_height(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """Affianca due frame BGR ridimensionando il secondo alla stessa altezza
-    del primo (per sicurezza, nel caso i due tracker restituissero frame di
-    dimensioni leggermente diverse), con un separatore verticale sottile."""
-    h = left.shape[0]
-    if right.shape[0] != h:
-        scale = h / right.shape[0]
-        right = cv2.resize(right, (int(right.shape[1] * scale), h))
-    separator = np.full((h, 4, 3), 255, dtype=np.uint8)
-    return np.hstack([left, separator, right])
+        yield RunnerFrame(frame=canvas, rows=rows, now=pose_now, mode="both")

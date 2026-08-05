@@ -75,21 +75,24 @@ pip install -r requirements.txt
 cd src && python gui_app.py
 ```
 
-A local Tkinter window: load a video file, pick the pipeline mode
-(Segmentazione / Pose estimation / Entrambi), model size, FPS, max number of
-people, re-identification on/off, and — only when the mode is Pose
-estimation or Entrambi — Mani (hands) / Viso (face: eyes, mouth, eyebrows,
+A local Tkinter window (starts maximized), fully in English: load a video
+file, pick the pipeline mode (Segmentation / Pose estimation / Both), model
+size, FPS, max number of people, re-identification on/off, and — only when
+the mode is Pose estimation or Both — Hands / Face (eyes, mouth, eyebrows,
 head movement), then Play to watch the overlay live in the same window,
-with Indietro/Avanti (Back/Forward) to step through already-processed
-frames instantly (from a cache, no re-inference) or resume live processing
-past the cached point. SAM3 is listed under model architecture but not
-selectable yet — it will run on the group's GPU machines, not this Mac;
-picking it shows a note and reverts to YOLO. "Entrambi" runs both
-pipelines independently on the same source and shows the two overlays
-side by side (no shared identity between them yet, see
-`gui/pipeline_runner.py`). Internally the GUI calls the exact same
-`iter_live_frames()` / `iter_segmentation_frames()` generators as the CLIs
-below, not a reimplementation — CLI and GUI can't drift apart.
+with Back/Forward to step through already-processed frames instantly (from
+a cache, no re-inference) or resume live processing past the cached point.
+SAM3 is listed under model architecture but not selectable yet — it will
+run on the group's GPU machines, not this Mac; picking it shows a note and
+reverts to YOLO. "Both" runs both pipelines independently on the same
+source and draws the pose skeleton (+ hands/face if enabled) directly on
+top of the segmentation overlay (same frame, not side by side) — the two
+pipelines still don't share an identity, so the "ID N" label stays the
+segmentation's; the pose skeleton has no label of its own to avoid two
+conflicting numberings on the same person, see `gui/pipeline_runner.py`.
+Internally the GUI calls the exact same `iter_live_frames()` /
+`iter_segmentation_frames()` generators as the CLIs below, not a
+reimplementation — CLI and GUI can't drift apart.
 
 ## Usage (CLI)
 
@@ -117,11 +120,18 @@ For a small, certain headcount (1-2 people), `--with-seg-reid` goes
 further: it links every raw ByteTrack id to a fixed pool of `--max-people`
 identities (position/color/shape of the silhouette, see `seg_reid.py`),
 guaranteeing — not just discouraging — that no more than `--max-people`
-ids are ever created in the whole session. Unlike `reid.py`'s optional
-`max_people` fallback, there's no escape valve here: when the cap is hit,
-an unmatched track is always bound to the closest known identity, even on
-a weak signal. Defensible specifically because the headcount is small and
-certain; read `seg_reid.py`'s docstring for the trade-off this accepts.
+ids are ever created in the whole session. A new raw id always tries a
+threshold-based soft match to a recently-missing identity first (covers
+the common case: brief occlusion, edge-of-frame exit/re-entry), even while
+under the cap — without this, setting `--max-people` generously above the
+real headcount (e.g. 20 as a safety margin for ~10 kids) meant the cap was
+never actually reached, so soft-matching never kicked in and every
+disappearance opened a new id instead of relinking (visible as a brief id
+swap that "corrects itself" a moment later). Only once the cap is truly
+reached does it fall back to `reid.py`'s optional `max_people` behavior
+with no escape valve: an unmatched track is always bound to the closest
+known identity regardless of signal strength. Read `seg_reid.py`'s
+docstring for the trade-offs both of these accept.
 
 **Pose-based pipeline (on hold — keypoints, all behavioural features):**
 

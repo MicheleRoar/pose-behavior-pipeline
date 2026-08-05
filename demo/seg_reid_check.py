@@ -117,6 +117,54 @@ def churned_track_relinks_to_nearest_position():
           f"person_id iniziale A={person_id_a}, dopo il rientro={by_raw[3]} -> ri-associato — OK")
 
 
+def soft_match_below_cap_relinks_instead_of_minting_new():
+    """Il bug segnalato su footage reale: con `max_people` impostato largo
+    apposta per tenersi margine (es. 5 per un gruppo con al massimo 2-3
+    bambini attesi), una persona che sparisce brevemente (occlusione, uscita
+    dal bordo inquadratura) e rientra con un nuovo raw_id DEVE ricollegarsi
+    alla sua identita' originale anche se il tetto max_people e' ancora
+    ben lontano dall'essere raggiunto -- prima della fix, sotto al tetto non
+    veniva tentato alcun confronto e ogni sparizione apriva sempre un id
+    nuovo (scambio temporaneo visibile anche a re-id attiva)."""
+    reid = SegReIdentifier(max_people=5)  # tetto largo, headcount reale = 2
+    frame_t = 0
+
+    a_bbox, a_poly = make_person(100, 300)
+    b_bbox, b_poly = make_person(500, 300)
+    resolved = reid.resolve([(1, a_bbox, a_poly, 0.9), (2, b_bbox, b_poly, 0.9)], frame_t / FPS)
+    by_raw = {1: resolved[0][0], 2: resolved[1][0]}
+    person_id_a, person_id_b = by_raw[1], by_raw[2]
+    assert len(reid.persons) == 2, "dopo il warm-up devono esserci solo 2 identita', non 5"
+    frame_t += 1
+
+    # A sparisce per qualche frame (B resta con lo stesso raw_id)
+    for _ in range(5):
+        now = frame_t / FPS
+        b_bbox, b_poly = make_person(500, 300)
+        reid.resolve([(2, b_bbox, b_poly, 0.9)], now)
+        frame_t += 1
+
+    # A rientra con un NUOVO raw_id (3), vicino alla vecchia posizione --
+    # il tetto (5) e' ancora ben lontano dall'essere raggiunto (solo 2
+    # identita' esistono finora).
+    now = frame_t / FPS
+    a_bbox, a_poly = make_person(110, 305)
+    resolved = reid.resolve([(3, a_bbox, a_poly, 0.9)], now)
+    person_id_a_reentry = resolved[0][0]
+
+    assert person_id_a_reentry == person_id_a, (
+        f"con tetto=5 ancora lontano (2 identita' esistenti), il rientro di A doveva ricollegarsi "
+        f"a person_id={person_id_a} tramite aggancio morbido, invece ha aperto person_id="
+        f"{person_id_a_reentry} (bug: sotto al tetto non veniva tentato alcun confronto)"
+    )
+    assert len(reid.persons) == 2, (
+        f"nessuna identita' in piu' doveva essere aperta (aggancio morbido riuscito): "
+        f"trovate {len(reid.persons)} identita' invece di 2"
+    )
+    print(f"Tetto largo (max_people=5, headcount reale=2): il rientro di A sotto al tetto "
+          f"si ricollega a person_id={person_id_a} invece di aprirne uno nuovo — OK")
+
+
 def single_person_session_always_id_one():
     """max_people=1: qualunque numero di cambi di raw track_id, il
     person_id deve restare sempre lo stesso -- nessun confronto necessario,
@@ -157,6 +205,7 @@ def pathological_same_frame_overflow_does_not_crash():
 def main():
     hard_cap_never_exceeded_under_heavy_churn()
     churned_track_relinks_to_nearest_position()
+    soft_match_below_cap_relinks_instead_of_minting_new()
     single_person_session_always_id_one()
     pathological_same_frame_overflow_does_not_crash()
     print("\nVerifica completata senza errori: seg_reid.py rispetta sempre il tetto "

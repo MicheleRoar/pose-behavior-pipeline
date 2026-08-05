@@ -153,9 +153,14 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
     disegnarlo comunque quando `run_live()` e' in modalita' `--no-window` e'
     trascurabile rispetto al costo dell'inferenza.
 
-    Yield per ogni frame processato: `(frame, rows, now, smoothed_fps)` dove
-    `rows` e' la lista di dict (una riga per persona tracciata in questo
-    frame, stesso schema del CSV finale prodotto da `run_live()`).
+    Yield per ogni frame processato: `(frame, rows, now, smoothed_fps, people,
+    gaze_by_track, hands_by_track)`. I primi quattro sono per `run_live()`
+    (CLI) e per l'uso base della GUI; gli ultimi tre sono gia' pronti per
+    essere ridisegnati SU UN FRAME DIVERSO con le stesse funzioni di
+    `common/viz.py` (`draw_skeleton`, ecc.) -- serve a `pipeline_runner.py`
+    per sovrapporre lo scheletro pose al frame gia' annotato dalla
+    segmentazione in modalita' "both", senza duplicare la logica di
+    tracking/reid/gaze/mani qui sopra.
     """
     tracker = PoseTracker(model_name=model_name, device=device,
                            conf_threshold=conf_threshold, tracker=tracker_config,
@@ -468,7 +473,7 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
             panel_y += panel_h + 8
 
         draw_fps(frame, smoothed_fps)
-        yield frame, rows_this_frame, now, smoothed_fps
+        yield frame, rows_this_frame, now, smoothed_fps, frame_result.people, gaze_by_track, hands_by_track
 
 
 def run_live(source, fps: float, model_name: str, device: str,
@@ -494,7 +499,7 @@ def run_live(source, fps: float, model_name: str, device: str,
     window_name = "Live pose behaviour (q per uscire, o chiudi la finestra)"
 
     try:
-        for frame, rows, now, smoothed_fps in iter_live_frames(
+        for frame, rows, now, smoothed_fps, _people, _gaze_by_track, _hands_by_track in iter_live_frames(
             source=source, fps=fps, model_name=model_name, device=device,
             window_seconds=window_seconds, blur_faces=blur_faces,
             with_gaze=with_gaze, face_model=face_model,

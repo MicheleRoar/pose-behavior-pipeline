@@ -29,6 +29,19 @@ finire sullo stesso person_id per quel singolo frame, invece che uno dei
 due restare "senza identita'" -- scelta esplicita, coerente con la
 richiesta di non avere MAI la possibilita' di un id in piu'.
 
+Due livelli di aggancio (importante se `max_people` e' impostato con
+margine, es. 20 per un gruppo di ~10 bambini "per sicurezza"): un raw_id
+nuovo tenta SEMPRE prima un aggancio "morbido" (con soglia
+`soft_match_threshold`) a una persona nota ma non visibile in questo
+frame, anche se ci sono ancora slot liberi -- senza questo passo, un
+`max_people` largo faceva si' che il tetto non si raggiungesse mai
+davvero, e ogni breve sparizione (occlusione, uscita dal bordo
+inquadratura) apriva un id nuovo invece di ricollegarsi: uno scambio
+temporaneo di id visibile anche con la re-id attiva. Solo se l'aggancio
+morbido fallisce (nessun candidato sopra soglia) SI mette in campo la
+logica precedente: slot libero -> id nuovo, tetto raggiunto -> aggancio
+forzato senza soglia.
+
 A differenza di reid.py, qui posizione/colore/forma non sono "sconti" su
 una firma primaria (non esiste una firma antropometrica senza keypoint):
 sono combinati con una media pesata (non "il piu' forte vince" come in
@@ -133,6 +146,7 @@ class _MergeEvent:
     matched_person_id: int
     frame_time: float
     score: float
+    forced: bool = False  # True solo se legato senza soglia perche' il tetto era gia' raggiunto
 
 
 class SegReIdentifier:
@@ -156,7 +170,8 @@ class SegReIdentifier:
     def __init__(self, max_people: int, position_weight: float = 0.5,
                  color_weight: float = 0.3, shape_weight: float = 0.2,
                  max_position_dist_scales: float = 6.0,
-                 max_position_gap_seconds: float = 30.0):
+                 max_position_gap_seconds: float = 30.0,
+                 soft_match_threshold: float = 0.6):
         if max_people < 1:
             raise ValueError("max_people deve essere almeno 1")
         self.max_people = max_people
@@ -165,6 +180,10 @@ class SegReIdentifier:
         self.shape_weight = shape_weight
         self.max_position_dist_scales = max_position_dist_scales
         self.max_position_gap_seconds = max_position_gap_seconds
+        # soglia sotto la quale un aggancio NON forzato (tetto non ancora
+        # raggiunto) viene rifiutato -- vedi resolve() per il perche' serve
+        # anche quando c'e' ancora un slot libero.
+        self.soft_match_threshold = soft_match_threshold
 
         self.raw_to_person: dict[int, int] = {}
         self.persons: dict[int, _PersonState] = {}  # TUTTE le identita' mai create (<= max_people)
@@ -195,19 +214,40 @@ class SegReIdentifier:
             shape = _shape_descriptor(bbox, poly)
 
             if raw_id not in self.raw_to_person:
-                if len(self.persons) < self.max_people:
-                    # slot libero: prima apparizione in assoluto di una
-                    # persona non ancora vista, il tetto non e' ancora
-                    # raggiunto -- nessun confronto necessario.
+                person_id = None
+
+                # Aggancio "morbido" (con soglia), tentato SEMPRE per primo,
+                # anche se il tetto max_people non e' ancora raggiunto: un
+                # raw_id nuovo di ByteTrack e' spessissimo una persona gia'
+                # vista a cui il tracker ha appena riassegnato un id diverso
+                # (breve occlusione, uscita/rientro dal bordo inquadratura),
+                # non una persona davvero mai vista prima. Senza questo
+                # passo, con un max_people impostato largo apposta per
+                # tenersi margine (es. 20 per un gruppo di ~10 bambini), il
+                # tetto non si raggiunge mai per davvero e ogni sparizione
+                # apriva sempre un id NUOVO invece di ricollegarsi -- lo
+                # scambio temporaneo di id visibile anche a re-id attiva.
+                if self.persons:
+                    candidate_pid, candidate_score = self._best_match(
+                        centroid, scale, color, shape, now, exclude=claimed_this_frame)
+                    if candidate_pid is not None and candidate_score >= self.soft_match_threshold:
+                        person_id = candidate_pid
+                        self.merge_log.append(_MergeEvent(
+                            raw_track_id=raw_id, matched_person_id=person_id,
+                            frame_time=now, score=candidate_score, forced=False))
+
+                if person_id is None and len(self.persons) < self.max_people:
+                    # nessun aggancio morbido convincente E c'e' ancora uno
+                    # slot libero: e' ragionevole trattarla come una persona
+                    # davvero mai vista prima.
                     person_id = self._next_person_id
                     self._next_person_id += 1
-                else:
-                    # tetto raggiunto: NON puo' essere una persona in piu',
-                    # deve legarsi a una di quelle gia' note. Sceglie la
-                    # migliore tra gli slot non gia' rivendicati in questo
-                    # stesso frame (mai due raw_id diversi sullo stesso
-                    # person_id nello stesso frame, tranne il caso
-                    # patologico gestito subito sotto).
+                elif person_id is None:
+                    # tetto raggiunto E nessun aggancio morbido trovato
+                    # sopra: NON puo' comunque essere una persona in piu',
+                    # si forza il migliore disponibile SENZA soglia (vedi
+                    # docstring del modulo) tra gli slot non gia'
+                    # rivendicati in questo stesso frame.
                     person_id, score = self._best_match(centroid, scale, color, shape, now,
                                                           exclude=claimed_this_frame)
                     if person_id is None:
@@ -220,7 +260,7 @@ class SegReIdentifier:
                                                               exclude=set())
                     self.merge_log.append(_MergeEvent(
                         raw_track_id=raw_id, matched_person_id=person_id,
-                        frame_time=now, score=score))
+                        frame_time=now, score=score, forced=True))
                 self.raw_to_person[raw_id] = person_id
                 claimed_this_frame.add(person_id)
 
