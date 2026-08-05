@@ -1,0 +1,184 @@
+"""
+mediapipe_pose.py
+===================
+Stima della posa (keypoint corporei) con MediaPipe Tasks PoseLandmarker,
+applicata DENTRO il ritaglio (bbox) di una singola persona GIA' tracciata
+dalla pipeline di segmentazione (`segmentation/seg_estimation.py` +
+`segmentation/seg_reid.py`) -- non un rilevatore multi-persona sull'intero
+frame.
+
+Perche' "dentro il ritaglio" e non sull'intero frame
+------------------------------------------------------
+MediaPipe Tasks PoseLandmarker supporta il rilevamento multi-persona
+(`num_poses`), ma NON fornisce alcun tracking temporale: nessun id
+persistente tra un frame e l'altro, a differenza di YOLO+ByteTrack.
+Costruire un tracker equivalente da zero sopra i suoi rilevamenti grezzi
+sarebbe un lavoro consistente per un guadagno incerto (esattamente il tipo
+di instabilita' di tracking per cui questa pipeline e' passata a
+segmentation_demo.py in primo luogo, vedi README).
+
+La scelta fatta qui e' piu' semplice e riusa quello che gia' funziona: la
+pipeline di segmentazione traccia gia' l'identita' di ciascuna persona in
+modo stabile (silhouette + posizione/colore/forma, vedi seg_reid.py).
+Questo modulo si limita ad applicare MediaPipe in modalita' SINGOLA
+PERSONA (la piu' matura e affidabile della libreria, nessun problema di
+associazione multi-persona da risolvere) dentro il box di ciascuna persona
+GIA' tracciata, frame per frame -- l'identita' viene presa in prestito
+dalla segmentazione, non ricostruita qui. Era gia' il piano descritto nel
+docstring di `seg_estimation.py` ("ricollegare la pose applicata dentro la
+sagoma tracciata").
+
+Rimappatura su COCO-17
+------------------------
+I 33 landmark BlazePose vengono rimappati sui 17 nomi COCO-17 gia' usati in
+tutta la pipeline pose (`pose/keypoints.py`, vedi `BLAZEPOSE_TO_COCO`
+sotto), cosi' le funzioni di feature engineering esistenti
+(`pose/features.py`, `common/viz.draw_skeleton`, ecc.) funzionano
+IDENTICHE indipendentemente dal modello che ha prodotto i keypoint. I 16
+landmark BlazePose senza equivalente COCO diretto (occhi interni/esterni,
+angoli bocca, dita, talloni, punte piedi) vengono scartati: non servono
+alle feature esistenti, tutte scritte per lo schema COCO-17.
+
+Limiti onesti
+-------------
+  - Nessun tracking/feature con finestra scorrevole (energia di movimento,
+    repetitivita', ecc.) e' ancora collegato qui -- solo angoli articolari
+    calcolabili istantaneamente, frame per frame (vedi wiring in
+    segmentation_demo.py). Collegare il resto di pose/features.py
+    richiederebbe gestire buffer per-persona anche in segmentation_demo.py,
+    non ancora fatto.
+  - Un box di segmentazione stretto sulla sagoma puo' tagliare mani alzate
+    sopra la testa o piedi vicino al bordo: il padding in `estimate()`
+    aiuta ma non elimina il problema.
+  - La confidenza per giunto (`visibility` di MediaPipe) e la confidenza
+    delle detection YOLO (`pose_estimation.py`) non sono necessariamente
+    sulla stessa scala: trattarle come intercambiabili in analisi
+    quantitative va validato.
+
+Setup richiesto (solo sul Mac, non testabile in questo ambiente sandbox
+senza camera):
+
+    pip install mediapipe
+    # scarica il modello Pose Landmarker (una tantum; "lite" e' il piu'
+    # veloce, "full"/"heavy" sono piu' precisi ma piu' lenti):
+    curl -L -o pose_landmarker_lite.task \\
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from pose.keypoints import KP
+
+# Indice landmark BlazePose (0-32, schema MediaPipe Pose Landmarker) -> nome
+# COCO-17 (pose/keypoints.py). I landmark BlazePose senza equivalente COCO
+# diretto (occhi interni/esterni, angoli bocca, dita, talloni, punte piedi)
+# non compaiono qui: vengono scartati.
+BLAZEPOSE_TO_COCO: dict[int, str] = {
+    0: "nose",
+    2: "left_eye", 5: "right_eye",
+    7: "left_ear", 8: "right_ear",
+    11: "left_shoulder", 12: "right_shoulder",
+    13: "left_elbow", 14: "right_elbow",
+    15: "left_wrist", 16: "right_wrist",
+    23: "left_hip", 24: "right_hip",
+    25: "left_knee", 26: "right_knee",
+    27: "left_ankle", 28: "right_ankle",
+}
+
+
+def _empty_pose() -> tuple[np.ndarray, np.ndarray]:
+    """(kxy, kconf) "vuoti": 17 giunti NaN/confidenza zero, stesso schema
+    di un frame in cui nessuna posa e' stata rilevata."""
+    return np.full((17, 2), np.nan), np.zeros(17)
+
+
+def blazepose_to_coco(landmarks, frame_offset_xy: tuple[float, float],
+                       crop_size_wh: tuple[float, float]) -> tuple[np.ndarray, np.ndarray]:
+    """Converte una lista di 33 landmark BlazePose (in coordinate
+    NORMALIZZATE 0-1 rispetto al ritaglio, come restituiti da MediaPipe) in
+    (kxy, kconf) COCO-17 in coordinate PIXEL DEL FRAME INTERO.
+
+    `frame_offset_xy`: angolo in alto a sinistra del ritaglio nel frame
+    intero (x1, y1). `crop_size_wh`: dimensioni del ritaglio in pixel.
+    Isolata dalla classe che chiama MediaPipe per essere testabile senza
+    mediapipe/camera (vedi demo/mediapipe_pose_check.py).
+    """
+    x1, y1 = frame_offset_xy
+    crop_w, crop_h = crop_size_wh
+    kxy, kconf = _empty_pose()
+    for blaze_idx, coco_name in BLAZEPOSE_TO_COCO.items():
+        lm = landmarks[blaze_idx]
+        coco_idx = KP[coco_name]
+        kxy[coco_idx] = [x1 + lm.x * crop_w, y1 + lm.y * crop_h]
+        visibility = getattr(lm, "visibility", None)
+        kconf[coco_idx] = float(visibility) if visibility is not None else 1.0
+    return kxy, kconf
+
+
+def padded_crop_box(bbox: np.ndarray, frame_shape: tuple[int, int],
+                     padding: float = 0.15) -> tuple[int, int, int, int]:
+    """Box di ritaglio (x1,y1,x2,y2, interi, clampati ai bordi del frame) a
+    partire da un bbox di segmentazione, allargato di `padding` (frazione
+    di larghezza/altezza) per non tagliare le estremita' (mani alzate,
+    piedi) quando il box e' stretto sulla sagoma. Isolata per essere
+    testabile senza mediapipe/camera."""
+    h, w = frame_shape
+    x1, y1, x2, y2 = bbox
+    bw, bh = x2 - x1, y2 - y1
+    x1 = max(0, int(x1 - bw * padding))
+    y1 = max(0, int(y1 - bh * padding))
+    x2 = min(w, int(x2 + bw * padding))
+    y2 = min(h, int(y2 + bh * padding))
+    return x1, y1, x2, y2
+
+
+class MediaPipeCropPoseEstimator:
+    """Wrapper su MediaPipe Tasks PoseLandmarker in modalita' SINGOLA
+    persona (`num_poses=1`), applicato a un ritaglio del frame -- vedi il
+    docstring del modulo per il perche'. Import di mediapipe ritardato
+    (come `pose_estimation.PoseTracker` / `gaze_head.HeadGazeEstimator`),
+    cosi' il resto della pipeline resta utilizzabile/testabile anche senza
+    mediapipe installato.
+    """
+
+    def __init__(self, model_path: str = "pose_landmarker_lite.task",
+                 min_pose_detection_confidence: float = 0.5):
+        import mediapipe as mp
+        from mediapipe.tasks.python import vision, BaseOptions
+
+        options = vision.PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=model_path),
+            running_mode=vision.RunningMode.VIDEO,
+            num_poses=1,
+            min_pose_detection_confidence=min_pose_detection_confidence,
+        )
+        self._mp = mp
+        self._landmarker = vision.PoseLandmarker.create_from_options(options)
+
+    def estimate(self, frame_bgr: np.ndarray, bbox: np.ndarray, timestamp_ms: int,
+                 padding: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
+        """Rileva la posa DENTRO `bbox` (x1,y1,x2,y2, es. dal tracker di
+        segmentazione). Ritorna (kxy, kconf) in coordinate PIXEL DEL FRAME
+        INTERO (non del ritaglio), stesso schema COCO-17 di
+        `pose_estimation.py` -- NaN/0 per i giunti senza equivalente
+        BlazePose o se nessuna posa e' stata rilevata nel ritaglio."""
+        import cv2
+
+        h, w = frame_bgr.shape[:2]
+        x1, y1, x2, y2 = padded_crop_box(bbox, (h, w), padding)
+        if x2 <= x1 or y2 <= y1:
+            return _empty_pose()
+
+        crop = frame_bgr[y1:y2, x1:x2]
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+        result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
+
+        if not result.pose_landmarks:
+            return _empty_pose()
+
+        landmarks = result.pose_landmarks[0]  # num_poses=1: al massimo una posa
+        crop_h, crop_w = crop.shape[:2]
+        return blazepose_to_coco(landmarks, (x1, y1), (crop_w, crop_h))

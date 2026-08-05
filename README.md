@@ -51,6 +51,7 @@ pose-behavior-pipeline/
 │   │   ├── features.py            # angles, velocity, symmetry, repetitiveness, synchrony
 │   │   ├── gaze_head.py           # head pose, mouth/eye/eyebrow signals (MediaPipe)
 │   │   ├── hands.py               # finger-level tracking (MediaPipe HandLandmarker)
+│   │   ├── mediapipe_pose.py      # single-person pose (MediaPipe), applied per tracked mask
 │   │   ├── reid.py                # re-id after exit/re-entry (body-shape signature + color)
 │   │   ├── chuv_features.py       # reference-pipeline feature set, replicated in real time
 │   │   └── anonymize.py           # face blurring
@@ -78,21 +79,26 @@ cd src && python gui_app.py
 A local Tkinter window (starts maximized), fully in English: load a video
 file, pick the pipeline mode (Segmentation / Pose estimation / Both), model
 size, FPS, max number of people, re-identification on/off, and — only when
-the mode is Pose estimation or Both — Hands / Face (eyes, mouth, eyebrows,
-head movement), then Play to watch the overlay live in the same window,
-with Back/Forward to step through already-processed frames instantly (from
-a cache, no re-inference) or resume live processing past the cached point.
-SAM3 is listed under model architecture but not selectable yet — it will
-run on the group's GPU machines, not this Mac; picking it shows a note and
-reverts to YOLO. "Both" runs both pipelines independently on the same
-source and draws the pose skeleton (+ hands/face if enabled) directly on
-top of the segmentation overlay (same frame, not side by side) — the two
-pipelines still don't share an identity, so the "ID N" label stays the
-segmentation's; the pose skeleton has no label of its own to avoid two
-conflicting numberings on the same person, see `gui/pipeline_runner.py`.
-Internally the GUI calls the exact same `iter_live_frames()` /
-`iter_segmentation_frames()` generators as the CLIs below, not a
-reimplementation — CLI and GUI can't drift apart.
+the mode is Pose estimation or Both — Hands and four independent Face
+checkboxes (Eyes, Mouth, Eyebrows, Head movement — pick any subset, they
+share a single underlying MediaPipe FaceLandmarker call per frame so
+enabling more of them is nearly free). Then Play to watch the overlay live
+in the same window, with Back/Forward to step through already-processed
+frames instantly (from a cache, no re-inference) or resume live processing
+past the cached point. SAM3 is listed under model architecture but not
+selectable yet — it will run on the group's GPU machines, not this Mac;
+picking it shows a note and reverts to YOLO. "Both" runs both pipelines
+independently on the same source and draws the pose skeleton (+ hands/face
+if enabled) directly on top of the segmentation overlay (same frame, not
+side by side) — the two pipelines still don't share an identity, so the
+"ID N" label stays the segmentation's; the pose skeleton has no label of
+its own to avoid two conflicting numberings on the same person, see
+`gui/pipeline_runner.py`. In Segmentation mode only, an extra "MediaPipe
+pose (inside each tracked mask)" checkbox draws a skeleton inside each
+already-tracked silhouette — see `pose/mediapipe_pose.py` below for what
+this does and doesn't do. Internally the GUI calls the exact same
+`iter_live_frames()` / `iter_segmentation_frames()` generators as the CLIs
+below, not a reimplementation — CLI and GUI can't drift apart.
 
 ## Usage (CLI)
 
@@ -133,6 +139,21 @@ with no escape valve: an unmatched track is always bound to the closest
 known identity regardless of signal strength. Read `seg_reid.py`'s
 docstring for the trade-offs both of these accept.
 
+Optionally, `--with-mediapipe-pose` applies MediaPipe Pose Landmarker in
+SINGLE-person mode inside the crop of each already-tracked mask (not a
+multi-person detector on the whole frame — MediaPipe has no built-in
+frame-to-frame tracking, so identity is borrowed entirely from the
+segmentation/`--with-seg-reid` tracking above; see `pose/mediapipe_pose.py`
+for why). Draws the skeleton on top of the mask and adds joint-angle
+columns (`pose_*`) to the CSV — no sliding-window features (movement
+energy, repetitiveness, gaze, hands) yet, only per-frame angles. Requires
+`pip install mediapipe` and a one-time model download:
+
+```bash
+curl -L -o pose_landmarker_lite.task \
+    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+```
+
 **Pose-based pipeline (on hold — keypoints, all behavioural features):**
 
 ```bash
@@ -140,16 +161,20 @@ cd src && python pipeline.py --source video.mp4 --fps 30 --out features.csv
 cd src && python live_demo.py --source 0 --fps 30 --device mps --out live_session.csv
 ```
 
-Optional flags stack freely: `--with-gaze` (head pose, mouth, eyes, eyebrows),
-`--with-hands` (finger tracking), `--with-reid` (re-identification across
-exit/re-entry), `--with-chuv-features` (reference feature set),
-`--target-track-id N` (restrict face/hand signals to one person),
-`--blur-faces`, plus the same `--tracker`/`--conf-threshold`/`--max-people`
-as above (with `--with-reid`, once `--max-people` identities are confirmed,
-an unmatched re-entry is forced onto the closest missing identity instead
-of minting a new one — the one deliberate exception to reid.py's "discount,
-never force" rule, see `reid.py` for the safety guardrails). See `--help`
-on each script for the full flag list and defaults.
+Optional flags stack freely: `--with-eyes` (blink rate), `--with-mouth`
+(opening + repetitiveness), `--with-eyebrows` (raise), `--with-head-movement`
+(yaw/pitch, shake/nod, shared-attention proxy between two people) — all four
+independent, share one MediaPipe FaceLandmarker call per frame so enabling
+more of them barely costs anything extra — `--with-hands` (finger tracking),
+`--with-reid` (re-identification across exit/re-entry), `--with-chuv-features`
+(reference feature set), `--target-track-id N` (restrict face/hand signals to
+one person), `--blur-faces`, plus the same
+`--tracker`/`--conf-threshold`/`--max-people` as above (with `--with-reid`,
+once `--max-people` identities are confirmed, an unmatched re-entry is forced
+onto the closest missing identity instead of minting a new one — the one
+deliberate exception to reid.py's "discount, never force" rule, see
+`reid.py` for the safety guardrails). See `--help` on each script for the
+full flag list and defaults.
 
 ## Modules, briefly
 
@@ -158,9 +183,20 @@ on each script for the full flag list and defaults.
   proximity and motor synchrony.
 - **`pose/gaze_head.py`** — head pose (yaw/pitch/roll), a 2D shared-attention
   proxy, mouth aspect ratio, blink rate, eyebrow raise. Single uncalibrated
-  camera, so treat as a rough proxy, not 3D gaze tracking.
+  camera, so treat as a rough proxy, not 3D gaze tracking. In `live_demo.py`
+  these are exposed as four independent flags (`--with-eyes`/`--with-mouth`/
+  `--with-eyebrows`/`--with-head-movement`), not one on/off switch, even
+  though they all come from a single FaceLandmarker call per frame.
 - **`pose/hands.py`** — 21 landmarks/hand, finger flexion, open/closed
   index, fingertip repetitiveness. Matched to the nearest YOLO wrist.
+- **`pose/mediapipe_pose.py`** — MediaPipe Pose Landmarker in single-person
+  mode, applied inside a bbox crop rather than the whole frame, with the 33
+  BlazePose landmarks remapped onto the same COCO-17 names used everywhere
+  else (`pose/keypoints.py`) so existing feature code doesn't care which
+  model produced the keypoints. Built specifically to reuse the
+  segmentation pipeline's already-stable tracking (see its docstring for
+  why this design — no multi-person tracking of its own) rather than
+  building a second one from scratch.
 - **`pose/reid.py`** — restores a person's ID after they leave and re-enter
   frame (or get briefly occluded in place, e.g. someone putting a jacket
   on them), using a clothing-invariant body-proportion signature

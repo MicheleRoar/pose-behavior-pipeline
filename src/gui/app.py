@@ -137,11 +137,37 @@ class App:
         self.hands_var = tk.BooleanVar(value=False)
         self.hands_check = ttk.Checkbutton(features, text="Hands", variable=self.hands_var)
         self.hands_check.pack(anchor="w")
-        self.face_var = tk.BooleanVar(value=False)
-        self.face_check = ttk.Checkbutton(
-            features, text="Face (eyes, mouth, eyebrows, head movement)",
-            variable=self.face_var)
-        self.face_check.pack(anchor="w")
+
+        # Face is decomposed into four independent checkboxes (not one
+        # "Face" toggle): each drives its own iter_live_frames() flag
+        # (with_eyes/with_mouth/with_eyebrows/with_head_movement), all
+        # sharing a single underlying FaceLandmarker call per frame -- see
+        # live_demo.py's docstring on with_face_any for why that's cheap.
+        ttk.Label(features, text="Face:").pack(anchor="w", pady=(4, 0))
+        self.eyes_var = tk.BooleanVar(value=False)
+        self.eyes_check = ttk.Checkbutton(features, text="  Eyes (blink rate)", variable=self.eyes_var)
+        self.eyes_check.pack(anchor="w")
+        self.mouth_var = tk.BooleanVar(value=False)
+        self.mouth_check = ttk.Checkbutton(features, text="  Mouth (opening + repetitiveness)",
+                                            variable=self.mouth_var)
+        self.mouth_check.pack(anchor="w")
+        self.eyebrows_var = tk.BooleanVar(value=False)
+        self.eyebrows_check = ttk.Checkbutton(features, text="  Eyebrows (raise)", variable=self.eyebrows_var)
+        self.eyebrows_check.pack(anchor="w")
+        self.head_movement_var = tk.BooleanVar(value=False)
+        self.head_movement_check = ttk.Checkbutton(
+            features, text="  Head movement (yaw/pitch, shake/nod, shared attention)",
+            variable=self.head_movement_var)
+        self.head_movement_check.pack(anchor="w")
+
+        # -- MediaPipe pose inside each tracked mask (Segmentation only) ------------
+        seg_extras = ttk.LabelFrame(control, text="Segmentation extras")
+        seg_extras.pack(fill="x", pady=(0, 10))
+        self.mediapipe_pose_var = tk.BooleanVar(value=False)
+        self.mediapipe_pose_check = ttk.Checkbutton(
+            seg_extras, text="MediaPipe pose (inside each tracked mask)",
+            variable=self.mediapipe_pose_var)
+        self.mediapipe_pose_check.pack(anchor="w")
 
         # -- transport --------------------------------------------------------------
         transport = ttk.Frame(control)
@@ -173,10 +199,22 @@ class App:
         pose_capable = self.mode_var.get() in (MODE_POSE, MODE_BOTH)
         state = "normal" if pose_capable else "disabled"
         self.hands_check.configure(state=state)
-        self.face_check.configure(state=state)
+        for check in (self.eyes_check, self.mouth_check, self.eyebrows_check, self.head_movement_check):
+            check.configure(state=state)
         if not pose_capable:
             self.hands_var.set(False)
-            self.face_var.set(False)
+            self.eyes_var.set(False)
+            self.mouth_var.set(False)
+            self.eyebrows_var.set(False)
+            self.head_movement_var.set(False)
+
+        # MediaPipe pose-per-mask only makes sense where there IS a mask,
+        # i.e. Segmentation mode -- see gui/pipeline_runner.py / README for
+        # why it's not wired into Pose estimation or Both (v1).
+        seg_only = self.mode_var.get() == MODE_SEGMENTATION
+        self.mediapipe_pose_check.configure(state="normal" if seg_only else "disabled")
+        if not seg_only:
+            self.mediapipe_pose_var.set(False)
 
     def _on_load_video(self) -> None:
         path = filedialog.askopenfilename(
@@ -221,18 +259,29 @@ class App:
 
         pose_capable = mode_key in ("pose", "both")
         with_hands = pose_capable and self.hands_var.get()
-        with_face = pose_capable and self.face_var.get()
+        with_eyes = pose_capable and self.eyes_var.get()
+        with_mouth = pose_capable and self.mouth_var.get()
+        with_eyebrows = pose_capable and self.eyebrows_var.get()
+        with_head_movement = pose_capable and self.head_movement_var.get()
         # re-id (pose.reid / segmentation.seg_reid) requires a known number
         # of people: without --max-people the checkbox is simply ignored
         # instead of making startup fail.
         with_reid = self.reid_var.get() and mode_key in ("pose", "both") and max_people is not None
         with_seg_reid = self.reid_var.get() and mode_key in ("segmentation", "both") and max_people is not None
+        # MediaPipe pose-per-mask only makes sense where there's a mask to
+        # apply it inside of -- see _on_mode_change (checkbox disabled
+        # outside Segmentation) and pipeline_runner.py.
+        with_mediapipe_pose = mode_key == "segmentation" and self.mediapipe_pose_var.get()
 
         kwargs = dict(
             mode=mode_key, source=self.video_path, fps=fps, device="mps",
             pose_model=f"yolo26{scale}-pose.pt",
-            with_hands=with_hands, with_face=with_face, with_reid=with_reid,
+            with_hands=with_hands,
+            with_eyes=with_eyes, with_mouth=with_mouth,
+            with_eyebrows=with_eyebrows, with_head_movement=with_head_movement,
+            with_reid=with_reid,
             seg_model=f"yolo26{scale}-seg.pt", with_seg_reid=with_seg_reid,
+            with_mediapipe_pose=with_mediapipe_pose,
             max_people=max_people,
         )
         return VideoPlayer(generator_factory=lambda: iter_pipeline_frames(**kwargs))

@@ -3,11 +3,16 @@ segmentation_demo.py
 =====================
 Pipeline principale ATTUALE (temporanea, vedi seg_estimation.py e README):
 tracking di sagome via YOLO26-seg + ByteTrack, overlay live con contorno
-maschera + etichetta ID, CSV con una riga per (frame, persona). Nessun
-keypoint/feature comportamentale per ora -- solo verifica visiva e
-quantitativa della stabilita' del tracking, in attesa di ricollegare
-pose/features/gaze/hands/reid (vedi seg_estimation.py per il contesto
-completo e il piano).
+maschera + etichetta ID, CSV con una riga per (frame, persona). Nessuna
+feature comportamentale a finestra scorrevole per ora (energia di
+movimento, repetitivita', gaze, mani -- vedi pipeline pose, on hold).
+
+Opzionale, con `--with-mediapipe-pose`: applica MediaPipe Pose Landmarker
+in modalita' SINGOLA persona DENTRO il ritaglio di ciascuna sagoma gia'
+tracciata (non un rilevatore multi-persona sull'intero frame -- vedi
+`pose/mediapipe_pose.py` per il perche' di questa scelta), disegna lo
+scheletro sopra la maschera e aggiunge gli angoli articolari istantanei
+(non a finestra scorrevole) al CSV.
 
 Uso, su un video gia' registrato:
 
@@ -31,31 +36,36 @@ import pandas as pd
 
 from segmentation.seg_estimation import SegTracker, mask_area, mask_centroid
 from segmentation.seg_reid import SegReIdentifier
-from common.viz import draw_fps, draw_person_label, get_track_color
+from common.viz import draw_fps, draw_person_label, draw_skeleton, get_track_color
+from pose.mediapipe_pose import MediaPipeCropPoseEstimator
+from pose.features import compute_joint_angles
 
 
 def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.pt",
                               device: str = "mps", conf_threshold: float = 0.1,
                               tracker_config: str = "bytetrack.yaml",
                               max_people: int | None = None,
-                              seg_reidentifier: SegReIdentifier | None = None):
+                              seg_reidentifier: SegReIdentifier | None = None,
+                              mediapipe_pose_estimator: MediaPipeCropPoseEstimator | None = None):
     """Generatore che contiene TUTTA la logica per-frame della pipeline di
-    segmentazione (tracking, re-id opzionale, disegno overlay), condiviso da
-    `run_segmentation()` (CLI, sotto) e da `pipeline_runner.py` (GUI) --
-    stessa scelta di `iter_live_frames()` in live_demo.py, vedi il suo
-    docstring per il perche'. `seg_reidentifier` va costruito dal chiamante
-    (serve un'istanza persistente per tutta la sessione, non ricreabile qui
-    frame per frame); passare `None` per usare i raw track_id di ByteTrack
-    cosi' come sono.
+    segmentazione (tracking, re-id opzionale, pose opzionale per maschera,
+    disegno overlay), condiviso da `run_segmentation()` (CLI, sotto) e da
+    `pipeline_runner.py` (GUI) -- stessa scelta di `iter_live_frames()` in
+    live_demo.py, vedi il suo docstring per il perche'. `seg_reidentifier`
+    e `mediapipe_pose_estimator` vanno costruiti dal chiamante (istanze
+    persistenti per tutta la sessione, non ricreabili qui frame per frame);
+    passare `None` per disattivarli.
 
-    Disegna SEMPRE l'overlay (maschera, contorno, etichetta ID) sul frame
+    Disegna SEMPRE l'overlay (maschera, contorno, etichetta ID, +
+    scheletro pose se `mediapipe_pose_estimator` e' attivo) sul frame
     restituito.
 
     Yield per ogni frame processato: `(vis, rows, now, frame_index, raw_ids)`
     dove `rows` e' la lista di dict (una riga per persona in questo frame,
-    stesso schema del CSV finale) e `raw_ids` sono i track_id grezzi di
-    ByteTrack PRIMA dell'eventuale re-id (utile solo per le statistiche di
-    churn stampate da `run_segmentation()`).
+    stesso schema del CSV finale -- con in piu' gli angoli articolari
+    `pose_*` se `mediapipe_pose_estimator` e' attivo) e `raw_ids` sono i
+    track_id grezzi di ByteTrack PRIMA dell'eventuale re-id (utile solo per
+    le statistiche di churn stampate da `run_segmentation()`).
     """
     tracker = SegTracker(model_name=model_name, device=device,
                           conf_threshold=conf_threshold, tracker=tracker_config,
@@ -74,13 +84,13 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
         for track_id, bbox, poly, conf in people:
             centroid = mask_centroid(poly)
             area = mask_area(poly)
-            rows_this_frame.append({
+            row = {
                 "frame": frame_result.frame_index, "time_s": now, "track_id": track_id,
                 "bbox_x1": float(bbox[0]), "bbox_y1": float(bbox[1]),
                 "bbox_x2": float(bbox[2]), "bbox_y2": float(bbox[3]),
                 "centroid_x": float(centroid[0]), "centroid_y": float(centroid[1]),
                 "mask_area_px": area, "box_conf": conf,
-            })
+            }
 
             color = get_track_color(track_id)
             if poly.shape[0] >= 3:
@@ -95,6 +105,18 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
             label_pos = centroid if not np.isnan(centroid).any() else bbox[:2]
             draw_person_label(vis, label_pos, track_id, color)
 
+            # -- pose DENTRO la maschera tracciata (opzionale): identita'
+            # "presa in prestito" da seg_reid/ByteTrack, vedi
+            # pose/mediapipe_pose.py per il perche' di questo design.
+            if mediapipe_pose_estimator is not None:
+                kxy, kconf = mediapipe_pose_estimator.estimate(
+                    frame_result.frame, bbox, timestamp_ms=int(now * 1000))
+                draw_skeleton(vis, kxy, kconf, color=color)
+                angles = compute_joint_angles(kxy)
+                row.update({f"pose_{k}": v for k, v in angles.items()})
+
+            rows_this_frame.append(row)
+
         yield vis, rows_this_frame, now, frame_result.frame_index, raw_ids
 
 
@@ -103,6 +125,8 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
                       tracker_config: str = "bytetrack.yaml",
                       max_people: int | None = None,
                       with_seg_reid: bool = False,
+                      with_mediapipe_pose: bool = False,
+                      pose_landmarker_model: str = "pose_landmarker_lite.task",
                       out_csv: str = "segmentation_session.csv",
                       show_window: bool = True) -> pd.DataFrame:
     """CLI: consuma `iter_segmentation_frames()` (unica fonte della logica
@@ -116,6 +140,9 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
         raise ValueError("--with-seg-reid richiede --max-people (il tetto rigido "
                           "ha senso solo con un numero di persone noto)")
     seg_reidentifier = SegReIdentifier(max_people=max_people) if with_seg_reid else None
+    mediapipe_pose_estimator = (
+        MediaPipeCropPoseEstimator(model_path=pose_landmarker_model) if with_mediapipe_pose else None
+    )
 
     rows: list[dict] = []
     raw_id_frame_count: dict[int, int] = defaultdict(int)   # id grezzi assegnati da ByteTrack
@@ -130,6 +157,7 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
         source=source, fps=fps, model_name=model_name, device=device,
         conf_threshold=conf_threshold, tracker_config=tracker_config,
         max_people=max_people, seg_reidentifier=seg_reidentifier,
+        mediapipe_pose_estimator=mediapipe_pose_estimator,
     ):
         n_frames = frame_index + 1
         for raw_id in raw_ids:
@@ -192,6 +220,15 @@ def main():
                               "person_id stabili (posizione/colore/forma della sagoma, vedi "
                               "seg_reid.py), garantendo che non vengano MAI creati piu' di "
                               "--max-people id in tutta la sessione. Richiede --max-people.")
+    parser.add_argument("--with-mediapipe-pose", action="store_true",
+                         help="Applica MediaPipe Pose Landmarker (modalita' singola persona) "
+                              "dentro il ritaglio di ciascuna sagoma tracciata: disegna lo "
+                              "scheletro e aggiunge gli angoli articolari (pose_*) al CSV. "
+                              "Richiede mediapipe + il modello --pose-landmarker-model, vedi "
+                              "pose/mediapipe_pose.py.")
+    parser.add_argument("--pose-landmarker-model", default="pose_landmarker_lite.task",
+                         help="Modello MediaPipe Pose Landmarker (usato solo con "
+                              "--with-mediapipe-pose)")
     parser.add_argument("--out", default="segmentation_session.csv", help="CSV di output")
     parser.add_argument("--no-window", action="store_true",
                          help="Esegui senza finestra video (solo log + CSV, piu' veloce)")
@@ -201,6 +238,8 @@ def main():
     run_segmentation(source, fps=args.fps, model_name=args.model, device=args.device,
                       conf_threshold=args.conf_threshold, tracker_config=args.tracker,
                       max_people=args.max_people, with_seg_reid=args.with_seg_reid,
+                      with_mediapipe_pose=args.with_mediapipe_pose,
+                      pose_landmarker_model=args.pose_landmarker_model,
                       out_csv=args.out, show_window=not args.no_window)
 
 

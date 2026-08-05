@@ -20,11 +20,13 @@ Esempio (solo scheletro):
     python live_demo.py --source 0 --fps 30 --model yolo26n-pose.pt --device mps \\
         --window-seconds 3 --blur-faces --out live_session.csv
 
-Esempio con head-pose/sguardo e mani a livello di dita (richiede mediapipe
-e i rispettivi modelli, vedi README):
+Esempio con segnali del viso (occhi/bocca/sopracciglia/movimento testa,
+selezionabili indipendentemente) e mani a livello di dita (richiede
+mediapipe e i rispettivi modelli, vedi README):
 
     python live_demo.py --source 0 --fps 30 --device mps \\
-        --with-gaze --with-hands --out live_session.csv
+        --with-eyes --with-mouth --with-eyebrows --with-head-movement \\
+        --with-hands --out live_session.csv
 
 Con più persone nell'inquadratura (es. bambino + caregiver), YOLO+ByteTrack
 assegna un track_id distinto a ciascuna e li tratta separatamente per
@@ -35,7 +37,7 @@ ID vengono stampati a console ("Nuova persona rilevata: ID N"), poi
 rilancia specificando quello scelto:
 
     python live_demo.py --source 0 --fps 30 --device mps \\
-        --with-gaze --with-hands --target-track-id 1 --out live_session.csv
+        --with-eyes --with-mouth --with-hands --target-track-id 1 --out live_session.csv
 
 Per interrompere la sessione: premi 'q' con la finestra video attiva (il
 tasto viene intercettato solo se la finestra ha il focus — clicca sul
@@ -129,7 +131,8 @@ def format_metrics(track_id: int, angles: dict, energy: float, rep_score: dict,
 
 def iter_live_frames(source, fps: float, model_name: str, device: str,
                       window_seconds: float, blur_faces: bool,
-                      with_gaze: bool = False,
+                      with_eyes: bool = False, with_mouth: bool = False,
+                      with_eyebrows: bool = False, with_head_movement: bool = False,
                       face_model: str = "face_landmarker.task",
                       with_hands: bool = False, hand_model: str = "hand_landmarker.task",
                       activity_threshold: float = 40.0, self_touch_threshold: float = 0.5,
@@ -199,8 +202,15 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
     pitch_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))
     self_touch_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))
 
+    # --- viso: le quattro sotto-feature (occhi/blink, bocca, sopracciglia,
+    # movimento testa) condividono UNA SOLA chiamata a FaceLandmarker per
+    # frame (restituisce sempre tutti i landmark del volto insieme, non ha
+    # senso richiamarlo piu' volte con sottoinsiemi diversi) -- ma ciascuna
+    # viene poi calcolata/salvata/disegnata solo se il proprio flag e'
+    # attivo, cosi' si possono selezionare indipendentemente in GUI/CLI. ---
+    with_face_any = with_eyes or with_mouth or with_eyebrows or with_head_movement
     head_gaze = None
-    if with_gaze:
+    if with_face_any:
         # Import ritardato: gaze_head richiede mediapipe + il modello
         # face_landmarker.task, non necessari per il resto della pipeline.
         from pose.gaze_head import (
@@ -245,7 +255,7 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
         head_centers: dict[int, np.ndarray] = {
             tid: head_center(kxy) for tid, kxy, _ in frame_result.people
         }
-        if with_gaze and frame_result.people:
+        if with_face_any and frame_result.people:
             timestamp_ms = int(now * 1000)
             face_results = head_gaze.process(frame, timestamp_ms)
             face_centers = [fr.landmarks_xy.mean(axis=0) for fr in face_results]
@@ -264,74 +274,101 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                     continue
 
                 fr = face_results[face_idx]
-                gaze_by_track[tid] = {"yaw": fr.yaw, "pitch": fr.pitch, "roll": fr.roll,
-                                       "attention_target": None, "attention_score": 0.0,
-                                       "mouth_ratio": fr.mouth_ratio,
-                                       "blink_rate_per_min": np.nan,
-                                       "mouth_rep_power_ratio": np.nan, "mouth_rep_freq_hz": np.nan,
-                                       "yaw_rep_power_ratio": np.nan, "yaw_rep_freq_hz": np.nan,
-                                       "pitch_rep_power_ratio": np.nan, "pitch_rep_freq_hz": np.nan,
-                                       "left_eyebrow_raise": fr.left_eyebrow_raise,
-                                       "right_eyebrow_raise": fr.right_eyebrow_raise,
-                                       "mouth_pts": fr.landmarks_xy[[MOUTH_TOP, MOUTH_BOTTOM, MOUTH_LEFT, MOUTH_RIGHT]],
-                                       "left_eye_pts": fr.landmarks_xy[LEFT_EYE_EAR_IDX],
-                                       "right_eye_pts": fr.landmarks_xy[RIGHT_EYE_EAR_IDX],
-                                       "left_eyebrow_pts": fr.landmarks_xy[LEFT_EYEBROW_IDX],
-                                       "right_eyebrow_pts": fr.landmarks_xy[RIGHT_EYEBROW_IDX]}
+                # attention_target/score sempre presenti (servono da placeholder
+                # anche se with_head_movement e' spento): il resto delle chiavi
+                # viene aggiunto SOLO dalla sotto-feature corrispondente attiva,
+                # cosi' ciascuna e' selezionabile indipendentemente -- il resto
+                # della funzione (format_metrics, CSV, disegno) legge sempre con
+                # gaze.get(key, ...) quindi una chiave assente equivale a "non
+                # disponibile", non a un errore.
+                entry: dict = {"attention_target": None, "attention_score": 0.0}
 
-                if not np.isnan(fr.eye_ratio):
-                    ear_buffers[tid].append(fr.eye_ratio)
-                if len(ear_buffers[tid]) >= window_len:
-                    ear_seq = np.array(ear_buffers[tid])
-                    closed = ear_seq < blink_ear_threshold
-                    n_blinks = int(np.sum(np.diff(closed.astype(int)) == 1))
-                    gaze_by_track[tid]["blink_rate_per_min"] = n_blinks / window_seconds * 60.0
+                if with_head_movement:
+                    entry.update({
+                        "yaw": fr.yaw, "pitch": fr.pitch, "roll": fr.roll,
+                        "yaw_rep_power_ratio": np.nan, "yaw_rep_freq_hz": np.nan,
+                        "pitch_rep_power_ratio": np.nan, "pitch_rep_freq_hz": np.nan,
+                    })
+                    # --- scuotimento (yaw) e annuimento (pitch) della testa:
+                    # stessa logica FFT usata per polso/dita, applicata pero'
+                    # al segnale grezzo di yaw/pitch (non alla sua velocita')
+                    # perche' e' gia' un angolo con segno intorno a uno zero
+                    # naturale -- evita l'artefatto di raddoppio della
+                    # frequenza documentato per lo score su polso/dita (che usa
+                    # la velocita' perche' la posizione del polso deriva col
+                    # corpo).
+                    if not np.isnan(fr.yaw):
+                        yaw_buffers[tid].append(fr.yaw)
+                    if not np.isnan(fr.pitch):
+                        pitch_buffers[tid].append(fr.pitch)
+                    if len(yaw_buffers[tid]) >= window_len:
+                        yaw_rep = repetitive_motion_score(np.array(yaw_buffers[tid]), fps)
+                        entry["yaw_rep_power_ratio"] = yaw_rep["peak_power_ratio"]
+                        entry["yaw_rep_freq_hz"] = yaw_rep["peak_freq_hz"]
+                    if len(pitch_buffers[tid]) >= window_len:
+                        pitch_rep = repetitive_motion_score(np.array(pitch_buffers[tid]), fps)
+                        entry["pitch_rep_power_ratio"] = pitch_rep["peak_power_ratio"]
+                        entry["pitch_rep_freq_hz"] = pitch_rep["peak_freq_hz"]
 
-                # --- repetitivita' della bocca (proxy di mouthing/vocalizzazione
-                # ripetuta): la lingua non e' tracciabile con FaceLandmarker (che
-                # modella solo la superficie del volto, non strutture intraorali),
-                # quindi usiamo l'oscillazione periodica del MAR come sostituto
-                # comportamentalmente informativo, con la stessa logica FFT gia'
-                # usata per polso/dita.
-                if not np.isnan(fr.mouth_ratio):
-                    mar_buffers[tid].append(fr.mouth_ratio)
-                if len(mar_buffers[tid]) >= window_len:
-                    mouth_rep = repetitive_motion_score(np.array(mar_buffers[tid]), fps)
-                    gaze_by_track[tid]["mouth_rep_power_ratio"] = mouth_rep["peak_power_ratio"]
-                    gaze_by_track[tid]["mouth_rep_freq_hz"] = mouth_rep["peak_freq_hz"]
+                if with_mouth:
+                    entry.update({
+                        "mouth_ratio": fr.mouth_ratio,
+                        "mouth_rep_power_ratio": np.nan, "mouth_rep_freq_hz": np.nan,
+                        "mouth_pts": fr.landmarks_xy[[MOUTH_TOP, MOUTH_BOTTOM, MOUTH_LEFT, MOUTH_RIGHT]],
+                    })
+                    # --- repetitivita' della bocca (proxy di mouthing/
+                    # vocalizzazione ripetuta): la lingua non e' tracciabile
+                    # con FaceLandmarker (che modella solo la superficie del
+                    # volto, non strutture intraorali), quindi usiamo
+                    # l'oscillazione periodica del MAR come sostituto
+                    # comportamentalmente informativo, con la stessa logica
+                    # FFT gia' usata per polso/dita.
+                    if not np.isnan(fr.mouth_ratio):
+                        mar_buffers[tid].append(fr.mouth_ratio)
+                    if len(mar_buffers[tid]) >= window_len:
+                        mouth_rep = repetitive_motion_score(np.array(mar_buffers[tid]), fps)
+                        entry["mouth_rep_power_ratio"] = mouth_rep["peak_power_ratio"]
+                        entry["mouth_rep_freq_hz"] = mouth_rep["peak_freq_hz"]
 
-                # --- scuotimento (yaw) e annuimento (pitch) della testa: stessa
-                # logica FFT, applicata pero' al segnale grezzo di yaw/pitch (non
-                # alla sua velocita') perche' e' gia' un angolo con segno intorno
-                # a uno zero naturale -- evita l'artefatto di raddoppio della
-                # frequenza documentato per lo score su polso/dita (che usa la
-                # velocita' perche' la posizione del polso deriva col corpo).
-                if not np.isnan(fr.yaw):
-                    yaw_buffers[tid].append(fr.yaw)
-                if not np.isnan(fr.pitch):
-                    pitch_buffers[tid].append(fr.pitch)
-                if len(yaw_buffers[tid]) >= window_len:
-                    yaw_rep = repetitive_motion_score(np.array(yaw_buffers[tid]), fps)
-                    gaze_by_track[tid]["yaw_rep_power_ratio"] = yaw_rep["peak_power_ratio"]
-                    gaze_by_track[tid]["yaw_rep_freq_hz"] = yaw_rep["peak_freq_hz"]
-                if len(pitch_buffers[tid]) >= window_len:
-                    pitch_rep = repetitive_motion_score(np.array(pitch_buffers[tid]), fps)
-                    gaze_by_track[tid]["pitch_rep_power_ratio"] = pitch_rep["peak_power_ratio"]
-                    gaze_by_track[tid]["pitch_rep_freq_hz"] = pitch_rep["peak_freq_hz"]
+                if with_eyes:
+                    entry.update({
+                        "blink_rate_per_min": np.nan,
+                        "left_eye_pts": fr.landmarks_xy[LEFT_EYE_EAR_IDX],
+                        "right_eye_pts": fr.landmarks_xy[RIGHT_EYE_EAR_IDX],
+                    })
+                    if not np.isnan(fr.eye_ratio):
+                        ear_buffers[tid].append(fr.eye_ratio)
+                    if len(ear_buffers[tid]) >= window_len:
+                        ear_seq = np.array(ear_buffers[tid])
+                        closed = ear_seq < blink_ear_threshold
+                        n_blinks = int(np.sum(np.diff(closed.astype(int)) == 1))
+                        entry["blink_rate_per_min"] = n_blinks / window_seconds * 60.0
 
-            # euristica di attenzione condivisa: solo se ci sono esattamente
+                if with_eyebrows:
+                    entry.update({
+                        "left_eyebrow_raise": fr.left_eyebrow_raise,
+                        "right_eyebrow_raise": fr.right_eyebrow_raise,
+                        "left_eyebrow_pts": fr.landmarks_xy[LEFT_EYEBROW_IDX],
+                        "right_eyebrow_pts": fr.landmarks_xy[RIGHT_EYEBROW_IDX],
+                    })
+
+                gaze_by_track[tid] = entry
+
+            # euristica di attenzione condivisa: richiede lo yaw, quindi solo
+            # se with_head_movement e' attivo, e solo se ci sono esattamente
             # due persone con head-pose disponibile in questo frame
-            tracked_with_gaze = [t for t in track_ids if t in gaze_by_track]
-            if len(tracked_with_gaze) == 2:
-                a, b = tracked_with_gaze
-                score_a_to_b = joint_attention_score(
-                    head_centers[a], gaze_by_track[a]["yaw"], head_centers[b], frame.shape[1])
-                score_b_to_a = joint_attention_score(
-                    head_centers[b], gaze_by_track[b]["yaw"], head_centers[a], frame.shape[1])
-                gaze_by_track[a]["attention_target"] = b
-                gaze_by_track[a]["attention_score"] = score_a_to_b
-                gaze_by_track[b]["attention_target"] = a
-                gaze_by_track[b]["attention_score"] = score_b_to_a
+            if with_head_movement:
+                tracked_with_gaze = [t for t in track_ids if t in gaze_by_track]
+                if len(tracked_with_gaze) == 2:
+                    a, b = tracked_with_gaze
+                    score_a_to_b = joint_attention_score(
+                        head_centers[a], gaze_by_track[a]["yaw"], head_centers[b], frame.shape[1])
+                    score_b_to_a = joint_attention_score(
+                        head_centers[b], gaze_by_track[b]["yaw"], head_centers[a], frame.shape[1])
+                    gaze_by_track[a]["attention_target"] = b
+                    gaze_by_track[a]["attention_score"] = score_a_to_b
+                    gaze_by_track[b]["attention_target"] = a
+                    gaze_by_track[b]["attention_score"] = score_b_to_a
 
         # --- mani/dita (una volta per frame, poi associate ai polsi YOLO) ---
         hands_by_track: dict[int, dict] = defaultdict(dict)
@@ -419,18 +456,25 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                     **angles,
                 }
                 if gaze:
+                    # .get(key, NaN/None) ovunque: quali chiavi esistono
+                    # dipende da quali sotto-feature del viso sono attive
+                    # (vedi sopra) -- una colonna CSV resta comunque sempre
+                    # presente, solo NaN se la sua sotto-feature e' spenta.
                     row.update({
-                        "head_yaw": gaze["yaw"], "head_pitch": gaze["pitch"], "head_roll": gaze["roll"],
-                        "attention_target": gaze["attention_target"], "attention_score": gaze["attention_score"],
-                        "mouth_ratio": gaze["mouth_ratio"], "blink_rate_per_min": gaze["blink_rate_per_min"],
-                        "mouth_rep_power_ratio": gaze["mouth_rep_power_ratio"],
-                        "mouth_rep_freq_hz": gaze["mouth_rep_freq_hz"],
-                        "yaw_rep_power_ratio": gaze["yaw_rep_power_ratio"],
-                        "yaw_rep_freq_hz": gaze["yaw_rep_freq_hz"],
-                        "pitch_rep_power_ratio": gaze["pitch_rep_power_ratio"],
-                        "pitch_rep_freq_hz": gaze["pitch_rep_freq_hz"],
-                        "left_eyebrow_raise": gaze["left_eyebrow_raise"],
-                        "right_eyebrow_raise": gaze["right_eyebrow_raise"],
+                        "head_yaw": gaze.get("yaw", np.nan), "head_pitch": gaze.get("pitch", np.nan),
+                        "head_roll": gaze.get("roll", np.nan),
+                        "attention_target": gaze.get("attention_target"),
+                        "attention_score": gaze.get("attention_score", 0.0),
+                        "mouth_ratio": gaze.get("mouth_ratio", np.nan),
+                        "blink_rate_per_min": gaze.get("blink_rate_per_min", np.nan),
+                        "mouth_rep_power_ratio": gaze.get("mouth_rep_power_ratio", np.nan),
+                        "mouth_rep_freq_hz": gaze.get("mouth_rep_freq_hz", np.nan),
+                        "yaw_rep_power_ratio": gaze.get("yaw_rep_power_ratio", np.nan),
+                        "yaw_rep_freq_hz": gaze.get("yaw_rep_freq_hz", np.nan),
+                        "pitch_rep_power_ratio": gaze.get("pitch_rep_power_ratio", np.nan),
+                        "pitch_rep_freq_hz": gaze.get("pitch_rep_freq_hz", np.nan),
+                        "left_eyebrow_raise": gaze.get("left_eyebrow_raise", np.nan),
+                        "right_eyebrow_raise": gaze.get("right_eyebrow_raise", np.nan),
                     })
                 if hands_info:
                     for side, info in hands_info.items():
@@ -455,7 +499,12 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                 ang = np.radians(gaze["yaw"])
                 tip = (int(hc[0] + 60 * np.sin(ang)), int(hc[1] - 60 * np.cos(ang)))
                 cv2.arrowedLine(frame, tuple(hc.astype(int)), tip, (255, 0, 255), 2, tipLength=0.3)
-            if gaze and "mouth_pts" in gaze:
+            if gaze:
+                # draw_face_signals ignora silenziosamente le parti assenti
+                # (None): con le sotto-feature del viso indipendenti, "gaze"
+                # puo' contenere solo un sottoinsieme di bocca/occhi/
+                # sopracciglia -- non serve piu' controllare quale chiave
+                # specifica sia presente prima di chiamarla.
                 draw_face_signals(frame, gaze.get("mouth_pts"),
                                    gaze.get("left_eye_pts"), gaze.get("right_eye_pts"),
                                    gaze.get("left_eyebrow_pts"), gaze.get("right_eyebrow_pts"))
@@ -478,7 +527,9 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
 
 def run_live(source, fps: float, model_name: str, device: str,
              window_seconds: float, blur_faces: bool, out_csv: str,
-             show_window: bool = True, with_gaze: bool = False,
+             show_window: bool = True,
+             with_eyes: bool = False, with_mouth: bool = False,
+             with_eyebrows: bool = False, with_head_movement: bool = False,
              face_model: str = "face_landmarker.task",
              with_hands: bool = False, hand_model: str = "hand_landmarker.task",
              activity_threshold: float = 40.0, self_touch_threshold: float = 0.5,
@@ -502,7 +553,9 @@ def run_live(source, fps: float, model_name: str, device: str,
         for frame, rows, now, smoothed_fps, _people, _gaze_by_track, _hands_by_track in iter_live_frames(
             source=source, fps=fps, model_name=model_name, device=device,
             window_seconds=window_seconds, blur_faces=blur_faces,
-            with_gaze=with_gaze, face_model=face_model,
+            with_eyes=with_eyes, with_mouth=with_mouth,
+            with_eyebrows=with_eyebrows, with_head_movement=with_head_movement,
+            face_model=face_model,
             with_hands=with_hands, hand_model=hand_model,
             activity_threshold=activity_threshold,
             self_touch_threshold=self_touch_threshold,
@@ -567,10 +620,19 @@ def main():
     parser.add_argument("--blur-faces", action="store_true", help="Blur faces in real time (privacy)")
     parser.add_argument("--out", default="live_session.csv", help="Output CSV")
     parser.add_argument("--no-window", action="store_true", help="Run without a video window (logging only)")
-    parser.add_argument("--with-gaze", action="store_true",
-                         help="Enable head pose + shared-attention proxy (requires mediapipe + face_landmarker.task)")
+    parser.add_argument("--with-eyes", action="store_true",
+                         help="Enable eye tracking / blink rate (requires mediapipe + face_landmarker.task)")
+    parser.add_argument("--with-mouth", action="store_true",
+                         help="Enable mouth opening + repetitiveness (requires mediapipe + face_landmarker.task)")
+    parser.add_argument("--with-eyebrows", action="store_true",
+                         help="Enable eyebrow raise (requires mediapipe + face_landmarker.task)")
+    parser.add_argument("--with-head-movement", action="store_true",
+                         help="Enable head yaw/pitch, shake/nod repetitiveness, and the shared-"
+                              "attention proxy between two people (requires mediapipe + "
+                              "face_landmarker.task)")
     parser.add_argument("--face-model", default="face_landmarker.task",
-                         help="Path to the MediaPipe FaceLandmarker model")
+                         help="Path to the MediaPipe FaceLandmarker model (used by any of "
+                              "--with-eyes/--with-mouth/--with-eyebrows/--with-head-movement)")
     parser.add_argument("--with-hands", action="store_true",
                          help="Enable finger-level hand tracking (requires mediapipe + hand_landmarker.task)")
     parser.add_argument("--hand-model", default="hand_landmarker.task",
@@ -580,7 +642,7 @@ def main():
     parser.add_argument("--self-touch-threshold", type=float, default=0.5,
                          help="Threshold (0-1) above which a wrist near the head counts as self-touch")
     parser.add_argument("--blink-ear-threshold", type=float, default=0.2,
-                         help="Eye Aspect Ratio threshold below which the eye is considered closed (requires --with-gaze)")
+                         help="Eye Aspect Ratio threshold below which the eye is considered closed (requires --with-eyes)")
     parser.add_argument("--target-track-id", type=int, default=None,
                          help="If set, compute face/hand signals (blink, mouth, "
                               "eyebrows, head shake/nod, fingers) only for this "
@@ -645,7 +707,9 @@ def main():
               max_people=args.max_people,
               window_seconds=args.window_seconds, blur_faces=args.blur_faces,
               out_csv=args.out, show_window=not args.no_window,
-              with_gaze=args.with_gaze, face_model=args.face_model,
+              with_eyes=args.with_eyes, with_mouth=args.with_mouth,
+              with_eyebrows=args.with_eyebrows, with_head_movement=args.with_head_movement,
+              face_model=args.face_model,
               with_hands=args.with_hands, hand_model=args.hand_model,
               activity_threshold=args.activity_threshold,
               self_touch_threshold=args.self_touch_threshold,

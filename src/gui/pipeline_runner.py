@@ -44,6 +44,7 @@ import numpy as np
 from live_demo import iter_live_frames, head_center
 from segmentation_demo import iter_segmentation_frames
 from segmentation.seg_reid import SegReIdentifier
+from pose.mediapipe_pose import MediaPipeCropPoseEstimator
 from common.viz import draw_skeleton, draw_face_signals, draw_hand, get_track_color
 import cv2
 
@@ -63,24 +64,34 @@ def iter_pipeline_frames(
     # -- pose (usata se mode e' "pose" o "both") --
     pose_model: str = "yolo26n-pose.pt",
     with_hands: bool = False, hand_model: str = "hand_landmarker.task",
-    with_face: bool = False, face_model: str = "face_landmarker.task",
+    with_eyes: bool = False, with_mouth: bool = False,
+    with_eyebrows: bool = False, with_head_movement: bool = False,
+    face_model: str = "face_landmarker.task",
     with_reid: bool = False, blur_faces: bool = False,
     window_seconds: float = 3.0,
     # -- segmentazione (usata se mode e' "segmentation" o "both") --
     seg_model: str = "yolo26s-seg.pt", with_seg_reid: bool = False,
+    # -- pose dentro la maschera, MediaPipe (usata solo se mode e'
+    # "segmentation" -- vedi pose/mediapipe_pose.py e _iter_segmentation) --
+    with_mediapipe_pose: bool = False,
+    pose_landmarker_model: str = "pose_landmarker_lite.task",
     # -- condivisi --
     max_people: int | None = None, conf_threshold: float = 0.1,
     tracker_config: str = "bytetrack.yaml",
 ) -> Iterator[RunnerFrame]:
     """Dispatcher: sceglie la (o le) pipeline in base a `mode` e restituisce
     un iteratore di `RunnerFrame` uniforme, qualunque sia la combinazione di
-    feature selezionata nella GUI (mani/viso solo disponibili in "pose" o
-    "both", vedi app.py per l'abilitazione condizionale dei checkbox)."""
+    feature selezionata nella GUI (mani/occhi/bocca/sopracciglia/movimento
+    testa solo disponibili in "pose" o "both"; pose MediaPipe per maschera
+    solo in "segmentation" -- vedi app.py per l'abilitazione condizionale
+    dei checkbox)."""
     if mode == "pose":
         yield from _iter_pose(
             source=source, fps=fps, device=device, pose_model=pose_model,
             with_hands=with_hands, hand_model=hand_model,
-            with_face=with_face, face_model=face_model,
+            with_eyes=with_eyes, with_mouth=with_mouth,
+            with_eyebrows=with_eyebrows, with_head_movement=with_head_movement,
+            face_model=face_model,
             with_reid=with_reid, max_people=max_people, blur_faces=blur_faces,
             window_seconds=window_seconds, conf_threshold=conf_threshold,
             tracker_config=tracker_config,
@@ -89,13 +100,17 @@ def iter_pipeline_frames(
         yield from _iter_segmentation(
             source=source, fps=fps, device=device, seg_model=seg_model,
             max_people=max_people, with_seg_reid=with_seg_reid,
+            with_mediapipe_pose=with_mediapipe_pose,
+            pose_landmarker_model=pose_landmarker_model,
             conf_threshold=conf_threshold, tracker_config=tracker_config,
         )
     elif mode == "both":
         yield from _iter_both(
             source=source, fps=fps, device=device, pose_model=pose_model,
             with_hands=with_hands, hand_model=hand_model,
-            with_face=with_face, face_model=face_model,
+            with_eyes=with_eyes, with_mouth=with_mouth,
+            with_eyebrows=with_eyebrows, with_head_movement=with_head_movement,
+            face_model=face_model,
             with_reid=with_reid, blur_faces=blur_faces,
             window_seconds=window_seconds, seg_model=seg_model,
             with_seg_reid=with_seg_reid, max_people=max_people,
@@ -106,12 +121,15 @@ def iter_pipeline_frames(
 
 
 def _iter_pose(*, source, fps, device, pose_model, with_hands, hand_model,
-               with_face, face_model, with_reid, max_people, blur_faces,
+               with_eyes, with_mouth, with_eyebrows, with_head_movement, face_model,
+               with_reid, max_people, blur_faces,
                window_seconds, conf_threshold, tracker_config) -> Iterator[RunnerFrame]:
     for frame, rows, now, _smoothed_fps, _people, _gaze, _hands in iter_live_frames(
         source=source, fps=fps, model_name=pose_model, device=device,
         window_seconds=window_seconds, blur_faces=blur_faces,
-        with_gaze=with_face, face_model=face_model,
+        with_eyes=with_eyes, with_mouth=with_mouth,
+        with_eyebrows=with_eyebrows, with_head_movement=with_head_movement,
+        face_model=face_model,
         with_hands=with_hands, hand_model=hand_model,
         with_reid=with_reid, conf_threshold=conf_threshold,
         tracker_config=tracker_config, max_people=max_people,
@@ -120,21 +138,28 @@ def _iter_pose(*, source, fps, device, pose_model, with_hands, hand_model,
 
 
 def _iter_segmentation(*, source, fps, device, seg_model, max_people,
-                        with_seg_reid, conf_threshold, tracker_config) -> Iterator[RunnerFrame]:
+                        with_seg_reid, with_mediapipe_pose=False,
+                        pose_landmarker_model="pose_landmarker_lite.task",
+                        conf_threshold, tracker_config) -> Iterator[RunnerFrame]:
     if with_seg_reid and max_people is None:
         raise ValueError("with_seg_reid richiede max_people (il tetto rigido ha senso "
                           "solo con un numero di persone noto)")
     seg_reidentifier = SegReIdentifier(max_people=max_people) if with_seg_reid else None
+    mediapipe_pose_estimator = (
+        MediaPipeCropPoseEstimator(model_path=pose_landmarker_model) if with_mediapipe_pose else None
+    )
     for vis, rows, now, _frame_index, _raw_ids in iter_segmentation_frames(
         source=source, fps=fps, model_name=seg_model, device=device,
         conf_threshold=conf_threshold, tracker_config=tracker_config,
         max_people=max_people, seg_reidentifier=seg_reidentifier,
+        mediapipe_pose_estimator=mediapipe_pose_estimator,
     ):
         yield RunnerFrame(frame=vis, rows=rows, now=now, mode="segmentation")
 
 
 def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
-               with_face, face_model, with_reid, blur_faces, window_seconds,
+               with_eyes, with_mouth, with_eyebrows, with_head_movement, face_model,
+               with_reid, blur_faces, window_seconds,
                seg_model, with_seg_reid, max_people, conf_threshold,
                tracker_config) -> Iterator[RunnerFrame]:
     """Fa girare le due pipeline in parallelo e disegna lo scheletro pose
@@ -161,7 +186,9 @@ def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
     pose_gen = iter_live_frames(
         source=source, fps=fps, model_name=pose_model, device=device,
         window_seconds=window_seconds, blur_faces=blur_faces,
-        with_gaze=with_face, face_model=face_model,
+        with_eyes=with_eyes, with_mouth=with_mouth,
+        with_eyebrows=with_eyebrows, with_head_movement=with_head_movement,
+        face_model=face_model,
         with_hands=with_hands, hand_model=hand_model,
         with_reid=with_reid, conf_threshold=conf_threshold,
         tracker_config=tracker_config, max_people=max_people,
@@ -195,7 +222,11 @@ def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
             color = get_track_color(track_id)
             draw_skeleton(canvas, kxy, kconf, color=color)
             gaze = gaze_by_track.get(track_id)
-            if gaze and "mouth_pts" in gaze:
+            if gaze:
+                # draw_face_signals ignora silenziosamente le parti assenti
+                # (None): con le sotto-feature del viso indipendenti, "gaze"
+                # puo' contenere solo un sottoinsieme di bocca/occhi/
+                # sopracciglia.
                 draw_face_signals(canvas, gaze.get("mouth_pts"),
                                    gaze.get("left_eye_pts"), gaze.get("right_eye_pts"),
                                    gaze.get("left_eyebrow_pts"), gaze.get("right_eyebrow_pts"))

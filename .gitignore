@@ -16,6 +16,8 @@ src/yolo26s-seg.pt
 src/yolo26m-seg.pt
 src/face_landmarker.task
 src/hand_landmarker.task
+src/pose_landmarker_lite.task
+src/pose_landmarker_full.task
 
 # Output generati dai demo/dalla live_demo/dalla segmentation_demo (dati di
 # sessione, non codice)
