@@ -95,11 +95,11 @@ html, body {
 
 /* =============================================================== sidebar */
 .sidebar {
-  width: 300px;
+  width: 348px;
   flex-shrink: 0;
   background: var(--panel);
   border-right: 1px solid var(--border);
-  padding: 14px;
+  padding: 16px 18px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -262,15 +262,21 @@ html, body {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding: 14px;
-  gap: 10px;
+  padding: 8px 8px 10px;
+  gap: 8px;
 }
 
 .video-frame-wrap {
+  /* Niente bordo/cornice intorno al video: su un pannello di dimensioni
+     fisse un riquadro visibile avrebbe reso ancora piu' evidente lo spazio
+     "sprecato" del letterboxing quando l'aspect ratio del video non
+     coincide con quello del pannello -- qui il nero del video si fonde con
+     lo sfondo, cosi' l'occhio percepisce solo il video, non un riquadro
+     piu' grande di lui. object-fit:contain (sotto) resta invariato: il
+     frame va ingrandito al massimo SENZA mai tagliarlo. */
   flex: 1;
   background: #000;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
+  border-radius: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
