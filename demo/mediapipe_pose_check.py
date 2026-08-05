@@ -121,15 +121,95 @@ def part3_padded_crop_box_clamped_to_frame():
     print("Parte 3: il box di ritaglio con padding resta sempre dentro i bordi del frame — OK")
 
 
+def _find_pose_model() -> str | None:
+    """Percorso del modello pose_landmarker_lite.task se presente accanto a
+    src/ (scaricato per l'uso normale della pipeline) -- None se assente,
+    cosi' i test che richiedono mediapipe/il modello vero si saltano da
+    soli con una nota invece di far fallire l'intera suite su una macchina
+    senza download del modello."""
+    candidate = Path(__file__).resolve().parent.parent / "src" / "pose_landmarker_lite.task"
+    return str(candidate) if candidate.exists() else None
+
+
+def part4_defensive_clamp_absorbs_duplicate_or_out_of_order_timestamps():
+    """`MediaPipeCropPoseEstimator.estimate()` include una clamp difensiva:
+    anche chiamandolo due volte con LO STESSO timestamp (il bug segnalato
+    dall'utente: due persone nello stesso frame sulla stessa istanza) o con
+    un timestamp addirittura MINORE del precedente, non deve sollevare
+    'Input timestamp must be monotonically increasing' -- il valore
+    effettivo viene silenziosamente forzato a crescere. Questa e' una rete
+    di sicurezza aggiuntiva, NON il fix principale: il fix principale e'
+    non riusare mai la stessa istanza per persone diverse, vedi
+    MediaPipePoseByTrack (parte 5)."""
+    import mediapipe  # noqa: F401 -- solo per il check di disponibilita'
+    model_path = _find_pose_model()
+    if model_path is None:
+        print("Parte 4: SALTATA (pose_landmarker_lite.task non trovato accanto a src/ in questo "
+              "ambiente) — va verificata sul Mac dove il modello e' scaricato.")
+        return
+
+    from pose.mediapipe_pose import MediaPipeCropPoseEstimator
+
+    est = MediaPipeCropPoseEstimator(model_path=model_path)
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    bbox = np.array([20.0, 20.0, 150.0, 200.0])
+    est.estimate(frame, bbox, timestamp_ms=1000)
+    est.estimate(frame, bbox, timestamp_ms=1000)  # stesso timestamp di nuovo: non deve sollevare
+    est.estimate(frame, bbox, timestamp_ms=500)   # timestamp addirittura MINORE: non deve sollevare
+    print("Parte 4: la clamp difensiva in MediaPipeCropPoseEstimator.estimate() assorbe timestamp "
+          "duplicati/fuori ordine (lo scenario esatto del bug segnalato) senza sollevare "
+          "'monotonically increasing' — OK")
+
+
+def part5_pool_per_track_gives_each_person_an_independent_stream():
+    """MediaPipePoseByTrack (il fix principale): due persone nello stesso
+    frame (stesso timestamp), passate con due track_id diversi, ottengono
+    ciascuna la propria istanza `MediaPipeCropPoseEstimator` indipendente
+    (oggetti Python distinti, non solo "nessun crash" -- vedi il docstring
+    del modulo sul perche' condividerne una manderebbe in crash E
+    mescolerebbe lo smussamento temporale di persone diverse), su piu'
+    frame consecutivi, e forget() rimuove solo il track indicato."""
+    import mediapipe  # noqa: F401
+    model_path = _find_pose_model()
+    if model_path is None:
+        print("Parte 5: SALTATA (pose_landmarker_lite.task non trovato) — va verificata sul Mac.")
+        return
+
+    from pose.mediapipe_pose import MediaPipePoseByTrack
+
+    pool = MediaPipePoseByTrack(model_path=model_path)
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    bbox_a = np.array([10.0, 10.0, 100.0, 150.0])
+    bbox_b = np.array([150.0, 10.0, 260.0, 150.0])
+
+    for frame_idx in range(3):  # alcuni frame "consecutivi" per entrambe le persone
+        now_ms = int((frame_idx / 15.0) * 1000)
+        kxy_a, kconf_a = pool.estimate(track_id=1, frame_bgr=frame, bbox=bbox_a, timestamp_ms=now_ms)
+        kxy_b, kconf_b = pool.estimate(track_id=2, frame_bgr=frame, bbox=bbox_b, timestamp_ms=now_ms)
+        assert kxy_a.shape == (17, 2) and kconf_a.shape == (17,)
+        assert kxy_b.shape == (17, 2) and kconf_b.shape == (17,)
+
+    assert set(pool._estimators.keys()) == {1, 2}, "atteso un'istanza per ciascun track_id visto"
+    assert pool._estimators[1] is not pool._estimators[2], (
+        "le due persone devono avere istanze DISTINTE, non la stessa condivisa"
+    )
+    pool.forget(1)
+    assert set(pool._estimators.keys()) == {2}, "forget() deve rimuovere solo l'istanza del track indicato"
+    print("Parte 5: MediaPipePoseByTrack da' a ciascun track_id la propria istanza/il proprio "
+          "'stream' indipendente (due oggetti distinti, non condivisi) su piu' frame consecutivi, "
+          "senza crash — OK (fix del bug segnalato)")
+
+
 def main():
     part1_all_coco_joints_get_mapped()
     part2_per_joint_confidence_is_preserved_not_averaged()
     part2b_empty_pose_is_all_nan_zero_confidence()
     part3_padded_crop_box_clamped_to_frame()
-    print("\nVerifica completata senza errori: la rimappatura BlazePose -> COCO-17 e il calcolo "
-          "del box di ritaglio in mediapipe_pose.py si comportano come atteso.")
-    print("Nota: la classe MediaPipeCropPoseEstimator (che richiama mediapipe/una vera camera) "
-          "non e' testabile in questo ambiente sandbox -- va verificata sul Mac.")
+    part4_defensive_clamp_absorbs_duplicate_or_out_of_order_timestamps()
+    part5_pool_per_track_gives_each_person_an_independent_stream()
+    print("\nVerifica completata senza errori: la rimappatura BlazePose -> COCO-17, il calcolo "
+          "del box di ritaglio, e (dove mediapipe/il modello sono disponibili) il fix del bug "
+          "'monotonically increasing' in mediapipe_pose.py si comportano come atteso.")
 
 
 if __name__ == "__main__":

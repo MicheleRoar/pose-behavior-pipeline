@@ -44,7 +44,7 @@ import numpy as np
 from live_demo import iter_live_frames, head_center
 from segmentation_demo import iter_segmentation_frames
 from segmentation.seg_reid import SegReIdentifier
-from pose.mediapipe_pose import MediaPipeCropPoseEstimator
+from pose.mediapipe_pose import MediaPipePoseByTrack
 from common.viz import draw_skeleton, draw_face_signals, draw_hand, get_track_color
 import cv2
 
@@ -156,7 +156,7 @@ def _iter_segmentation(*, source, fps, device, seg_model, max_people,
                           "solo con un numero di persone noto)")
     seg_reidentifier = SegReIdentifier(max_people=max_people) if with_seg_reid else None
     mediapipe_pose_estimator = (
-        MediaPipeCropPoseEstimator(model_path=pose_landmarker_model) if with_mediapipe_pose else None
+        MediaPipePoseByTrack(model_path=pose_landmarker_model) if with_mediapipe_pose else None
     )
     for vis, rows, now, _frame_index, _raw_ids in iter_segmentation_frames(
         source=source, fps=fps, model_name=seg_model, device=device,

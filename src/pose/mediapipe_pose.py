@@ -156,6 +156,7 @@ class MediaPipeCropPoseEstimator:
         )
         self._mp = mp
         self._landmarker = vision.PoseLandmarker.create_from_options(options)
+        self._last_timestamp_ms: int | None = None  # vedi la clamp in estimate()
 
     def estimate(self, frame_bgr: np.ndarray, bbox: np.ndarray, timestamp_ms: int,
                  padding: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
@@ -163,13 +164,31 @@ class MediaPipeCropPoseEstimator:
         segmentazione). Ritorna (kxy, kconf) in coordinate PIXEL DEL FRAME
         INTERO (non del ritaglio), stesso schema COCO-17 di
         `pose_estimation.py` -- NaN/0 per i giunti senza equivalente
-        BlazePose o se nessuna posa e' stata rilevata nel ritaglio."""
+        BlazePose o se nessuna posa e' stata rilevata nel ritaglio.
+
+        ATTENZIONE (vedi anche il docstring di `MediaPipePoseByTrack`):
+        `detect_for_video` (modalita' VIDEO di MediaPipe) richiede
+        timestamp STRETTAMENTE crescenti per la stessa istanza -- chiamare
+        questo metodo con lo stesso timestamp due volte (es. per due
+        persone diverse nello stesso frame, sulla STESSA istanza) solleva
+        `ValueError: Input timestamp must be monotonically increasing`.
+        Un'istanza va quindi usata per UNA sola persona nel tempo (vedi
+        `MediaPipePoseByTrack`, che aggancia un'istanza per track_id). Come
+        rete di sicurezza aggiuntiva -- non come sostituto di quel design --
+        qui il timestamp effettivo viene comunque forzato a essere maggiore
+        dell'ultimo usato, cosi' un timestamp duplicato o fuori ordine (es.
+        per arrotondamento a fps molto bassi) non manda in crash ma perde
+        al piu' un millisecondo di precisione."""
         import cv2
 
         h, w = frame_bgr.shape[:2]
         x1, y1, x2, y2 = padded_crop_box(bbox, (h, w), padding)
         if x2 <= x1 or y2 <= y1:
             return _empty_pose()
+
+        if self._last_timestamp_ms is not None and timestamp_ms <= self._last_timestamp_ms:
+            timestamp_ms = self._last_timestamp_ms + 1
+        self._last_timestamp_ms = timestamp_ms
 
         crop = frame_bgr[y1:y2, x1:x2]
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
@@ -182,3 +201,52 @@ class MediaPipeCropPoseEstimator:
         landmarks = result.pose_landmarks[0]  # num_poses=1: al massimo una posa
         crop_h, crop_w = crop.shape[:2]
         return blazepose_to_coco(landmarks, (x1, y1), (crop_w, crop_h))
+
+
+class MediaPipePoseByTrack:
+    """Pool di un `MediaPipeCropPoseEstimator` INDIPENDENTE per ciascun
+    `track_id`, invece di un'unica istanza condivisa fra tutte le persone
+    del frame.
+
+    Perche' non basta un'istanza sola
+    ------------------------------------
+    `PoseLandmarker.detect_for_video` (modalita' VIDEO) e' pensato per UNO
+    stream continuo per istanza: mantiene stato interno tra una chiamata e
+    l'altra (filtraggio/smussamento temporale dei landmark) e richiede
+    timestamp strettamente crescenti. Il ciclo per-persona di
+    `segmentation_demo.py` chiama pero' `.estimate(...)` UNA VOLTA PER
+    PERSONA nello stesso frame, tutte con lo stesso timestamp (`now` del
+    frame) -- su un'istanza condivisa questo (a) fa scattare
+    `ValueError: Input timestamp must be monotonically increasing` alla
+    seconda persona del frame, e (b) anche aggirando il crash, mescolerebbe
+    lo stato di smussamento temporale di persone diverse come se fossero
+    un'unica persona che si teletrasporta da un corpo all'altro.
+
+    La soluzione e' che ogni track_id ottenga la propria istanza/il proprio
+    "stream" indipendente -- creata alla prima apparizione del track e
+    riusata per tutta la sua vita, cosi' ciascuna vede una sequenza di
+    timestamp coerente e uno stato di smussamento che appartiene solo a
+    lei."""
+
+    def __init__(self, model_path: str = "pose_landmarker_lite.task",
+                 min_pose_detection_confidence: float = 0.5):
+        self._model_path = model_path
+        self._min_conf = min_pose_detection_confidence
+        self._estimators: dict[int, MediaPipeCropPoseEstimator] = {}
+
+    def estimate(self, track_id: int, frame_bgr: np.ndarray, bbox: np.ndarray,
+                 timestamp_ms: int, padding: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
+        estimator = self._estimators.get(track_id)
+        if estimator is None:
+            estimator = MediaPipeCropPoseEstimator(
+                model_path=self._model_path, min_pose_detection_confidence=self._min_conf)
+            self._estimators[track_id] = estimator
+        return estimator.estimate(frame_bgr, bbox, timestamp_ms=timestamp_ms, padding=padding)
+
+    def forget(self, track_id: int) -> None:
+        """Rimuove l'istanza di un track uscito di scena (es. scaduto in
+        seg_reid) -- evita di accumulare landmarker per id ormai morti in
+        sessioni lunghe con molto ricambio. Non obbligatorio (un handful di
+        istanze in piu' non e' un problema pratico), ma economico da
+        chiamare quando si sa gia' che un track e' morto."""
+        self._estimators.pop(track_id, None)

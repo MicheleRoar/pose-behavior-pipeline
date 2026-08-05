@@ -255,7 +255,13 @@ full flag list and defaults.
   model produced the keypoints. Built specifically to reuse the
   segmentation pipeline's already-stable tracking (see its docstring for
   why this design — no multi-person tracking of its own) rather than
-  building a second one from scratch.
+  building a second one from scratch. `MediaPipePoseByTrack` pools one
+  landmarker instance per `track_id` instead of sharing a single one across
+  everyone in the frame — MediaPipe's VIDEO running mode keeps per-instance
+  temporal state and requires strictly increasing timestamps, so a shared
+  instance called once per person per frame (same frame timestamp for each)
+  crashes with `ValueError: Input timestamp must be monotonically
+  increasing` as soon as a second person appears in the same frame.
 - **`pose/reid.py`** — restores a person's ID after they leave and re-enter
   frame (or get briefly occluded in place, e.g. someone putting a jacket
   on them), using a clothing-invariant body-proportion signature

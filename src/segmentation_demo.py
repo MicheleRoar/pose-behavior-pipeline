@@ -37,7 +37,7 @@ import pandas as pd
 from segmentation.seg_estimation import SegTracker, mask_area, mask_centroid
 from segmentation.seg_reid import SegReIdentifier
 from common.viz import draw_fps, draw_person_label, draw_skeleton, get_track_color
-from pose.mediapipe_pose import MediaPipeCropPoseEstimator
+from pose.mediapipe_pose import MediaPipePoseByTrack
 from pose.features import compute_joint_angles
 
 
@@ -46,7 +46,7 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
                               tracker_config: str = "bytetrack.yaml",
                               max_people: int | None = None,
                               seg_reidentifier: SegReIdentifier | None = None,
-                              mediapipe_pose_estimator: MediaPipeCropPoseEstimator | None = None):
+                              mediapipe_pose_estimator: MediaPipePoseByTrack | None = None):
     """Generatore che contiene TUTTA la logica per-frame della pipeline di
     segmentazione (tracking, re-id opzionale, pose opzionale per maschera,
     disegno overlay), condiviso da `run_segmentation()` (CLI, sotto) e da
@@ -54,7 +54,11 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
     live_demo.py, vedi il suo docstring per il perche'. `seg_reidentifier`
     e `mediapipe_pose_estimator` vanno costruiti dal chiamante (istanze
     persistenti per tutta la sessione, non ricreabili qui frame per frame);
-    passare `None` per disattivarli.
+    passare `None` per disattivarli. `mediapipe_pose_estimator` e' un
+    `MediaPipePoseByTrack` (un'istanza MediaPipe indipendente PER PERSONA,
+    non condivisa) -- vedi il suo docstring per il perche' un'unica istanza
+    condivisa fra le persone del frame manderebbe MediaPipe in crash
+    ("Input timestamp must be monotonically increasing").
 
     Disegna SEMPRE l'overlay (maschera, contorno, etichetta ID, +
     scheletro pose se `mediapipe_pose_estimator` e' attivo) sul frame
@@ -110,7 +114,7 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
             # pose/mediapipe_pose.py per il perche' di questo design.
             if mediapipe_pose_estimator is not None:
                 kxy, kconf = mediapipe_pose_estimator.estimate(
-                    frame_result.frame, bbox, timestamp_ms=int(now * 1000))
+                    track_id, frame_result.frame, bbox, timestamp_ms=int(now * 1000))
                 draw_skeleton(vis, kxy, kconf, color=color)
                 angles = compute_joint_angles(kxy)
                 row.update({f"pose_{k}": v for k, v in angles.items()})
@@ -141,7 +145,7 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
                           "ha senso solo con un numero di persone noto)")
     seg_reidentifier = SegReIdentifier(max_people=max_people) if with_seg_reid else None
     mediapipe_pose_estimator = (
-        MediaPipeCropPoseEstimator(model_path=pose_landmarker_model) if with_mediapipe_pose else None
+        MediaPipePoseByTrack(model_path=pose_landmarker_model) if with_mediapipe_pose else None
     )
 
     rows: list[dict] = []
