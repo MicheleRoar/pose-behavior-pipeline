@@ -34,6 +34,70 @@ from segmentation.seg_reid import SegReIdentifier
 from common.viz import draw_fps, draw_person_label, get_track_color
 
 
+def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.pt",
+                              device: str = "mps", conf_threshold: float = 0.1,
+                              tracker_config: str = "bytetrack.yaml",
+                              max_people: int | None = None,
+                              seg_reidentifier: SegReIdentifier | None = None):
+    """Generatore che contiene TUTTA la logica per-frame della pipeline di
+    segmentazione (tracking, re-id opzionale, disegno overlay), condiviso da
+    `run_segmentation()` (CLI, sotto) e da `pipeline_runner.py` (GUI) --
+    stessa scelta di `iter_live_frames()` in live_demo.py, vedi il suo
+    docstring per il perche'. `seg_reidentifier` va costruito dal chiamante
+    (serve un'istanza persistente per tutta la sessione, non ricreabile qui
+    frame per frame); passare `None` per usare i raw track_id di ByteTrack
+    cosi' come sono.
+
+    Disegna SEMPRE l'overlay (maschera, contorno, etichetta ID) sul frame
+    restituito.
+
+    Yield per ogni frame processato: `(vis, rows, now, frame_index, raw_ids)`
+    dove `rows` e' la lista di dict (una riga per persona in questo frame,
+    stesso schema del CSV finale) e `raw_ids` sono i track_id grezzi di
+    ByteTrack PRIMA dell'eventuale re-id (utile solo per le statistiche di
+    churn stampate da `run_segmentation()`).
+    """
+    tracker = SegTracker(model_name=model_name, device=device,
+                          conf_threshold=conf_threshold, tracker=tracker_config,
+                          max_people=max_people)
+
+    for frame_result in tracker.run(source=source):
+        now = frame_result.frame_index / fps
+        vis = frame_result.frame.copy()
+        raw_ids = [p[0] for p in frame_result.people]
+
+        people = frame_result.people
+        if seg_reidentifier is not None:
+            people = seg_reidentifier.resolve(people, now=now, frame=frame_result.frame)
+
+        rows_this_frame = []
+        for track_id, bbox, poly, conf in people:
+            centroid = mask_centroid(poly)
+            area = mask_area(poly)
+            rows_this_frame.append({
+                "frame": frame_result.frame_index, "time_s": now, "track_id": track_id,
+                "bbox_x1": float(bbox[0]), "bbox_y1": float(bbox[1]),
+                "bbox_x2": float(bbox[2]), "bbox_y2": float(bbox[3]),
+                "centroid_x": float(centroid[0]), "centroid_y": float(centroid[1]),
+                "mask_area_px": area, "box_conf": conf,
+            })
+
+            color = get_track_color(track_id)
+            if poly.shape[0] >= 3:
+                pts = poly.astype(np.int32).reshape(-1, 1, 2)
+                overlay = vis.copy()
+                cv2.fillPoly(overlay, [pts], color)
+                cv2.addWeighted(overlay, 0.25, vis, 0.75, 0, vis)
+                cv2.polylines(vis, [pts], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
+            else:
+                x1, y1, x2, y2 = bbox.astype(int)
+                cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+            label_pos = centroid if not np.isnan(centroid).any() else bbox[:2]
+            draw_person_label(vis, label_pos, track_id, color)
+
+        yield vis, rows_this_frame, now, frame_result.frame_index, raw_ids
+
+
 def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
                       device: str = "mps", conf_threshold: float = 0.1,
                       tracker_config: str = "bytetrack.yaml",
@@ -41,10 +105,9 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
                       with_seg_reid: bool = False,
                       out_csv: str = "segmentation_session.csv",
                       show_window: bool = True) -> pd.DataFrame:
-    tracker = SegTracker(model_name=model_name, device=device,
-                          conf_threshold=conf_threshold, tracker=tracker_config,
-                          max_people=max_people)
-
+    """CLI: consuma `iter_segmentation_frames()` (unica fonte della logica
+    per-frame, condivisa con la GUI), gestisce la finestra cv2 (se
+    show_window) e stampa le statistiche finali di churn/re-id."""
     # -- re-identificazione (opzionale, richiede --max-people): sostituisce
     # subito frame_result.people con la versione a person_id stabile, con
     # tetto rigido su max_people -- vedi seg_reid.py per il perche' e i
@@ -63,43 +126,17 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
 
     t_start = time.time()
     n_frames = 0
-    for frame_result in tracker.run(source=source):
-        n_frames = frame_result.frame_index + 1
-        now = frame_result.frame_index / fps
-        vis = frame_result.frame.copy() if show_window else None
-
-        for raw_id, *_rest in frame_result.people:
+    for vis, rows_this_frame, now, frame_index, raw_ids in iter_segmentation_frames(
+        source=source, fps=fps, model_name=model_name, device=device,
+        conf_threshold=conf_threshold, tracker_config=tracker_config,
+        max_people=max_people, seg_reidentifier=seg_reidentifier,
+    ):
+        n_frames = frame_index + 1
+        for raw_id in raw_ids:
             raw_id_frame_count[raw_id] += 1
-
-        people = frame_result.people
-        if seg_reidentifier is not None:
-            people = seg_reidentifier.resolve(people, now=now, frame=frame_result.frame)
-
-        for track_id, bbox, poly, conf in people:
-            final_id_frame_count[track_id] += 1
-            centroid = mask_centroid(poly)
-            area = mask_area(poly)
-            rows.append({
-                "frame": frame_result.frame_index, "time_s": now, "track_id": track_id,
-                "bbox_x1": float(bbox[0]), "bbox_y1": float(bbox[1]),
-                "bbox_x2": float(bbox[2]), "bbox_y2": float(bbox[3]),
-                "centroid_x": float(centroid[0]), "centroid_y": float(centroid[1]),
-                "mask_area_px": area, "box_conf": conf,
-            })
-
-            if show_window:
-                color = get_track_color(track_id)
-                if poly.shape[0] >= 3:
-                    pts = poly.astype(np.int32).reshape(-1, 1, 2)
-                    overlay = vis.copy()
-                    cv2.fillPoly(overlay, [pts], color)
-                    cv2.addWeighted(overlay, 0.25, vis, 0.75, 0, vis)
-                    cv2.polylines(vis, [pts], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
-                else:
-                    x1, y1, x2, y2 = bbox.astype(int)
-                    cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-                label_pos = centroid if not np.isnan(centroid).any() else bbox[:2]
-                draw_person_label(vis, label_pos, track_id, color)
+        for row in rows_this_frame:
+            final_id_frame_count[row["track_id"]] += 1
+        rows.extend(rows_this_frame)
 
         if show_window:
             elapsed = time.time() - t_start

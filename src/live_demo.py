@@ -127,21 +127,36 @@ def format_metrics(track_id: int, angles: dict, energy: float, rep_score: dict,
     return lines
 
 
-def run_live(source, fps: float, model_name: str, device: str,
-             window_seconds: float, blur_faces: bool, out_csv: str,
-             show_window: bool = True, with_gaze: bool = False,
-             face_model: str = "face_landmarker.task",
-             with_hands: bool = False, hand_model: str = "hand_landmarker.task",
-             activity_threshold: float = 40.0, self_touch_threshold: float = 0.5,
-             blink_ear_threshold: float = 0.2,
-             target_track_id: int | None = None,
-             with_reid: bool = False, reid_max_lost_seconds: float = 180.0,
-             reid_max_signature_dist: float = 0.12,
-             reid_min_signature_frames: int = 15,
-             reid_color_weight: float = 0.5, reid_position_weight: float = 0.5,
-             with_chuv_features: bool = False, conf_threshold: float = 0.1,
-             tracker_config: str = "bytetrack.yaml",
-             max_people: int | None = None) -> pd.DataFrame:
+def iter_live_frames(source, fps: float, model_name: str, device: str,
+                      window_seconds: float, blur_faces: bool,
+                      with_gaze: bool = False,
+                      face_model: str = "face_landmarker.task",
+                      with_hands: bool = False, hand_model: str = "hand_landmarker.task",
+                      activity_threshold: float = 40.0, self_touch_threshold: float = 0.5,
+                      blink_ear_threshold: float = 0.2,
+                      target_track_id: int | None = None,
+                      with_reid: bool = False, reid_max_lost_seconds: float = 180.0,
+                      reid_max_signature_dist: float = 0.12,
+                      reid_min_signature_frames: int = 15,
+                      reid_color_weight: float = 0.5, reid_position_weight: float = 0.5,
+                      with_chuv_features: bool = False, conf_threshold: float = 0.1,
+                      tracker_config: str = "bytetrack.yaml",
+                      max_people: int | None = None):
+    """Generatore che contiene TUTTA la logica per-frame della pipeline pose
+    (tracking, reid, gaze, mani, feature engineering, disegno overlay) in un
+    unico punto, condiviso da `run_live()` (CLI, sotto) e da `pipeline_runner.py`
+    (GUI): evita di duplicare ~300 righe di logica stateful che altrimenti
+    rischierebbero di divergere tra le due interfacce nel tempo.
+
+    Disegna SEMPRE l'overlay sul frame restituito (skeleton, etichette,
+    pannelli metriche, fps) -- la GUI lo vuole sempre a schermo; il costo di
+    disegnarlo comunque quando `run_live()` e' in modalita' `--no-window` e'
+    trascurabile rispetto al costo dell'inferenza.
+
+    Yield per ogni frame processato: `(frame, rows, now, smoothed_fps)` dove
+    `rows` e' la lista di dict (una riga per persona tracciata in questo
+    frame, stesso schema del CSV finale prodotto da `run_live()`).
+    """
     tracker = PoseTracker(model_name=model_name, device=device,
                            conf_threshold=conf_threshold, tracker=tracker_config,
                            max_people=max_people)
@@ -178,7 +193,6 @@ def run_live(source, fps: float, model_name: str, device: str,
     yaw_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))
     pitch_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))
     self_touch_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))
-    log_rows = []
 
     head_gaze = None
     if with_gaze:
@@ -201,262 +215,304 @@ def run_live(source, fps: float, model_name: str, device: str,
 
     prev_t = time.time()
     smoothed_fps = fps
+
+    for frame_result in tracker.run(source=source, stream=True):
+        frame = frame_result.frame
+        now = time.time()
+        dt = max(now - prev_t, 1e-6)
+        smoothed_fps = 0.9 * smoothed_fps + 0.1 * (1.0 / dt)
+        prev_t = now
+
+        if reidentifier is not None:
+            frame_result.people = reidentifier.resolve(frame_result.people, now, frame=frame)
+
+        # --- nuove persone: stampa a console il track_id la prima volta che
+        # compare, cosi' si puo' identificare rapidamente chi e' chi (es. per
+        # scegliere --target-track-id) senza dover rileggere il CSV a posteriori ---
+        for tid, _, _ in frame_result.people:
+            if tid not in seen_track_ids:
+                seen_track_ids.add(tid)
+                print(f"New person detected: ID {tid}"
+                      + (" (target)" if target_track_id == tid else ""))
+
+        # --- head-pose / gaze (una volta per frame, poi associato ai track) ---
+        gaze_by_track: dict[int, dict] = {}
+        head_centers: dict[int, np.ndarray] = {
+            tid: head_center(kxy) for tid, kxy, _ in frame_result.people
+        }
+        if with_gaze and frame_result.people:
+            timestamp_ms = int(now * 1000)
+            face_results = head_gaze.process(frame, timestamp_ms)
+            face_centers = [fr.landmarks_xy.mean(axis=0) for fr in face_results]
+            track_ids = list(head_centers.keys())
+            assignment = match_faces_to_tracks(
+                face_centers, track_ids, [head_centers[t] for t in track_ids]
+            )
+            for face_idx, tid in assignment.items():
+                # --- filtro target: se e' impostato --target-track-id, calcola
+                # i segnali derivati dal volto (blink, bocca, sopracciglia,
+                # scuotimento/annuimento) solo per quella persona (es. il
+                # bambino), non per chiunque compaia nell'inquadratura (es. il
+                # caregiver). Lo scheletro/postura restano comunque tracciati
+                # per tutti (vedi loop principale piu' sotto). ---
+                if target_track_id is not None and tid != target_track_id:
+                    continue
+
+                fr = face_results[face_idx]
+                gaze_by_track[tid] = {"yaw": fr.yaw, "pitch": fr.pitch, "roll": fr.roll,
+                                       "attention_target": None, "attention_score": 0.0,
+                                       "mouth_ratio": fr.mouth_ratio,
+                                       "blink_rate_per_min": np.nan,
+                                       "mouth_rep_power_ratio": np.nan, "mouth_rep_freq_hz": np.nan,
+                                       "yaw_rep_power_ratio": np.nan, "yaw_rep_freq_hz": np.nan,
+                                       "pitch_rep_power_ratio": np.nan, "pitch_rep_freq_hz": np.nan,
+                                       "left_eyebrow_raise": fr.left_eyebrow_raise,
+                                       "right_eyebrow_raise": fr.right_eyebrow_raise,
+                                       "mouth_pts": fr.landmarks_xy[[MOUTH_TOP, MOUTH_BOTTOM, MOUTH_LEFT, MOUTH_RIGHT]],
+                                       "left_eye_pts": fr.landmarks_xy[LEFT_EYE_EAR_IDX],
+                                       "right_eye_pts": fr.landmarks_xy[RIGHT_EYE_EAR_IDX],
+                                       "left_eyebrow_pts": fr.landmarks_xy[LEFT_EYEBROW_IDX],
+                                       "right_eyebrow_pts": fr.landmarks_xy[RIGHT_EYEBROW_IDX]}
+
+                if not np.isnan(fr.eye_ratio):
+                    ear_buffers[tid].append(fr.eye_ratio)
+                if len(ear_buffers[tid]) >= window_len:
+                    ear_seq = np.array(ear_buffers[tid])
+                    closed = ear_seq < blink_ear_threshold
+                    n_blinks = int(np.sum(np.diff(closed.astype(int)) == 1))
+                    gaze_by_track[tid]["blink_rate_per_min"] = n_blinks / window_seconds * 60.0
+
+                # --- repetitivita' della bocca (proxy di mouthing/vocalizzazione
+                # ripetuta): la lingua non e' tracciabile con FaceLandmarker (che
+                # modella solo la superficie del volto, non strutture intraorali),
+                # quindi usiamo l'oscillazione periodica del MAR come sostituto
+                # comportamentalmente informativo, con la stessa logica FFT gia'
+                # usata per polso/dita.
+                if not np.isnan(fr.mouth_ratio):
+                    mar_buffers[tid].append(fr.mouth_ratio)
+                if len(mar_buffers[tid]) >= window_len:
+                    mouth_rep = repetitive_motion_score(np.array(mar_buffers[tid]), fps)
+                    gaze_by_track[tid]["mouth_rep_power_ratio"] = mouth_rep["peak_power_ratio"]
+                    gaze_by_track[tid]["mouth_rep_freq_hz"] = mouth_rep["peak_freq_hz"]
+
+                # --- scuotimento (yaw) e annuimento (pitch) della testa: stessa
+                # logica FFT, applicata pero' al segnale grezzo di yaw/pitch (non
+                # alla sua velocita') perche' e' gia' un angolo con segno intorno
+                # a uno zero naturale -- evita l'artefatto di raddoppio della
+                # frequenza documentato per lo score su polso/dita (che usa la
+                # velocita' perche' la posizione del polso deriva col corpo).
+                if not np.isnan(fr.yaw):
+                    yaw_buffers[tid].append(fr.yaw)
+                if not np.isnan(fr.pitch):
+                    pitch_buffers[tid].append(fr.pitch)
+                if len(yaw_buffers[tid]) >= window_len:
+                    yaw_rep = repetitive_motion_score(np.array(yaw_buffers[tid]), fps)
+                    gaze_by_track[tid]["yaw_rep_power_ratio"] = yaw_rep["peak_power_ratio"]
+                    gaze_by_track[tid]["yaw_rep_freq_hz"] = yaw_rep["peak_freq_hz"]
+                if len(pitch_buffers[tid]) >= window_len:
+                    pitch_rep = repetitive_motion_score(np.array(pitch_buffers[tid]), fps)
+                    gaze_by_track[tid]["pitch_rep_power_ratio"] = pitch_rep["peak_power_ratio"]
+                    gaze_by_track[tid]["pitch_rep_freq_hz"] = pitch_rep["peak_freq_hz"]
+
+            # euristica di attenzione condivisa: solo se ci sono esattamente
+            # due persone con head-pose disponibile in questo frame
+            tracked_with_gaze = [t for t in track_ids if t in gaze_by_track]
+            if len(tracked_with_gaze) == 2:
+                a, b = tracked_with_gaze
+                score_a_to_b = joint_attention_score(
+                    head_centers[a], gaze_by_track[a]["yaw"], head_centers[b], frame.shape[1])
+                score_b_to_a = joint_attention_score(
+                    head_centers[b], gaze_by_track[b]["yaw"], head_centers[a], frame.shape[1])
+                gaze_by_track[a]["attention_target"] = b
+                gaze_by_track[a]["attention_score"] = score_a_to_b
+                gaze_by_track[b]["attention_target"] = a
+                gaze_by_track[b]["attention_score"] = score_b_to_a
+
+        # --- mani/dita (una volta per frame, poi associate ai polsi YOLO) ---
+        hands_by_track: dict[int, dict] = defaultdict(dict)
+        if with_hands and frame_result.people:
+            timestamp_ms = int(now * 1000)
+            hand_results = hand_tracker.process(frame, timestamp_ms)
+            hand_wrist_points = [hr.landmarks_xy[0] for hr in hand_results]
+            track_wrists = []
+            for tid, kxy, _ in frame_result.people:
+                track_wrists.append((tid, "left", kxy[KP["left_wrist"]]))
+                track_wrists.append((tid, "right", kxy[KP["right_wrist"]]))
+            assignment = match_hands_to_wrists(hand_wrist_points, track_wrists)
+
+            for hand_idx, (tid, side) in assignment.items():
+                if target_track_id is not None and tid != target_track_id:
+                    continue
+                hand_xy = hand_results[hand_idx].landmarks_xy
+                openness = hand_openness(hand_xy)
+                curls = compute_finger_curls(hand_xy)
+
+                key = (tid, side)
+                fingertip_buffers[key].append(hand_xy[8])  # punta indice
+
+                rep_power_ratio, rep_freq_hz = np.nan, np.nan
+                if len(fingertip_buffers[key]) >= window_len:
+                    tip_seq = np.stack(fingertip_buffers[key])
+                    tip_speed = np.linalg.norm(np.diff(tip_seq, axis=0), axis=1) * fps
+                    rep = repetitive_motion_score(tip_speed, fps)
+                    rep_power_ratio, rep_freq_hz = rep["peak_power_ratio"], rep["peak_freq_hz"]
+
+                hands_by_track[tid][side] = {
+                    "landmarks": hand_xy, "openness": openness,
+                    "rep_power_ratio": rep_power_ratio, "rep_freq_hz": rep_freq_hz,
+                    **curls,
+                }
+
+        rows_this_frame = []
+        panel_y = 10  # riquadri metriche impilati in un angolo fisso (non seguono piu' la testa)
+        for track_id, kxy, kconf in frame_result.people:
+            if blur_faces:
+                frame = blur_face(frame, kxy, kconf)
+
+            kpt_buffers[track_id].append(kxy)
+            conf_buffers[track_id].append(kconf)
+
+            angles = compute_joint_angles(kxy)
+            gaze = gaze_by_track.get(track_id)
+            hands_info = hands_by_track.get(track_id)
+
+            # --- self-touch: calcolato ogni frame (non serve la finestra) ---
+            scale = torso_length(kxy)
+            touch_left = self_touch_score(kxy[KP["left_wrist"]], head_centers[track_id], scale)
+            touch_right = self_touch_score(kxy[KP["right_wrist"]], head_centers[track_id], scale)
+            touch_now = np.nanmax([touch_left, touch_right]) if not (np.isnan(touch_left) and np.isnan(touch_right)) else np.nan
+            if not np.isnan(touch_now):
+                self_touch_buffers[track_id].append(touch_now)
+
+            energy = np.nan
+            rep_score = {"peak_freq_hz": np.nan, "peak_power_ratio": np.nan}
+            posture = {"vertical_excursion": np.nan, "activity_ratio": np.nan,
+                       "self_touch_ratio": np.nan, "self_touch_now": touch_now}
+            if len(kpt_buffers[track_id]) >= window_len:
+                seq = np.stack(kpt_buffers[track_id])
+                diffs = np.diff(seq, axis=0) * fps
+                speed = np.linalg.norm(diffs, axis=2)
+                energy_series = (speed ** 2).sum(axis=1)
+                energy = float(energy_series.mean())
+                wrist_speed = speed[:, [KP["left_wrist"], KP["right_wrist"]]].mean(axis=1)
+                rep_score = repetitive_motion_score(wrist_speed, fps)
+
+                posture["vertical_excursion"] = vertical_excursion(seq)
+                posture["activity_ratio"] = activity_ratio(energy_series, activity_threshold)
+                if len(self_touch_buffers[track_id]) >= window_len:
+                    touch_arr = np.array(self_touch_buffers[track_id])
+                    posture["self_touch_ratio"] = float(np.mean(touch_arr > self_touch_threshold))
+
+                row = {
+                    "t": now, "track_id": track_id, "movement_energy": energy,
+                    "peak_freq_hz": rep_score["peak_freq_hz"],
+                    "peak_power_ratio": rep_score["peak_power_ratio"],
+                    "vertical_excursion": posture["vertical_excursion"],
+                    "activity_ratio": posture["activity_ratio"],
+                    "self_touch_ratio": posture["self_touch_ratio"],
+                    "self_touch_now": touch_now,
+                    **angles,
+                }
+                if gaze:
+                    row.update({
+                        "head_yaw": gaze["yaw"], "head_pitch": gaze["pitch"], "head_roll": gaze["roll"],
+                        "attention_target": gaze["attention_target"], "attention_score": gaze["attention_score"],
+                        "mouth_ratio": gaze["mouth_ratio"], "blink_rate_per_min": gaze["blink_rate_per_min"],
+                        "mouth_rep_power_ratio": gaze["mouth_rep_power_ratio"],
+                        "mouth_rep_freq_hz": gaze["mouth_rep_freq_hz"],
+                        "yaw_rep_power_ratio": gaze["yaw_rep_power_ratio"],
+                        "yaw_rep_freq_hz": gaze["yaw_rep_freq_hz"],
+                        "pitch_rep_power_ratio": gaze["pitch_rep_power_ratio"],
+                        "pitch_rep_freq_hz": gaze["pitch_rep_freq_hz"],
+                        "left_eyebrow_raise": gaze["left_eyebrow_raise"],
+                        "right_eyebrow_raise": gaze["right_eyebrow_raise"],
+                    })
+                if hands_info:
+                    for side, info in hands_info.items():
+                        row.update({
+                            f"{side}_hand_openness": info["openness"],
+                            f"{side}_hand_rep_power_ratio": info["rep_power_ratio"],
+                            f"{side}_hand_rep_freq_hz": info["rep_freq_hz"],
+                            **{f"{side}_{k}": v for k, v in info.items()
+                               if k.endswith("_curl")},
+                        })
+                if chuv_tracker is not None:
+                    chuv_feats = compute_chuv_features(kxy, track_id, now, chuv_tracker)
+                    row.update({f"chuv_{k}": v for k, v in chuv_feats.items()})
+                rows_this_frame.append(row)
+
+            track_color = get_track_color(track_id)
+            is_target = target_track_id == track_id
+            draw_skeleton(frame, kxy, kconf, color=track_color)
+            draw_person_label(frame, head_centers[track_id], track_id, track_color, is_target=is_target)
+            if gaze and not np.isnan(gaze.get("yaw", np.nan)):
+                hc = head_centers[track_id]
+                ang = np.radians(gaze["yaw"])
+                tip = (int(hc[0] + 60 * np.sin(ang)), int(hc[1] - 60 * np.cos(ang)))
+                cv2.arrowedLine(frame, tuple(hc.astype(int)), tip, (255, 0, 255), 2, tipLength=0.3)
+            if gaze and "mouth_pts" in gaze:
+                draw_face_signals(frame, gaze.get("mouth_pts"),
+                                   gaze.get("left_eye_pts"), gaze.get("right_eye_pts"),
+                                   gaze.get("left_eyebrow_pts"), gaze.get("right_eyebrow_pts"))
+            if hands_info:
+                for info in hands_info.values():
+                    draw_hand(frame, info["landmarks"])
+            # riquadro metriche impilato in un angolo fisso (alto a sinistra),
+            # non piu' sopra la testa della persona: cosi' non si sposta/non
+            # copre la scena mentre la persona si muove. Il colore del bordo
+            # (uguale allo scheletro) e la riga "ID N" lo collegano comunque
+            # alla persona giusta anche se non e' piu' vicino a lei sullo schermo.
+            metrics_lines = format_metrics(track_id, angles, energy, rep_score, gaze, hands_info, posture)
+            draw_text_block(frame, metrics_lines, origin=(10, panel_y), border_color=track_color)
+            _, panel_h = text_block_size(metrics_lines)
+            panel_y += panel_h + 8
+
+        draw_fps(frame, smoothed_fps)
+        yield frame, rows_this_frame, now, smoothed_fps
+
+
+def run_live(source, fps: float, model_name: str, device: str,
+             window_seconds: float, blur_faces: bool, out_csv: str,
+             show_window: bool = True, with_gaze: bool = False,
+             face_model: str = "face_landmarker.task",
+             with_hands: bool = False, hand_model: str = "hand_landmarker.task",
+             activity_threshold: float = 40.0, self_touch_threshold: float = 0.5,
+             blink_ear_threshold: float = 0.2,
+             target_track_id: int | None = None,
+             with_reid: bool = False, reid_max_lost_seconds: float = 180.0,
+             reid_max_signature_dist: float = 0.12,
+             reid_min_signature_frames: int = 15,
+             reid_color_weight: float = 0.5, reid_position_weight: float = 0.5,
+             with_chuv_features: bool = False, conf_threshold: float = 0.1,
+             tracker_config: str = "bytetrack.yaml",
+             max_people: int | None = None) -> pd.DataFrame:
+    """CLI: consuma `iter_live_frames()` (unica fonte della logica per-frame,
+    condivisa con la GUI), gestisce la finestra cv2 (se show_window) e
+    accumula/salva il CSV finale. Comportamento identico a prima del
+    refactor -- vedi `iter_live_frames()` per la logica vera e propria."""
+    log_rows = []
     window_name = "Live pose behaviour (q per uscire, o chiudi la finestra)"
 
     try:
-        for frame_result in tracker.run(source=source, stream=True):
-            frame = frame_result.frame
-            now = time.time()
-            dt = max(now - prev_t, 1e-6)
-            smoothed_fps = 0.9 * smoothed_fps + 0.1 * (1.0 / dt)
-            prev_t = now
-
-            if reidentifier is not None:
-                frame_result.people = reidentifier.resolve(frame_result.people, now, frame=frame)
-
-            # --- nuove persone: stampa a console il track_id la prima volta che
-            # compare, cosi' si puo' identificare rapidamente chi e' chi (es. per
-            # scegliere --target-track-id) senza dover rileggere il CSV a posteriori ---
-            for tid, _, _ in frame_result.people:
-                if tid not in seen_track_ids:
-                    seen_track_ids.add(tid)
-                    print(f"New person detected: ID {tid}"
-                          + (" (target)" if target_track_id == tid else ""))
-
-            # --- head-pose / gaze (una volta per frame, poi associato ai track) ---
-            gaze_by_track: dict[int, dict] = {}
-            head_centers: dict[int, np.ndarray] = {
-                tid: head_center(kxy) for tid, kxy, _ in frame_result.people
-            }
-            if with_gaze and frame_result.people:
-                timestamp_ms = int(now * 1000)
-                face_results = head_gaze.process(frame, timestamp_ms)
-                face_centers = [fr.landmarks_xy.mean(axis=0) for fr in face_results]
-                track_ids = list(head_centers.keys())
-                assignment = match_faces_to_tracks(
-                    face_centers, track_ids, [head_centers[t] for t in track_ids]
-                )
-                for face_idx, tid in assignment.items():
-                    # --- filtro target: se e' impostato --target-track-id, calcola
-                    # i segnali derivati dal volto (blink, bocca, sopracciglia,
-                    # scuotimento/annuimento) solo per quella persona (es. il
-                    # bambino), non per chiunque compaia nell'inquadratura (es. il
-                    # caregiver). Lo scheletro/postura restano comunque tracciati
-                    # per tutti (vedi loop principale piu' sotto). ---
-                    if target_track_id is not None and tid != target_track_id:
-                        continue
-
-                    fr = face_results[face_idx]
-                    gaze_by_track[tid] = {"yaw": fr.yaw, "pitch": fr.pitch, "roll": fr.roll,
-                                           "attention_target": None, "attention_score": 0.0,
-                                           "mouth_ratio": fr.mouth_ratio,
-                                           "blink_rate_per_min": np.nan,
-                                           "mouth_rep_power_ratio": np.nan, "mouth_rep_freq_hz": np.nan,
-                                           "yaw_rep_power_ratio": np.nan, "yaw_rep_freq_hz": np.nan,
-                                           "pitch_rep_power_ratio": np.nan, "pitch_rep_freq_hz": np.nan,
-                                           "left_eyebrow_raise": fr.left_eyebrow_raise,
-                                           "right_eyebrow_raise": fr.right_eyebrow_raise,
-                                           "mouth_pts": fr.landmarks_xy[[MOUTH_TOP, MOUTH_BOTTOM, MOUTH_LEFT, MOUTH_RIGHT]],
-                                           "left_eye_pts": fr.landmarks_xy[LEFT_EYE_EAR_IDX],
-                                           "right_eye_pts": fr.landmarks_xy[RIGHT_EYE_EAR_IDX],
-                                           "left_eyebrow_pts": fr.landmarks_xy[LEFT_EYEBROW_IDX],
-                                           "right_eyebrow_pts": fr.landmarks_xy[RIGHT_EYEBROW_IDX]}
-
-                    if not np.isnan(fr.eye_ratio):
-                        ear_buffers[tid].append(fr.eye_ratio)
-                    if len(ear_buffers[tid]) >= window_len:
-                        ear_seq = np.array(ear_buffers[tid])
-                        closed = ear_seq < blink_ear_threshold
-                        n_blinks = int(np.sum(np.diff(closed.astype(int)) == 1))
-                        gaze_by_track[tid]["blink_rate_per_min"] = n_blinks / window_seconds * 60.0
-
-                    # --- repetitivita' della bocca (proxy di mouthing/vocalizzazione
-                    # ripetuta): la lingua non e' tracciabile con FaceLandmarker (che
-                    # modella solo la superficie del volto, non strutture intraorali),
-                    # quindi usiamo l'oscillazione periodica del MAR come sostituto
-                    # comportamentalmente informativo, con la stessa logica FFT gia'
-                    # usata per polso/dita.
-                    if not np.isnan(fr.mouth_ratio):
-                        mar_buffers[tid].append(fr.mouth_ratio)
-                    if len(mar_buffers[tid]) >= window_len:
-                        mouth_rep = repetitive_motion_score(np.array(mar_buffers[tid]), fps)
-                        gaze_by_track[tid]["mouth_rep_power_ratio"] = mouth_rep["peak_power_ratio"]
-                        gaze_by_track[tid]["mouth_rep_freq_hz"] = mouth_rep["peak_freq_hz"]
-
-                    # --- scuotimento (yaw) e annuimento (pitch) della testa: stessa
-                    # logica FFT, applicata pero' al segnale grezzo di yaw/pitch (non
-                    # alla sua velocita') perche' e' gia' un angolo con segno intorno
-                    # a uno zero naturale -- evita l'artefatto di raddoppio della
-                    # frequenza documentato per lo score su polso/dita (che usa la
-                    # velocita' perche' la posizione del polso deriva col corpo).
-                    if not np.isnan(fr.yaw):
-                        yaw_buffers[tid].append(fr.yaw)
-                    if not np.isnan(fr.pitch):
-                        pitch_buffers[tid].append(fr.pitch)
-                    if len(yaw_buffers[tid]) >= window_len:
-                        yaw_rep = repetitive_motion_score(np.array(yaw_buffers[tid]), fps)
-                        gaze_by_track[tid]["yaw_rep_power_ratio"] = yaw_rep["peak_power_ratio"]
-                        gaze_by_track[tid]["yaw_rep_freq_hz"] = yaw_rep["peak_freq_hz"]
-                    if len(pitch_buffers[tid]) >= window_len:
-                        pitch_rep = repetitive_motion_score(np.array(pitch_buffers[tid]), fps)
-                        gaze_by_track[tid]["pitch_rep_power_ratio"] = pitch_rep["peak_power_ratio"]
-                        gaze_by_track[tid]["pitch_rep_freq_hz"] = pitch_rep["peak_freq_hz"]
-
-                # euristica di attenzione condivisa: solo se ci sono esattamente
-                # due persone con head-pose disponibile in questo frame
-                tracked_with_gaze = [t for t in track_ids if t in gaze_by_track]
-                if len(tracked_with_gaze) == 2:
-                    a, b = tracked_with_gaze
-                    score_a_to_b = joint_attention_score(
-                        head_centers[a], gaze_by_track[a]["yaw"], head_centers[b], frame.shape[1])
-                    score_b_to_a = joint_attention_score(
-                        head_centers[b], gaze_by_track[b]["yaw"], head_centers[a], frame.shape[1])
-                    gaze_by_track[a]["attention_target"] = b
-                    gaze_by_track[a]["attention_score"] = score_a_to_b
-                    gaze_by_track[b]["attention_target"] = a
-                    gaze_by_track[b]["attention_score"] = score_b_to_a
-
-            # --- mani/dita (una volta per frame, poi associate ai polsi YOLO) ---
-            hands_by_track: dict[int, dict] = defaultdict(dict)
-            if with_hands and frame_result.people:
-                timestamp_ms = int(now * 1000)
-                hand_results = hand_tracker.process(frame, timestamp_ms)
-                hand_wrist_points = [hr.landmarks_xy[0] for hr in hand_results]
-                track_wrists = []
-                for tid, kxy, _ in frame_result.people:
-                    track_wrists.append((tid, "left", kxy[KP["left_wrist"]]))
-                    track_wrists.append((tid, "right", kxy[KP["right_wrist"]]))
-                assignment = match_hands_to_wrists(hand_wrist_points, track_wrists)
-
-                for hand_idx, (tid, side) in assignment.items():
-                    if target_track_id is not None and tid != target_track_id:
-                        continue
-                    hand_xy = hand_results[hand_idx].landmarks_xy
-                    openness = hand_openness(hand_xy)
-                    curls = compute_finger_curls(hand_xy)
-
-                    key = (tid, side)
-                    fingertip_buffers[key].append(hand_xy[8])  # punta indice
-
-                    rep_power_ratio, rep_freq_hz = np.nan, np.nan
-                    if len(fingertip_buffers[key]) >= window_len:
-                        tip_seq = np.stack(fingertip_buffers[key])
-                        tip_speed = np.linalg.norm(np.diff(tip_seq, axis=0), axis=1) * fps
-                        rep = repetitive_motion_score(tip_speed, fps)
-                        rep_power_ratio, rep_freq_hz = rep["peak_power_ratio"], rep["peak_freq_hz"]
-
-                    hands_by_track[tid][side] = {
-                        "landmarks": hand_xy, "openness": openness,
-                        "rep_power_ratio": rep_power_ratio, "rep_freq_hz": rep_freq_hz,
-                        **curls,
-                    }
-
-            panel_y = 10  # riquadri metriche impilati in un angolo fisso (non seguono piu' la testa)
-            for track_id, kxy, kconf in frame_result.people:
-                if blur_faces:
-                    frame = blur_face(frame, kxy, kconf)
-
-                kpt_buffers[track_id].append(kxy)
-                conf_buffers[track_id].append(kconf)
-
-                angles = compute_joint_angles(kxy)
-                gaze = gaze_by_track.get(track_id)
-                hands_info = hands_by_track.get(track_id)
-
-                # --- self-touch: calcolato ogni frame (non serve la finestra) ---
-                scale = torso_length(kxy)
-                touch_left = self_touch_score(kxy[KP["left_wrist"]], head_centers[track_id], scale)
-                touch_right = self_touch_score(kxy[KP["right_wrist"]], head_centers[track_id], scale)
-                touch_now = np.nanmax([touch_left, touch_right]) if not (np.isnan(touch_left) and np.isnan(touch_right)) else np.nan
-                if not np.isnan(touch_now):
-                    self_touch_buffers[track_id].append(touch_now)
-
-                energy = np.nan
-                rep_score = {"peak_freq_hz": np.nan, "peak_power_ratio": np.nan}
-                posture = {"vertical_excursion": np.nan, "activity_ratio": np.nan,
-                           "self_touch_ratio": np.nan, "self_touch_now": touch_now}
-                if len(kpt_buffers[track_id]) >= window_len:
-                    seq = np.stack(kpt_buffers[track_id])
-                    diffs = np.diff(seq, axis=0) * fps
-                    speed = np.linalg.norm(diffs, axis=2)
-                    energy_series = (speed ** 2).sum(axis=1)
-                    energy = float(energy_series.mean())
-                    wrist_speed = speed[:, [KP["left_wrist"], KP["right_wrist"]]].mean(axis=1)
-                    rep_score = repetitive_motion_score(wrist_speed, fps)
-
-                    posture["vertical_excursion"] = vertical_excursion(seq)
-                    posture["activity_ratio"] = activity_ratio(energy_series, activity_threshold)
-                    if len(self_touch_buffers[track_id]) >= window_len:
-                        touch_arr = np.array(self_touch_buffers[track_id])
-                        posture["self_touch_ratio"] = float(np.mean(touch_arr > self_touch_threshold))
-
-                    row = {
-                        "t": now, "track_id": track_id, "movement_energy": energy,
-                        "peak_freq_hz": rep_score["peak_freq_hz"],
-                        "peak_power_ratio": rep_score["peak_power_ratio"],
-                        "vertical_excursion": posture["vertical_excursion"],
-                        "activity_ratio": posture["activity_ratio"],
-                        "self_touch_ratio": posture["self_touch_ratio"],
-                        "self_touch_now": touch_now,
-                        **angles,
-                    }
-                    if gaze:
-                        row.update({
-                            "head_yaw": gaze["yaw"], "head_pitch": gaze["pitch"], "head_roll": gaze["roll"],
-                            "attention_target": gaze["attention_target"], "attention_score": gaze["attention_score"],
-                            "mouth_ratio": gaze["mouth_ratio"], "blink_rate_per_min": gaze["blink_rate_per_min"],
-                            "mouth_rep_power_ratio": gaze["mouth_rep_power_ratio"],
-                            "mouth_rep_freq_hz": gaze["mouth_rep_freq_hz"],
-                            "yaw_rep_power_ratio": gaze["yaw_rep_power_ratio"],
-                            "yaw_rep_freq_hz": gaze["yaw_rep_freq_hz"],
-                            "pitch_rep_power_ratio": gaze["pitch_rep_power_ratio"],
-                            "pitch_rep_freq_hz": gaze["pitch_rep_freq_hz"],
-                            "left_eyebrow_raise": gaze["left_eyebrow_raise"],
-                            "right_eyebrow_raise": gaze["right_eyebrow_raise"],
-                        })
-                    if hands_info:
-                        for side, info in hands_info.items():
-                            row.update({
-                                f"{side}_hand_openness": info["openness"],
-                                f"{side}_hand_rep_power_ratio": info["rep_power_ratio"],
-                                f"{side}_hand_rep_freq_hz": info["rep_freq_hz"],
-                                **{f"{side}_{k}": v for k, v in info.items()
-                                   if k.endswith("_curl")},
-                            })
-                    if chuv_tracker is not None:
-                        chuv_feats = compute_chuv_features(kxy, track_id, now, chuv_tracker)
-                        row.update({f"chuv_{k}": v for k, v in chuv_feats.items()})
-                    log_rows.append(row)
-
-                if show_window:
-                    track_color = get_track_color(track_id)
-                    is_target = target_track_id == track_id
-                    draw_skeleton(frame, kxy, kconf, color=track_color)
-                    draw_person_label(frame, head_centers[track_id], track_id, track_color, is_target=is_target)
-                    if gaze and not np.isnan(gaze.get("yaw", np.nan)):
-                        hc = head_centers[track_id]
-                        ang = np.radians(gaze["yaw"])
-                        tip = (int(hc[0] + 60 * np.sin(ang)), int(hc[1] - 60 * np.cos(ang)))
-                        cv2.arrowedLine(frame, tuple(hc.astype(int)), tip, (255, 0, 255), 2, tipLength=0.3)
-                    if gaze and "mouth_pts" in gaze:
-                        draw_face_signals(frame, gaze.get("mouth_pts"),
-                                           gaze.get("left_eye_pts"), gaze.get("right_eye_pts"),
-                                           gaze.get("left_eyebrow_pts"), gaze.get("right_eyebrow_pts"))
-                    if hands_info:
-                        for info in hands_info.values():
-                            draw_hand(frame, info["landmarks"])
-                    # riquadro metriche impilato in un angolo fisso (alto a sinistra),
-                    # non piu' sopra la testa della persona: cosi' non si sposta/non
-                    # copre la scena mentre la persona si muove. Il colore del bordo
-                    # (uguale allo scheletro) e la riga "ID N" lo collegano comunque
-                    # alla persona giusta anche se non e' piu' vicino a lei sullo schermo.
-                    metrics_lines = format_metrics(track_id, angles, energy, rep_score, gaze, hands_info, posture)
-                    draw_text_block(frame, metrics_lines, origin=(10, panel_y), border_color=track_color)
-                    _, panel_h = text_block_size(metrics_lines)
-                    panel_y += panel_h + 8
+        for frame, rows, now, smoothed_fps in iter_live_frames(
+            source=source, fps=fps, model_name=model_name, device=device,
+            window_seconds=window_seconds, blur_faces=blur_faces,
+            with_gaze=with_gaze, face_model=face_model,
+            with_hands=with_hands, hand_model=hand_model,
+            activity_threshold=activity_threshold,
+            self_touch_threshold=self_touch_threshold,
+            blink_ear_threshold=blink_ear_threshold,
+            target_track_id=target_track_id,
+            with_reid=with_reid, reid_max_lost_seconds=reid_max_lost_seconds,
+            reid_max_signature_dist=reid_max_signature_dist,
+            reid_min_signature_frames=reid_min_signature_frames,
+            reid_color_weight=reid_color_weight, reid_position_weight=reid_position_weight,
+            with_chuv_features=with_chuv_features, conf_threshold=conf_threshold,
+            tracker_config=tracker_config, max_people=max_people,
+        ):
+            log_rows.extend(rows)
 
             if show_window:
-                draw_fps(frame, smoothed_fps)
                 cv2.imshow(window_name, frame)
                 key = cv2.waitKey(1) & 0xFF
                 # 'q' funziona solo se la finestra video ha il focus (clicca

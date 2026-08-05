@@ -32,10 +32,15 @@ based depends on) stays in the repository, tested, on hold.
 ```
 pose-behavior-pipeline/
 ├── src/
+│   ├── gui_app.py                 # GUI launcher: cd src && python gui_app.py
 │   ├── segmentation_demo.py       # ACTIVE main CLI: overlay + CSV, no keypoints
 │   ├── track_stability_check.py   # ACTIVE diagnostic: id count/lifespan, no overlay/CSV
 │   ├── pipeline.py                # batch CLI (recorded video, pose-based, on hold)
 │   ├── live_demo.py               # real-time CLI (Canon R8 / webcam, pose-based, on hold)
+│   ├── gui/                       # local Tkinter GUI (video file + parameter picker + live overlay)
+│   │   ├── app.py                 # control panel + embedded video (Tkinter/PIL)
+│   │   ├── video_player.py        # frame cache + seek (Back/Forward without re-inference)
+│   │   └── pipeline_runner.py     # dispatches to iter_live_frames()/iter_segmentation_frames()
 │   ├── segmentation/              # ACTIVE library: silhouettes only, no keypoints
 │   │   ├── seg_estimation.py      # YOLO26-seg + ByteTrack wrapper
 │   │   └── seg_reid.py            # hard-capped id linking (position/color/shape)
@@ -64,7 +69,29 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Usage
+## GUI (recommended for exploratory use)
+
+```bash
+cd src && python gui_app.py
+```
+
+A local Tkinter window: load a video file, pick the pipeline mode
+(Segmentazione / Pose estimation / Entrambi), model size, FPS, max number of
+people, re-identification on/off, and — only when the mode is Pose
+estimation or Entrambi — Mani (hands) / Viso (face: eyes, mouth, eyebrows,
+head movement), then Play to watch the overlay live in the same window,
+with Indietro/Avanti (Back/Forward) to step through already-processed
+frames instantly (from a cache, no re-inference) or resume live processing
+past the cached point. SAM3 is listed under model architecture but not
+selectable yet — it will run on the group's GPU machines, not this Mac;
+picking it shows a note and reverts to YOLO. "Entrambi" runs both
+pipelines independently on the same source and shows the two overlays
+side by side (no shared identity between them yet, see
+`gui/pipeline_runner.py`). Internally the GUI calls the exact same
+`iter_live_frames()` / `iter_segmentation_frames()` generators as the CLIs
+below, not a reimplementation — CLI and GUI can't drift apart.
+
+## Usage (CLI)
 
 **Active pipeline (segmentation, no keypoints):**
 
