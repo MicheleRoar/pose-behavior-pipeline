@@ -8,4 +8,5 @@ matplotlib>=3.8
 mediapipe>=1.0  # opzionale: head-pose/viso (live_demo.py --with-eyes/--with-mouth/
                  # --with-eyebrows/--with-head-movement), mani (--with-hands), o pose
                  # per-maschera nella pipeline di segmentazione (--with-mediapipe-pose)
-Pillow>=10.0  # richiesto dalla GUI (gui_app.py) per mostrare l'overlay in una finestra Tkinter
+Pillow>=10.0  # richiesto dalla GUI Tkinter (gui_app.py) per mostrare l'overlay in una finestra
+pywebview>=5.0  # opzionale: richiesto solo dalla nuova GUI web "Behaviour Vision Lab" (webui_app.py)

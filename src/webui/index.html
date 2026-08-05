@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Behaviour Vision Lab</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ============================================================ header -->
+  <header class="top-bar">
+    <div class="top-bar-left">
+      <div class="app-icon">BV</div>
+      <div class="app-title">
+        <span class="app-name">Behaviour Vision Lab</span>
+        <span class="app-subtitle">Video-based behaviour pipeline</span>
+      </div>
+    </div>
+    <div class="top-bar-right">
+      <span id="pill-mode" class="pill">Segmentation</span>
+      <span id="pill-device" class="pill pill-dim">mps</span>
+      <span id="pill-status" class="pill pill-dim">Idle</span>
+    </div>
+  </header>
+
+  <div class="main-layout">
+
+    <!-- ========================================================= sidebar -->
+    <aside class="sidebar">
+
+      <section class="card">
+        <h3>Input</h3>
+        <button id="btn-load-video" class="btn btn-primary btn-block">Load video…</button>
+        <div class="input-file-row">
+          <span id="video-check" class="check-dot hidden">✓</span>
+          <span id="video-filename" class="filename">No video loaded</span>
+        </div>
+        <label class="field-label" for="fps-input">Source FPS</label>
+        <input id="fps-input" class="field-input" type="number" min="1" step="1" value="15">
+      </section>
+
+      <section class="card">
+        <h3>Model</h3>
+        <label class="field-label" for="arch-select">Architecture</label>
+        <select id="arch-select" class="field-input">
+          <option value="yolo">YOLO</option>
+          <option value="sam3">SAM3 (not available here)</option>
+        </select>
+
+        <label class="field-label" for="mode-select">Mode</label>
+        <select id="mode-select" class="field-input">
+          <option value="segmentation">Segmentation</option>
+          <option value="pose">Pose estimation</option>
+          <option value="both">Both</option>
+        </select>
+
+        <label class="field-label" for="scale-select">Model size</label>
+        <select id="scale-select" class="field-input">
+          <option value="n">n (fastest)</option>
+          <option value="s" selected>s (balanced)</option>
+          <option value="m">m (most stable)</option>
+        </select>
+      </section>
+
+      <section class="card">
+        <h3>Tracking</h3>
+        <label class="field-label" for="max-people-input">Max number of people</label>
+        <input id="max-people-input" class="field-input" type="number" min="1" step="1" value="2">
+
+        <div class="switch-row">
+          <span>Re-identification</span>
+          <label class="switch">
+            <input id="reid-toggle" type="checkbox" checked>
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <p class="hint">Hard cap on max people. Requires a value above.</p>
+      </section>
+
+      <section class="card" id="features-card">
+        <h3>Features <span class="hint-inline">(Pose estimation / Both only)</span></h3>
+        <div class="switch-row">
+          <span>Hands</span>
+          <label class="switch">
+            <input id="hands-toggle" type="checkbox">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <div class="subsection-label">Face</div>
+        <div class="switch-row indent">
+          <span>Eyes <em>(blink rate)</em></span>
+          <label class="switch">
+            <input id="eyes-toggle" type="checkbox">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <div class="switch-row indent">
+          <span>Mouth <em>(opening + repetitiveness)</em></span>
+          <label class="switch">
+            <input id="mouth-toggle" type="checkbox">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <div class="switch-row indent">
+          <span>Eyebrows <em>(raise)</em></span>
+          <label class="switch">
+            <input id="eyebrows-toggle" type="checkbox">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <div class="switch-row indent">
+          <span>Head movement <em>(yaw/pitch, shared attention)</em></span>
+          <label class="switch">
+            <input id="head-movement-toggle" type="checkbox">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+      </section>
+
+      <section class="card" id="seg-extras-card">
+        <h3>Segmentation extras</h3>
+        <div class="switch-row">
+          <span>MediaPipe pose <em>(inside each tracked mask)</em></span>
+          <label class="switch">
+            <input id="mediapipe-pose-toggle" type="checkbox">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+      </section>
+
+      <div class="sidebar-actions">
+        <button id="btn-apply" class="btn btn-secondary btn-block">Apply settings</button>
+        <button id="btn-export-csv" class="btn btn-ghost btn-block">Export CSV…</button>
+      </div>
+    </aside>
+
+    <!-- ==================================================== video panel -->
+    <main class="video-area">
+      <div class="video-frame-wrap" id="video-frame-wrap">
+        <img id="video-frame" alt="" class="hidden">
+        <div id="video-placeholder" class="video-placeholder">Load a video to get started</div>
+      </div>
+
+      <div class="transport-bar">
+        <button id="btn-back" class="transport-btn" title="Back one frame">⏮</button>
+        <button id="btn-play" class="transport-btn transport-btn-main" title="Play/Pause">▶</button>
+        <button id="btn-forward" class="transport-btn" title="Forward one frame">⏭</button>
+
+        <span id="timecode" class="timecode">00:00.0</span>
+
+        <label class="speed-label" for="speed-select">Speed</label>
+        <select id="speed-select" class="speed-select">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="1.5">1.5×</option>
+          <option value="2">2×</option>
+        </select>
+
+        <button id="btn-fullscreen" class="transport-btn" title="Fullscreen">⛶</button>
+      </div>
+
+      <div class="timeline-wrap">
+        <div id="timeline-track" class="timeline-track">
+          <div id="timeline-progress" class="timeline-progress"></div>
+          <div id="timeline-cursor" class="timeline-cursor"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ========================================================= status bar -->
+  <footer class="status-bar">
+    <div id="pipeline-flow" class="pipeline-flow">
+      <span class="flow-step">YOLO26 Segment</span>
+    </div>
+    <div class="metrics">
+      <div class="metric"><span class="metric-label">Frame</span><span id="metric-frame" class="metric-value">–</span></div>
+      <div class="metric"><span class="metric-label">Processing FPS</span><span id="metric-fps" class="metric-value">–</span></div>
+      <div class="metric"><span class="metric-label">Avg. latency</span><span id="metric-latency" class="metric-value">–</span></div>
+      <div class="metric"><span class="metric-label">Active tracks</span><span id="metric-people" class="metric-value">–</span></div>
+      <div class="metric"><span class="metric-label">GPU</span><span id="metric-device" class="metric-value">mps</span></div>
+    </div>
+  </footer>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

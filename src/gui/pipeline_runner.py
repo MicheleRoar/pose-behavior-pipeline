@@ -57,6 +57,12 @@ class RunnerFrame:
     rows: list[dict]
     now: float
     mode: str  # "pose" | "segmentation" | "both"
+    people_count: int = 0  # tracce attive in questo frame -- NON deducibile
+    # in modo affidabile da len(rows): in modalita' "pose" le righe vengono
+    # aggiunte solo quando la finestra scorrevole delle feature si riempie
+    # (vedi live_demo.py), quindi len(rows) sarebbe 0 per i primi secondi pur
+    # con persone gia' tracciate. Qui usiamo invece il conteggio delle tracce
+    # effettivamente attive nel frame corrente.
 
 
 def iter_pipeline_frames(
@@ -124,7 +130,7 @@ def _iter_pose(*, source, fps, device, pose_model, with_hands, hand_model,
                with_eyes, with_mouth, with_eyebrows, with_head_movement, face_model,
                with_reid, max_people, blur_faces,
                window_seconds, conf_threshold, tracker_config) -> Iterator[RunnerFrame]:
-    for frame, rows, now, _smoothed_fps, _people, _gaze, _hands in iter_live_frames(
+    for frame, rows, now, _smoothed_fps, people, _gaze, _hands in iter_live_frames(
         source=source, fps=fps, model_name=pose_model, device=device,
         window_seconds=window_seconds, blur_faces=blur_faces,
         with_eyes=with_eyes, with_mouth=with_mouth,
@@ -134,7 +140,11 @@ def _iter_pose(*, source, fps, device, pose_model, with_hands, hand_model,
         with_reid=with_reid, conf_threshold=conf_threshold,
         tracker_config=tracker_config, max_people=max_people,
     ):
-        yield RunnerFrame(frame=frame, rows=rows, now=now, mode="pose")
+        # `people` (5o elemento della tupla, prima scartato) e' la lista di
+        # tracce pose attive in questo frame -- affidabile anche quando
+        # `rows` e' ancora vuoto (finestra scorrevole non ancora piena).
+        yield RunnerFrame(frame=frame, rows=rows, now=now, mode="pose",
+                           people_count=len(people))
 
 
 def _iter_segmentation(*, source, fps, device, seg_model, max_people,
@@ -154,7 +164,10 @@ def _iter_segmentation(*, source, fps, device, seg_model, max_people,
         max_people=max_people, seg_reidentifier=seg_reidentifier,
         mediapipe_pose_estimator=mediapipe_pose_estimator,
     ):
-        yield RunnerFrame(frame=vis, rows=rows, now=now, mode="segmentation")
+        # In segmentazione non c'e' finestra scorrevole: una riga per persona
+        # tracciata per frame, quindi len(rows) e' gia' il conteggio esatto.
+        yield RunnerFrame(frame=vis, rows=rows, now=now, mode="segmentation",
+                           people_count=len(rows))
 
 
 def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
@@ -214,7 +227,7 @@ def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
             yield RunnerFrame(
                 frame=canvas,
                 rows=[{**r, "pipeline": "segmentation"} for r in seg_rows],
-                now=pose_now, mode="both",
+                now=pose_now, mode="both", people_count=len(seg_rows),
             )
             continue
 
@@ -242,4 +255,8 @@ def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
             [{**r, "pipeline": "pose"} for r in pose_rows]
             + [{**r, "pipeline": "segmentation"} for r in seg_rows]
         )
-        yield RunnerFrame(frame=canvas, rows=rows, now=pose_now, mode="both")
+        # Usiamo il conteggio della segmentazione come riferimento canonico di
+        # "tracce attive": e' la pipeline la cui etichetta "ID N" resta
+        # visibile in questa modalita' (vedi docstring del modulo).
+        yield RunnerFrame(frame=canvas, rows=rows, now=pose_now, mode="both",
+                           people_count=len(seg_rows))

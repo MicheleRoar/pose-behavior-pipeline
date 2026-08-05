@@ -1,0 +1,183 @@
+"""
+webui_api_check.py
+====================
+Verifica della logica PURA di `webui/api.py` -- niente pywebview, niente
+finestra vera, niente video/tracker reale (stesso spirito di
+video_player_check.py per gui/video_player.py). Copre le quattro funzioni/
+classi isolate apposta per essere testabili senza una finestra:
+`build_player_kwargs`, `encode_frame_jpeg_b64`, `_LatencyTracker`,
+`build_status`. Non tocca la classe `Api` stessa (quella richiede
+pywebview/una finestra vera -- verificata a mano sul Mac, come le altre
+feature della GUI).
+
+Esegui con: python webui_api_check.py
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+import numpy as np
+
+from gui.pipeline_runner import RunnerFrame
+from webui.api import build_player_kwargs, encode_frame_jpeg_b64, _LatencyTracker, build_status
+
+
+def part1_build_player_kwargs_mirrors_app_py_defaults():
+    kwargs = build_player_kwargs({
+        "mode": "pose", "source": "video.mp4", "fps": "15",
+        "with_hands": True, "with_eyes": True,
+    })
+    assert kwargs["mode"] == "pose"
+    assert kwargs["source"] == "video.mp4"
+    assert kwargs["fps"] == 15.0
+    assert kwargs["device"] == "mps"  # default
+    assert kwargs["pose_model"] == "yolo26s-pose.pt"  # scale default "s"
+    assert kwargs["seg_model"] == "yolo26s-seg.pt"
+    assert kwargs["with_hands"] is True
+    assert kwargs["with_eyes"] is True
+    assert kwargs["with_mouth"] is False
+    assert kwargs["max_people"] is None
+    assert kwargs["with_reid"] is False  # nessun max_people -> reid ignorata anche se richiesta
+    print("Parte 1: build_player_kwargs applica i default giusti e passa i flag richiesti — OK")
+
+
+def part2_hands_face_ignored_outside_pose_and_both():
+    # Stessa regola di app.py::_on_mode_change: mani/viso valgono solo in
+    # Pose/Both, in Segmentation vengono azzerati anche se il chiamante li
+    # manda a True per errore.
+    kwargs = build_player_kwargs({
+        "mode": "segmentation", "source": "v.mp4", "fps": 15,
+        "with_hands": True, "with_eyes": True, "with_mouth": True,
+    })
+    assert kwargs["with_hands"] is False
+    assert kwargs["with_eyes"] is False
+    assert kwargs["with_mouth"] is False
+    print("Parte 2: mani/viso vengono ignorati fuori da Pose/Both — OK")
+
+
+def part3_mediapipe_pose_only_in_segmentation():
+    kwargs_seg = build_player_kwargs({
+        "mode": "segmentation", "source": "v.mp4", "fps": 15,
+        "with_mediapipe_pose": True,
+    })
+    assert kwargs_seg["with_mediapipe_pose"] is True
+
+    kwargs_pose = build_player_kwargs({
+        "mode": "pose", "source": "v.mp4", "fps": 15,
+        "with_mediapipe_pose": True,
+    })
+    assert kwargs_pose["with_mediapipe_pose"] is False
+    print("Parte 3: MediaPipe pose-per-maschera attivabile solo in modalita' segmentation — OK")
+
+
+def part4_reid_requires_max_people_and_right_mode():
+    # reid richiesta ma senza max_people -> ignorata (non solleva errore)
+    kwargs = build_player_kwargs({
+        "mode": "both", "source": "v.mp4", "fps": 15, "reid": True,
+    })
+    assert kwargs["with_reid"] is False
+    assert kwargs["with_seg_reid"] is False
+
+    # reid richiesta con max_people, modalita' "both" -> entrambe le reid attive
+    kwargs2 = build_player_kwargs({
+        "mode": "both", "source": "v.mp4", "fps": 15, "reid": True, "max_people": "3",
+    })
+    assert kwargs2["max_people"] == 3
+    assert kwargs2["with_reid"] is True
+    assert kwargs2["with_seg_reid"] is True
+
+    # reid richiesta con max_people, modalita' "pose" -> solo pose reid attiva
+    kwargs3 = build_player_kwargs({
+        "mode": "pose", "source": "v.mp4", "fps": 15, "reid": True, "max_people": 2,
+    })
+    assert kwargs3["with_reid"] is True
+    assert kwargs3["with_seg_reid"] is False
+    print("Parte 4: re-id/seg-reid attive solo con max_people impostato e nella modalita' giusta — OK")
+
+
+def part5_invalid_mode_and_missing_source_raise():
+    try:
+        build_player_kwargs({"mode": "bogus", "source": "v.mp4", "fps": 15})
+        raise AssertionError("doveva sollevare ValueError per mode sconosciuto")
+    except ValueError:
+        pass
+    try:
+        build_player_kwargs({"mode": "pose", "source": "", "fps": 15})
+        raise AssertionError("doveva sollevare ValueError per source mancante")
+    except ValueError:
+        pass
+    print("Parte 5: mode sconosciuto o source mancante sollevano ValueError (build_player le trasforma "
+          "in {'ok': False, 'error': ...} invece di far esplodere la chiamata JS) — OK")
+
+
+def part6_encode_frame_jpeg_b64_roundtrip_and_resize():
+    import base64
+    import cv2
+
+    small = np.zeros((10, 10, 3), dtype=np.uint8)
+    small[:] = (0, 128, 255)  # BGR
+    data_url = encode_frame_jpeg_b64(small, max_width=1600)
+    assert data_url.startswith("data:image/jpeg;base64,")
+    raw = base64.b64decode(data_url.split(",", 1)[1])
+    decoded = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape == (10, 10, 3)  # nessun resize sotto max_width
+
+    wide = np.zeros((100, 3200, 3), dtype=np.uint8)
+    data_url2 = encode_frame_jpeg_b64(wide, max_width=1600)
+    raw2 = base64.b64decode(data_url2.split(",", 1)[1])
+    decoded2 = cv2.imdecode(np.frombuffer(raw2, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert decoded2.shape[1] == 1600  # ridimensionato verso il basso
+    assert decoded2.shape[0] == 50    # proporzioni mantenute (100 * 1600/3200)
+    print("Parte 6: encode_frame_jpeg_b64 produce un data-URL decodificabile e ridimensiona solo "
+          "verso il basso oltre max_width — OK")
+
+
+def part7_latency_tracker_rolling_average():
+    tracker = _LatencyTracker(window=3)
+    assert tracker.avg_latency_ms == 0.0
+    assert tracker.processing_fps == 0.0
+
+    tracker.record(0.100)  # 100ms
+    tracker.record(0.100)
+    assert abs(tracker.avg_latency_ms - 100.0) < 1e-6
+    assert abs(tracker.processing_fps - 10.0) < 1e-6
+
+    # la finestra e' di 3: un quarto valore fa uscire il piu' vecchio
+    tracker.record(0.100)
+    tracker.record(0.400)  # ora la finestra contiene [0.1, 0.1, 0.4] -> media 0.2
+    assert abs(tracker.avg_latency_ms - 200.0) < 1e-6
+    print("Parte 7: _LatencyTracker calcola una media mobile reale, non un valore finto — OK")
+
+
+def part8_build_status_uses_people_count_not_len_rows():
+    frame = RunnerFrame(frame=np.zeros((2, 2, 3), dtype=np.uint8), rows=[], now=1.5,
+                         mode="pose", people_count=4)
+    latency = _LatencyTracker()
+    latency.record(0.050)
+    status = build_status(runner_frame=frame, cached_frame_count=7, latency=latency,
+                           device="mps", mode="pose", is_finished=False)
+    assert status["people_count"] == 4  # da RunnerFrame.people_count, non da len(rows)=0
+    assert status["rows_this_frame"] == 0
+    assert status["frame_index"] == 6
+    assert status["timecode_s"] == 1.5
+    assert status["device"] == "mps"
+    assert status["is_finished"] is False
+    assert abs(status["avg_latency_ms"] - 50.0) < 1e-6
+    print("Parte 8: build_status legge people_count da RunnerFrame (affidabile anche a rows vuote) — OK")
+
+
+if __name__ == "__main__":
+    part1_build_player_kwargs_mirrors_app_py_defaults()
+    part2_hands_face_ignored_outside_pose_and_both()
+    part3_mediapipe_pose_only_in_segmentation()
+    part4_reid_requires_max_people_and_right_mode()
+    part5_invalid_mode_and_missing_source_raise()
+    part6_encode_frame_jpeg_b64_roundtrip_and_resize()
+    part7_latency_tracker_rolling_average()
+    part8_build_status_uses_people_count_not_len_rows()
+    print("\nVerifica completata senza errori: la logica pura di webui/api.py (parametri, codifica "
+          "frame, metriche) si comporta come atteso, senza bisogno di pywebview o di una finestra vera.")

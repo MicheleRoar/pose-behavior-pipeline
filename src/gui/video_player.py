@@ -105,6 +105,21 @@ class VideoPlayer:
         self._cursor -= 1
         return self._cache[self._cursor]
 
+    def seek(self, index: int) -> Optional[RunnerFrame]:
+        """Salta ISTANTANEAMENTE a `index` DENTRO la cache gia' elaborata
+        (nessuna nuova inferenza) -- usato dallo scrubber della timeline
+        della GUI web, che per lo stesso motivo spiegato nel docstring del
+        modulo puo' offrire un seek libero solo sul prefisso gia' elaborato.
+        Ritorna None (senza toccare il cursore) se `index` e' fuori dalla
+        cache: a differenza di step_forward(), questo metodo non estende MAI
+        la cache -- chi chiama deve usare step_forward() in sequenza per
+        raggiungere un punto non ancora elaborato (elaborazione di
+        recupero), non questo metodo."""
+        if 0 <= index < len(self._cache):
+            self._cursor = index
+            return self._cache[self._cursor]
+        return None
+
     def all_rows(self) -> list[dict]:
         """Tutte le righe dati (una per persona per frame) accumulate finora
         nella cache, nell'ordine dei frame -- usato per il CSV finale."""

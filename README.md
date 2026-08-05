@@ -32,7 +32,8 @@ based depends on) stays in the repository, tested, on hold.
 ```
 pose-behavior-pipeline/
 ├── src/
-│   ├── gui_app.py                 # GUI launcher: cd src && python gui_app.py
+│   ├── gui_app.py                 # Tkinter GUI launcher: cd src && python gui_app.py
+│   ├── webui_app.py               # Web GUI launcher (pywebview): cd src && python webui_app.py
 │   ├── segmentation_demo.py       # ACTIVE main CLI: overlay + CSV, no keypoints
 │   ├── track_stability_check.py   # ACTIVE diagnostic: id count/lifespan, no overlay/CSV
 │   ├── pipeline.py                # batch CLI (recorded video, pose-based, on hold)
@@ -41,6 +42,11 @@ pose-behavior-pipeline/
 │   │   ├── app.py                 # control panel + embedded video (Tkinter/PIL)
 │   │   ├── video_player.py        # frame cache + seek (Back/Forward without re-inference)
 │   │   └── pipeline_runner.py     # dispatches to iter_live_frames()/iter_segmentation_frames()
+│   ├── webui/                     # "Behaviour Vision Lab" web GUI (pywebview + HTML/CSS/JS)
+│   │   ├── api.py                 # pywebview bridge: reuses VideoPlayer/iter_pipeline_frames as-is
+│   │   ├── index.html             # layout: header, sidebar cards, video panel, status bar
+│   │   ├── style.css              # dark theme matching the mock
+│   │   └── app.js                 # wires the DOM to window.pywebview.api.*
 │   ├── segmentation/              # ACTIVE library: silhouettes only, no keypoints
 │   │   ├── seg_estimation.py      # YOLO26-seg + ByteTrack wrapper
 │   │   └── seg_reid.py            # hard-capped id linking (position/color/shape)
@@ -99,6 +105,59 @@ already-tracked silhouette — see `pose/mediapipe_pose.py` below for what
 this does and doesn't do. Internally the GUI calls the exact same
 `iter_live_frames()` / `iter_segmentation_frames()` generators as the CLIs
 below, not a reimplementation — CLI and GUI can't drift apart.
+
+## Web GUI ("Behaviour Vision Lab")
+
+```bash
+pip install pywebview   # not in the default install, only this GUI needs it
+cd src && python webui_app.py
+```
+
+A second, visually-polished GUI (dark theme, pill toggle switches, a
+pipeline-flow diagram, live metrics) matching a provided mockup — an
+alternative presentation layer over the *exact same* pipeline, not a
+reimplementation: `webui/api.py` calls `VideoPlayer` and
+`iter_pipeline_frames()` (the same `gui/video_player.py` /
+`gui/pipeline_runner.py` used by the Tkinter GUI) unchanged. Built with
+[pywebview](https://pywebview.flowrl.com/) (a native window wrapping a
+local `webui/index.html` + `style.css` + `app.js`, with a Python `Api`
+class exposed to JS as `window.pywebview.api.<method>(...)`) rather than a
+separate HTTP server, to avoid an extra dependency and port/lifecycle
+management.
+
+Same controls as the Tkinter GUI (video source, mode, model size, max
+people, re-identification, hands/face sub-checkboxes gated to Pose
+estimation/Both, MediaPipe pose-per-mask gated to Segmentation), plus:
+
+- A status bar with a pipeline-flow diagram built from the ACTUAL
+  configured steps (e.g. `YOLO26s Segment → ByteTrack → Re-ID → MediaPipe
+  Pose`), not a fixed label — see `app.js::updatePipelineFlow()`.
+- Live metrics (current frame, processing FPS, average latency, active
+  tracks) computed from real timing/data, not decorative: FPS/latency come
+  from a rolling average of actual `step_forward()` wall-clock time
+  (`webui/api.py::_LatencyTracker`), active tracks from
+  `RunnerFrame.people_count` (reliable even in Pose mode before the sliding
+  feature window fills — see `gui/pipeline_runner.py`).
+- A timeline scrubber restricted to the already-processed prefix
+  (`gui/video_player.py::VideoPlayer.seek()`, instant, no re-inference);
+  clicking beyond it triggers sequential catch-up processing instead of an
+  impossible instant jump — trackers are sequential/stateful, same
+  constraint as Back/Forward in the Tkinter GUI, see that module's
+  docstring.
+
+Deliberate differences from the mock, not oversights: Face stays as four
+independent checkboxes rather than one combined "Face" toggle (collapsing
+them back would silently revert an earlier explicit request); there's no
+functional volume control (this pipeline has no audio); the "GPU" badge
+shows the configured device string (e.g. `mps`) rather than live
+utilization telemetry, which isn't reliably queryable from pure
+Python/PyTorch on Apple Silicon.
+
+Pick whichever GUI fits: `gui_app.py` (Tkinter) has no extra dependency
+beyond Pillow and a lighter startup; `webui_app.py` needs `pywebview` but
+matches the mock closely. Both call the same generators underneath, so
+behaviour never diverges between them — only the presentation layer
+differs.
 
 ## Usage (CLI)
 
