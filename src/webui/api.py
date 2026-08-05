@@ -55,6 +55,38 @@ from gui.video_player import VideoPlayer
 MODE_KEYS = {"segmentation", "pose", "both"}
 
 
+def probe_video_metadata(path: str) -> dict:
+    """Legge SOLO i metadati del file (frame count e fps dichiarati dal
+    container) via `cv2.VideoCapture`, SENZA processare/decodificare i frame
+    uno per uno -- non e' in contraddizione con "i tracker sono sequenziali,
+    niente salto arbitrario" (vedi gui/video_player.py): qui non c'e'
+    nessuna inferenza, solo la lettura di un header, cosi' com'e' gia' cosa
+    fanno i player video normali per mostrare la durata prima ancora di
+    aver iniziato a riprodurre. Usato per il timecode "corrente / totale" e
+    per le tacche della timeline sull'intera durata nota -- il prefisso
+    ELABORATO resta comunque l'unico punto in cui si puo' saltare
+    istantaneamente (vedi `VideoPlayer.seek`), la durata totale qui e' solo
+    informativa.
+
+    Isolata da `Api` per essere testabile senza pywebview (basta un file
+    video reale o, nei test, viene aggirata passando un percorso che non
+    apre -- vedi `demo/webui_api_check.py`). Ritorna valori `None` se il
+    file non si apre o il container non dichiara questi metadati (capita
+    con alcuni codec/contenitori): il chiamante deve trattarli come "durata
+    sconosciuta", non come zero.
+    """
+    cap = cv2.VideoCapture(path)
+    try:
+        if not cap.isOpened():
+            return {"frame_count": None, "duration_s": None, "container_fps": None}
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
+        container_fps = cap.get(cv2.CAP_PROP_FPS) or None
+        duration_s = (frame_count / container_fps) if frame_count and container_fps else None
+        return {"frame_count": frame_count, "duration_s": duration_s, "container_fps": container_fps}
+    finally:
+        cap.release()
+
+
 def build_player_kwargs(params: dict) -> dict:
     """Funzione pura: converte il dict di parametri inviato da JS negli
     argomenti attesi da `iter_pipeline_frames(...)`. Isolata da `Api` per
@@ -164,17 +196,26 @@ class _LatencyTracker:
 
 def build_status(*, runner_frame: RunnerFrame, cached_frame_count: int,
                   latency: _LatencyTracker, device: str, mode: str,
-                  is_finished: bool) -> dict:
+                  is_finished: bool, max_people: int | None = None,
+                  total_frame_count: int | None = None,
+                  total_duration_s: float | None = None) -> dict:
     """Dict di stato spedito a JS insieme a ogni frame -- ogni campo e' dato
     reale (vedi la nota 'Onesta' delle metriche' nel docstring del modulo):
     indice frame, fps/latenza di elaborazione da `_LatencyTracker`, numero
     di tracce attive da `RunnerFrame.people_count` (non `len(rows)`, vedi
     pipeline_runner.py), timecode da `RunnerFrame.now`, ed etichetta del
-    device configurato invece di una finta telemetria GPU."""
+    device configurato invece di una finta telemetria GPU. `total_frame_count`
+    / `total_duration_s` vengono da `probe_video_metadata` (metadati letti
+    UNA VOLTA dal file, non ricalcolati qui) e possono essere None se il
+    container non li dichiara -- il frontend deve trattarli come "totale
+    sconosciuto", non zero."""
     return {
         "frame_index": cached_frame_count - 1,
+        "total_frame_count": total_frame_count,
         "timecode_s": round(runner_frame.now, 2),
+        "total_duration_s": total_duration_s,
         "people_count": runner_frame.people_count,
+        "max_people": max_people,
         "processing_fps": round(latency.processing_fps, 1),
         "avg_latency_ms": round(latency.avg_latency_ms, 1),
         "device": device,
@@ -198,10 +239,17 @@ class Api:
         self.player: VideoPlayer | None = None
         self._device = "mps"
         self._mode = "segmentation"
+        self._max_people: int | None = None
         self._playback_fps = 15.0
         self._latency = _LatencyTracker()
         self._playing = False
         self._play_thread: threading.Thread | None = None
+        # metadati letti UNA VOLTA da pick_video_file() (vedi
+        # probe_video_metadata): solo informativi, mai usati per decidere
+        # cosa si puo' o non si puo' saltare (quello resta governato dalla
+        # cache reale in VideoPlayer).
+        self._total_frame_count: int | None = None
+        self._total_duration_s: float | None = None
 
     def set_window(self, window) -> None:
         """Chiamato dal launcher (webui_app.py) subito dopo
@@ -210,7 +258,13 @@ class Api:
         self.window = window
 
     # ------------------------------------------------------------ dialoghi
-    def pick_video_file(self) -> str | None:
+    def pick_video_file(self) -> dict | None:
+        """Apre il dialogo nativo e, se un file viene scelto, ne legge anche
+        SUBITO i metadati (durata/numero di frame totali dichiarati dal
+        container, vedi `probe_video_metadata`) -- cosi' JS puo' mostrare
+        "corrente / totale" nel timecode e disegnare le tacche della
+        timeline sull'intera durata fin da subito, senza aspettare che
+        l'elaborazione arrivi in fondo al video."""
         import webview
         if self.window is None:
             return None
@@ -221,7 +275,10 @@ class Api:
         if not result:
             return None
         self.video_path = result[0]
-        return self.video_path
+        meta = probe_video_metadata(self.video_path)
+        self._total_frame_count = meta["frame_count"]
+        self._total_duration_s = meta["duration_s"]
+        return {"path": self.video_path, **meta}
 
     def pick_save_csv_path(self) -> str | None:
         import webview
@@ -256,6 +313,7 @@ class Api:
             self._playing = False
             self._device = kwargs["device"]
             self._mode = kwargs["mode"]
+            self._max_people = kwargs["max_people"]
             self._latency = _LatencyTracker()
             self.player = VideoPlayer(generator_factory=lambda: iter_pipeline_frames(**kwargs))
         return {"ok": True}
@@ -331,7 +389,9 @@ class Api:
         status = build_status(
             runner_frame=frame, cached_frame_count=self.player.cached_frame_count,
             latency=self._latency, device=self._device, mode=self._mode,
-            is_finished=self.player.is_exhausted,
+            is_finished=self.player.is_exhausted, max_people=self._max_people,
+            total_frame_count=self._total_frame_count,
+            total_duration_s=self._total_duration_s,
         )
         return {"ok": True, "frame": encode_frame_jpeg_b64(frame.frame), "status": status}
 

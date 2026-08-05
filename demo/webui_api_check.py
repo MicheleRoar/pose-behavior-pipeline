@@ -23,7 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import numpy as np
 
 from gui.pipeline_runner import RunnerFrame
-from webui.api import build_player_kwargs, encode_frame_jpeg_b64, _LatencyTracker, build_status
+from webui.api import (
+    build_player_kwargs, encode_frame_jpeg_b64, _LatencyTracker, build_status,
+    probe_video_metadata,
+)
 
 
 def part1_build_player_kwargs_mirrors_app_py_defaults():
@@ -170,6 +173,52 @@ def part8_build_status_uses_people_count_not_len_rows():
     print("Parte 8: build_status legge people_count da RunnerFrame (affidabile anche a rows vuote) — OK")
 
 
+def part9_probe_video_metadata_missing_file_returns_none_not_zero():
+    meta = probe_video_metadata("/tmp/definitely_not_a_real_video_file_xyz.mp4")
+    assert meta == {"frame_count": None, "duration_s": None, "container_fps": None}, (
+        "un file inesistente/illeggibile deve dare 'sconosciuto' (None), non 0 -- "
+        "0 farebbe credere a un video vuoto invece che a una durata non calcolabile"
+    )
+    print("Parte 9: probe_video_metadata su un file inesistente ritorna 'sconosciuto' (None), non zero — OK")
+
+
+def part10_probe_video_metadata_reads_real_container_metadata():
+    import tempfile
+    import os
+    import cv2
+
+    path = tempfile.mktemp(suffix=".avi")
+    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+    writer = cv2.VideoWriter(path, fourcc, 10.0, (16, 16))
+    for _ in range(30):
+        writer.write(np.zeros((16, 16, 3), dtype=np.uint8))
+    writer.release()
+    try:
+        meta = probe_video_metadata(path)
+        assert meta["frame_count"] == 30, f"attesi 30 frame nel container, trovato {meta['frame_count']}"
+        assert abs(meta["container_fps"] - 10.0) < 1e-6
+        assert abs(meta["duration_s"] - 3.0) < 1e-6  # 30 frame / 10 fps = 3s
+    finally:
+        os.remove(path)
+    print("Parte 10: probe_video_metadata legge SOLO i metadati del container (frame count/fps/durata) "
+          "da un file video vero, senza decodificare i frame uno per uno — OK")
+
+
+def part11_build_status_carries_totals_and_max_people_for_the_timeline():
+    frame = RunnerFrame(frame=np.zeros((2, 2, 3), dtype=np.uint8), rows=[], now=6.3,
+                         mode="segmentation", people_count=2)
+    latency = _LatencyTracker()
+    status = build_status(runner_frame=frame, cached_frame_count=209, latency=latency,
+                           device="mps", mode="segmentation", is_finished=False,
+                           max_people=20, total_frame_count=1087, total_duration_s=72.8)
+    assert status["frame_index"] == 208
+    assert status["total_frame_count"] == 1087  # per il timecode/metrica "corrente / totale"
+    assert status["total_duration_s"] == 72.8
+    assert status["max_people"] == 20  # per la metrica "tracce attive: 2 / 20"
+    print("Parte 11: build_status porta anche i totali (frame/durata) e max_people, per il timecode "
+          "'corrente / totale' e la metrica 'tracce attive: N / max' del nuovo layout — OK")
+
+
 if __name__ == "__main__":
     part1_build_player_kwargs_mirrors_app_py_defaults()
     part2_hands_face_ignored_outside_pose_and_both()
@@ -179,5 +228,9 @@ if __name__ == "__main__":
     part6_encode_frame_jpeg_b64_roundtrip_and_resize()
     part7_latency_tracker_rolling_average()
     part8_build_status_uses_people_count_not_len_rows()
+    part9_probe_video_metadata_missing_file_returns_none_not_zero()
+    part10_probe_video_metadata_reads_real_container_metadata()
+    part11_build_status_carries_totals_and_max_people_for_the_timeline()
     print("\nVerifica completata senza errori: la logica pura di webui/api.py (parametri, codifica "
-          "frame, metriche) si comporta come atteso, senza bisogno di pywebview o di una finestra vera.")
+          "frame, metriche, metadati video) si comporta come atteso, senza bisogno di pywebview o di "
+          "una finestra vera.")

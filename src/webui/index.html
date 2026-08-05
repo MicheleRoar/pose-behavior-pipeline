@@ -11,16 +11,21 @@
   <!-- ============================================================ header -->
   <header class="top-bar">
     <div class="top-bar-left">
-      <div class="app-icon">BV</div>
-      <div class="app-title">
-        <span class="app-name">Behaviour Vision Lab</span>
-        <span class="app-subtitle">Video-based behaviour pipeline</span>
-      </div>
+      <svg class="app-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        <path d="M3 7l9 5 9-5M12 12v10" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      <span class="app-name">Behaviour Vision Lab</span>
     </div>
     <div class="top-bar-right">
-      <span id="pill-mode" class="pill">Segmentation</span>
-      <span id="pill-device" class="pill pill-dim">mps</span>
-      <span id="pill-status" class="pill pill-dim">Idle</span>
+      <span class="status-item"><span id="dot-status" class="status-dot status-dot-idle"></span><span id="status-label">Idle</span></span>
+      <span id="gpu-indicator" class="status-item" title="Configured device (see Model card)"><span id="dot-device" class="status-dot status-dot-live"></span>GPU</span>
+      <button id="btn-settings" class="icon-btn" title="Settings (not wired to anything yet)">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-1.7-1L15 3h-4l-.3 2.6a7.6 7.6 0 0 0-1.7 1l-2.4-1-2 3.4L6.6 11a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7.6 7.6 0 0 0 1.7 1L11 21h4l.3-2.6a7.6 7.6 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -31,13 +36,23 @@
 
       <section class="card">
         <h3>Input</h3>
-        <button id="btn-load-video" class="btn btn-primary btn-block">Load video…</button>
+        <button id="btn-load-video" class="btn btn-outline btn-block">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 16V4M7 9l5-5 5 5M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Load video…
+        </button>
         <div class="input-file-row">
-          <span id="video-check" class="check-dot hidden">✓</span>
           <span id="video-filename" class="filename">No video loaded</span>
+          <svg id="video-check" class="check-icon hidden" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M8 12.5l2.5 2.5L16 9.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
         </div>
-        <label class="field-label" for="fps-input">Source FPS</label>
-        <input id="fps-input" class="field-input" type="number" min="1" step="1" value="15">
+        <div class="inline-field-row">
+          <label class="field-label-inline" for="fps-input">Source FPS</label>
+          <input id="fps-input" class="field-input field-input-sm" type="number" min="1" step="1" value="15">
+        </div>
       </section>
 
       <section class="card">
@@ -65,8 +80,10 @@
 
       <section class="card">
         <h3>Tracking</h3>
-        <label class="field-label" for="max-people-input">Max number of people</label>
-        <input id="max-people-input" class="field-input" type="number" min="1" step="1" value="2">
+        <div class="inline-field-row">
+          <label class="field-label-inline" for="max-people-input">Max number of people</label>
+          <input id="max-people-input" class="field-input field-input-sm" type="number" min="1" step="1" value="2">
+        </div>
 
         <div class="switch-row">
           <span>Re-identification</span>
@@ -130,8 +147,24 @@
       </section>
 
       <div class="sidebar-actions">
-        <button id="btn-apply" class="btn btn-secondary btn-block">Apply settings</button>
-        <button id="btn-export-csv" class="btn btn-ghost btn-block">Export CSV…</button>
+        <div class="sidebar-actions-row">
+          <button id="btn-play-analysis" class="btn btn-primary">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            Play analysis
+          </button>
+          <button id="btn-restart" class="btn btn-outline">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Restart
+          </button>
+        </div>
+        <button id="btn-export-csv" class="btn btn-outline btn-block">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 4v12M7 11l5 5 5-5M4 20h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Export CSV…
+        </button>
       </div>
     </aside>
 
@@ -143,21 +176,36 @@
       </div>
 
       <div class="transport-bar">
-        <button id="btn-back" class="transport-btn" title="Back one frame">⏮</button>
-        <button id="btn-play" class="transport-btn transport-btn-main" title="Play/Pause">▶</button>
-        <button id="btn-forward" class="transport-btn" title="Forward one frame">⏭</button>
+        <button id="btn-play" class="transport-btn transport-btn-main" title="Play/Pause">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+        <button id="btn-back" class="transport-btn transport-btn-skip" title="Back 10 frames">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 20a8 8 0 1 1 6.93-4M13 15v-6l-3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" transform="scale(-1,1) translate(-24,0)"/></svg>
+          <span>10</span>
+        </button>
+        <button id="btn-forward" class="transport-btn transport-btn-skip" title="Forward 10 frames">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 20a8 8 0 1 0-6.93-4M11 15v-6l3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>10</span>
+        </button>
 
-        <span id="timecode" class="timecode">00:00.0</span>
+        <span id="timecode" class="timecode">00:00:00.0 / 00:00:00.0</span>
 
-        <label class="speed-label" for="speed-select">Speed</label>
-        <select id="speed-select" class="speed-select">
+        <select id="speed-select" class="speed-select" title="Playback speed">
           <option value="0.5">0.5×</option>
-          <option value="1" selected>1×</option>
+          <option value="1" selected>1.0×</option>
           <option value="1.5">1.5×</option>
-          <option value="2">2×</option>
+          <option value="2">2.0×</option>
         </select>
 
-        <button id="btn-fullscreen" class="transport-btn" title="Fullscreen">⛶</button>
+        <span class="volume-control" title="No audio in this pipeline — decorative">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 9v6h4l5 4V5L8 9H4Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <input type="range" class="volume-slider" min="0" max="100" value="80" disabled>
+        </span>
+
+        <button id="btn-fullscreen" class="transport-btn" title="Fullscreen">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button id="btn-overflow" class="transport-btn" title="More (nothing here yet)">⋮</button>
       </div>
 
       <div class="timeline-wrap">
@@ -165,21 +213,25 @@
           <div id="timeline-progress" class="timeline-progress"></div>
           <div id="timeline-cursor" class="timeline-cursor"></div>
         </div>
+        <div id="timeline-ticks" class="timeline-ticks"></div>
       </div>
     </main>
   </div>
 
   <!-- ========================================================= status bar -->
   <footer class="status-bar">
-    <div id="pipeline-flow" class="pipeline-flow">
-      <span class="flow-step">YOLO26 Segment</span>
+    <div class="pipeline-flow-block">
+      <div id="pipeline-flow" class="pipeline-flow"></div>
+      <div class="pipeline-flow-subtitle">
+        <span id="dot-tracks-active" class="status-dot status-dot-idle"></span>
+        <span id="flow-tracks-label">0 active tracks</span>
+      </div>
     </div>
     <div class="metrics">
-      <div class="metric"><span class="metric-label">Frame</span><span id="metric-frame" class="metric-value">–</span></div>
-      <div class="metric"><span class="metric-label">Processing FPS</span><span id="metric-fps" class="metric-value">–</span></div>
-      <div class="metric"><span class="metric-label">Avg. latency</span><span id="metric-latency" class="metric-value">–</span></div>
-      <div class="metric"><span class="metric-label">Active tracks</span><span id="metric-people" class="metric-value">–</span></div>
-      <div class="metric"><span class="metric-label">GPU</span><span id="metric-device" class="metric-value">mps</span></div>
+      <div class="metric-card"><span class="metric-label">Frame</span><span id="metric-frame" class="metric-value">–</span></div>
+      <div class="metric-card"><span class="metric-label">Processing FPS</span><span id="metric-fps" class="metric-value">–</span></div>
+      <div class="metric-card"><span class="metric-label">Avg. latency</span><span id="metric-latency" class="metric-value">–</span></div>
+      <div class="metric-card"><span class="metric-label">Active tracks</span><span id="metric-people" class="metric-value">–</span></div>
     </div>
   </footer>
 
