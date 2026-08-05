@@ -9,4 +9,11 @@ mediapipe>=1.0  # opzionale: head-pose/viso (live_demo.py --with-eyes/--with-mou
                  # --with-eyebrows/--with-head-movement), mani (--with-hands), o pose
                  # per-maschera nella pipeline di segmentazione (--with-mediapipe-pose)
 Pillow>=10.0  # richiesto dalla GUI Tkinter (gui_app.py) per mostrare l'overlay in una finestra
-pywebview>=5.0  # opzionale: richiesto solo dalla nuova GUI web "Behaviour Vision Lab" (webui_app.py)
+# pywebview: opzionale, richiesto solo dalla GUI web "Behaviour Vision Lab" (webui_app.py).
+# Su macOS/Windows porta gia' il proprio backend nativo (Cocoa/EdgeWebView2), ma su Linux
+# NON include nessun backend grafico -- senza uno di questi va in errore "No Qt bindings
+# could be found" all'avvio. pywebview[qt] installa PyQt5+PyQtWebEngine via pip (nessun
+# pacchetto di sistema richiesto nella maggior parte dei casi); in alternativa il backend
+# GTK (pywebview[gtk]) richiede invece pacchetti di sistema (python3-gi, webkit2gtk).
+pywebview>=5.0; sys_platform != "linux"
+pywebview[qt]>=5.0; sys_platform == "linux"
