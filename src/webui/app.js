@@ -173,10 +173,13 @@
 
   // ------------------------------------------------------------- collect
   function collectParams() {
+    // Nessun campo "device": lo lasciamo assente cosi' Api.build_player()
+    // lo auto-rileva lato Python (cuda/mps/cpu, vedi common/device.py) --
+    // prima era fisso a "mps" qui, il che rompeva silenziosamente su una
+    // macchina con GPU CUDA e nessun Metal.
     return {
       mode: $("mode-select").value,
       fps: $("fps-input").value,
-      device: "mps",
       scale: $("scale-select").value,
       max_people: $("max-people-input").value,
       reid: $("reid-toggle").checked,

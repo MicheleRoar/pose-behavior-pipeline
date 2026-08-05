@@ -37,6 +37,7 @@ import pandas as pd
 from segmentation.seg_estimation import SegTracker, mask_area, mask_centroid
 from segmentation.seg_reid import SegReIdentifier
 from common.viz import draw_fps, draw_person_label, draw_skeleton, get_track_color
+from common.device import detect_default_device
 from pose.mediapipe_pose import MediaPipePoseByTrack
 from pose.features import compute_joint_angles
 
@@ -209,7 +210,10 @@ def main():
     parser.add_argument("--fps", type=float, required=True, help="Frame rate della sorgente")
     parser.add_argument("--model", default="yolo26s-seg.pt",
                          help="Modello YOLO26 di instance segmentation (yolo26n/s/m/l/x-seg.pt)")
-    parser.add_argument("--device", default="mps", help="mps | cpu | cuda")
+    parser.add_argument("--device", default=None,
+                         help="mps | cpu | cuda (default: auto-rilevato -- cuda se una GPU "
+                              "NVIDIA e' disponibile, altrimenti mps su Apple Silicon, "
+                              "altrimenti cpu, vedi common/device.py)")
     parser.add_argument("--conf-threshold", type=float, default=0.1,
                          help="Tenere a o sotto track_low_thresh di ByteTrack (0.1 di default)")
     parser.add_argument("--tracker", default="bytetrack.yaml",
@@ -239,7 +243,8 @@ def main():
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
-    run_segmentation(source, fps=args.fps, model_name=args.model, device=args.device,
+    device = args.device or detect_default_device()
+    run_segmentation(source, fps=args.fps, model_name=args.model, device=device,
                       conf_threshold=args.conf_threshold, tracker_config=args.tracker,
                       max_people=args.max_people, with_seg_reid=args.with_seg_reid,
                       with_mediapipe_pose=args.with_mediapipe_pose,

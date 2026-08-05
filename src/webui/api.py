@@ -51,6 +51,8 @@ import pandas as pd
 
 from gui.pipeline_runner import iter_pipeline_frames, RunnerFrame
 from gui.video_player import VideoPlayer
+from common.device import detect_default_device  # solo la funzione: non importa torch
+                                                    # finche' non viene CHIAMATA (vedi sotto)
 
 MODE_KEYS = {"segmentation", "pose", "both"}
 
@@ -98,11 +100,15 @@ def build_player_kwargs(params: dict) -> dict:
 
     Richiede in `params`: "mode" ("segmentation"|"pose"|"both"), "source"
     (percorso video), "fps" (fps sorgente, numero o stringa numerica).
-    Opzionali (default coerenti con app.py): "device" ("mps"), "scale"
-    ("n"|"s"|"m", default "s"), "max_people" (int, stringa, o None/""),
-    "with_hands", "with_eyes", "with_mouth", "with_eyebrows",
-    "with_head_movement", "with_mediapipe_pose" (bool), "reid" (bool,
-    abilita re-id/seg-reid se un max_people e' impostato).
+    Opzionali (default coerenti con app.py): "device" (se assente/None,
+    QUESTA funzione lo lascia None -- e' `Api.build_player()`, non questa
+    funzione pura, a risolverlo con `detect_default_device()`, cosi'
+    `build_player_kwargs` resta testabile senza richiedere torch
+    installato, vedi `demo/webui_api_check.py`), "scale" ("n"|"s"|"m",
+    default "s"), "max_people" (int, stringa, o None/""), "with_hands",
+    "with_eyes", "with_mouth", "with_eyebrows", "with_head_movement",
+    "with_mediapipe_pose" (bool), "reid" (bool, abilita re-id/seg-reid se
+    un max_people e' impostato).
     """
     mode = params.get("mode")
     if mode not in MODE_KEYS:
@@ -139,7 +145,7 @@ def build_player_kwargs(params: dict) -> dict:
 
     return dict(
         mode=mode, source=params["source"], fps=fps,
-        device=params.get("device", "mps"),
+        device=params.get("device") or None,  # None = "auto-rileva a valle", vedi sopra
         pose_model=f"yolo26{scale}-pose.pt",
         with_hands=with_hands,
         with_eyes=with_eyes, with_mouth=with_mouth,
@@ -237,7 +243,7 @@ class Api:
         self.window = None  # impostato da set_window() dopo webview.create_window()
         self.video_path: str | None = None
         self.player: VideoPlayer | None = None
-        self._device = "mps"
+        self._device: str | None = None  # risolto in build_player() -- vedi li'
         self._mode = "segmentation"
         self._max_people: int | None = None
         self._playback_fps = 15.0
@@ -309,6 +315,14 @@ class Api:
             kwargs = build_player_kwargs(params)
         except (KeyError, ValueError, TypeError) as exc:
             return {"ok": False, "error": str(exc)}
+        if kwargs["device"] is None:
+            # build_player_kwargs() lascia "device" a None quando JS non ne
+            # specifica uno esplicito -- lo risolviamo QUI (non li', vedi il
+            # suo docstring) cosi' quella resta una funzione pura testabile
+            # senza torch installato. cuda se c'e' una GPU NVIDIA, altrimenti
+            # mps su Apple Silicon, altrimenti cpu -- prima era fisso a
+            # "mps", il che rompeva silenziosamente su una macchina CUDA.
+            kwargs["device"] = detect_default_device()
         with self._lock:
             self._playing = False
             self._device = kwargs["device"]

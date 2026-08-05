@@ -40,6 +40,8 @@ from PIL import Image, ImageTk
 
 from gui.pipeline_runner import iter_pipeline_frames, RunnerFrame
 from gui.video_player import VideoPlayer
+from common.device import detect_default_device  # solo la funzione: non importa torch
+                                                    # finche' non viene CHIAMATA (vedi sotto)
 
 ARCH_YOLO = "YOLO"
 ARCH_SAM3 = "SAM3 (not available here — runs on dedicated GPUs, see README)"
@@ -273,8 +275,14 @@ class App:
         # outside Segmentation) and pipeline_runner.py.
         with_mediapipe_pose = mode_key == "segmentation" and self.mediapipe_pose_var.get()
 
+        # Rilevato ogni volta che si costruisce il player (non in cima al
+        # modulo): cosi' la GUI resta apribile anche senza torch installato,
+        # e il rilevamento richiede una chiamata a torch solo quando serve
+        # davvero (Play/Restart) -- prima "mps" era fisso, il che rompeva
+        # silenziosamente su una macchina con GPU CUDA (vedi common/device.py).
+        device = detect_default_device()
         kwargs = dict(
-            mode=mode_key, source=self.video_path, fps=fps, device="mps",
+            mode=mode_key, source=self.video_path, fps=fps, device=device,
             pose_model=f"yolo26{scale}-pose.pt",
             with_hands=with_hands,
             with_eyes=with_eyes, with_mouth=with_mouth,

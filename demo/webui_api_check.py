@@ -37,7 +37,11 @@ def part1_build_player_kwargs_mirrors_app_py_defaults():
     assert kwargs["mode"] == "pose"
     assert kwargs["source"] == "video.mp4"
     assert kwargs["fps"] == 15.0
-    assert kwargs["device"] == "mps"  # default
+    # device non specificato -> None, NON "mps": la risoluzione automatica
+    # (cuda/mps/cpu) avviene in Api.build_player(), non qui, cosi' questa
+    # funzione resta pura/testabile senza richiedere torch installato --
+    # vedi anche part1b sotto per il passthrough di un device esplicito.
+    assert kwargs["device"] is None
     assert kwargs["pose_model"] == "yolo26s-pose.pt"  # scale default "s"
     assert kwargs["seg_model"] == "yolo26s-seg.pt"
     assert kwargs["with_hands"] is True
@@ -46,6 +50,18 @@ def part1_build_player_kwargs_mirrors_app_py_defaults():
     assert kwargs["max_people"] is None
     assert kwargs["with_reid"] is False  # nessun max_people -> reid ignorata anche se richiesta
     print("Parte 1: build_player_kwargs applica i default giusti e passa i flag richiesti — OK")
+
+
+def part1b_explicit_device_passes_through_unchanged():
+    """Se JS manda esplicitamente un device (es. l'utente vuole forzare
+    "cpu" per debug), build_player_kwargs deve limitarsi a passarlo cosi'
+    com'e' -- l'auto-rilevamento in Api.build_player() scatta SOLO quando
+    il campo e' assente/vuoto, non deve mai scavalcare una scelta esplicita."""
+    kwargs = build_player_kwargs({
+        "mode": "segmentation", "source": "v.mp4", "fps": 15, "device": "cuda",
+    })
+    assert kwargs["device"] == "cuda"
+    print("Parte 1b: un device esplicito nei parametri passa invariato, senza auto-rilevamento — OK")
 
 
 def part2_hands_face_ignored_outside_pose_and_both():
@@ -221,6 +237,7 @@ def part11_build_status_carries_totals_and_max_people_for_the_timeline():
 
 if __name__ == "__main__":
     part1_build_player_kwargs_mirrors_app_py_defaults()
+    part1b_explicit_device_passes_through_unchanged()
     part2_hands_face_ignored_outside_pose_and_both()
     part3_mediapipe_pose_only_in_segmentation()
     part4_reid_requires_max_people_and_right_mode()

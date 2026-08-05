@@ -63,6 +63,7 @@ pose-behavior-pipeline/
 │   │   └── anonymize.py           # face blurring
 │   ├── common/                    # shared by both pipelines
 │   │   ├── tracking_common.py     # shared max_people per-frame cap logic
+│   │   ├── device.py              # auto-detect cuda/mps/cpu, default for --device everywhere
 │   │   └── viz.py                 # overlay drawing
 │   └── configs/
 │       └── bytetrack_permissive.yaml  # tuned ByteTrack config for hard scenes
@@ -217,8 +218,14 @@ curl -L -o pose_landmarker_lite.task \
 
 ```bash
 cd src && python pipeline.py --source video.mp4 --fps 30 --out features.csv
-cd src && python live_demo.py --source 0 --fps 30 --device mps --out live_session.csv
+cd src && python live_demo.py --source 0 --fps 30 --out live_session.csv
 ```
+
+`--device` is optional everywhere in this project (CLIs and both GUIs):
+left unset, it auto-detects the best available backend -- `cuda` if an
+NVIDIA GPU is available, else `mps` on Apple Silicon, else `cpu` (see
+`common/device.py`). Pass `--device cuda`/`--device mps`/`--device cpu`
+explicitly to override.
 
 Optional flags stack freely: `--with-eyes` (blink rate), `--with-mouth`
 (opening + repetitiveness), `--with-eyebrows` (raise), `--with-head-movement`

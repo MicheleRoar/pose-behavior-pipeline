@@ -68,6 +68,7 @@ from pose.features import (
 )
 from pose.pose_estimation import PoseTracker
 from pose.anonymize import blur_face
+from common.device import detect_default_device
 from common.viz import (
     draw_skeleton, draw_text_block, draw_fps, draw_hand, draw_face_signals,
     get_track_color, draw_person_label, text_block_size,
@@ -603,7 +604,10 @@ def main():
                               "camera, fast motion) consider a bigger model, e.g. yolo26s-pose.pt "
                               "or yolo26m-pose.pt, for more stable keypoints and fewer "
                               "tracking-related ID switches.")
-    parser.add_argument("--device", default="mps", help="mps | cpu | cuda")
+    parser.add_argument("--device", default=None,
+                         help="mps | cpu | cuda (default: auto-rilevato -- cuda se una GPU "
+                              "NVIDIA e' disponibile, altrimenti mps su Apple Silicon, "
+                              "altrimenti cpu, vedi common/device.py)")
     parser.add_argument("--conf-threshold", type=float, default=0.1,
                          help="Minimum detection confidence passed to YOLO/ByteTrack. Keep this "
                               "at or below ByteTrack's track_low_thresh (0.1 by default): a higher "
@@ -702,7 +706,8 @@ def main():
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
-    run_live(source, fps=args.fps, model_name=args.model, device=args.device,
+    device = args.device or detect_default_device()
+    run_live(source, fps=args.fps, model_name=args.model, device=device,
               conf_threshold=args.conf_threshold, tracker_config=args.tracker,
               max_people=args.max_people,
               window_seconds=args.window_seconds, blur_faces=args.blur_faces,

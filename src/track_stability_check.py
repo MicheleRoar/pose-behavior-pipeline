@@ -39,6 +39,8 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 
+from common.device import detect_default_device
+
 
 def run(source, fps: float, model_name: str, device: str, conf_threshold: float,
         tracker_config: str, max_people: int | None) -> None:
@@ -109,7 +111,8 @@ def main():
     parser.add_argument("--model", default="yolo26s-seg.pt",
                          help="Modello YOLO26 di instance segmentation "
                               "(yolo26n/s/m/l/x-seg.pt)")
-    parser.add_argument("--device", default="mps", help="mps | cpu | cuda")
+    parser.add_argument("--device", default=None,
+                         help="mps | cpu | cuda (default: auto-rilevato, vedi common/device.py)")
     parser.add_argument("--conf-threshold", type=float, default=0.1,
                          help="Stessa raccomandazione di pose_estimation.py: tenere a o "
                               "sotto track_low_thresh (0.1 di default in bytetrack.yaml)")
@@ -121,7 +124,8 @@ def main():
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
-    run(source, fps=args.fps, model_name=args.model, device=args.device,
+    device = args.device or detect_default_device()
+    run(source, fps=args.fps, model_name=args.model, device=device,
         conf_threshold=args.conf_threshold, tracker_config=args.tracker,
         max_people=args.max_people)
 

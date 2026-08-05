@@ -26,6 +26,7 @@ import pandas as pd
 
 from pose.features import build_person_features, repetitive_motion_score, symmetry_index
 from pose.pose_estimation import PoseTracker
+from common.device import detect_default_device
 
 
 def run_pipeline(source, fps: float, model_name: str = "yolo26n-pose.pt",
@@ -79,7 +80,10 @@ def main():
                               "constraint, so for hard footage (overhead camera, fast motion) "
                               "consider a bigger model, e.g. yolo26s-pose.pt or yolo26m-pose.pt, "
                               "for more stable keypoints and fewer tracking-related ID switches.")
-    parser.add_argument("--device", default="mps", help="mps | cpu | cuda")
+    parser.add_argument("--device", default=None,
+                         help="mps | cpu | cuda (default: auto-detected -- cuda if an NVIDIA "
+                              "GPU is available, else mps on Apple Silicon, else cpu, see "
+                              "common/device.py)")
     parser.add_argument("--conf-threshold", type=float, default=0.1,
                          help="Minimum detection confidence passed to YOLO/ByteTrack. Keep this "
                               "at or below ByteTrack's track_low_thresh (0.1 by default): a higher "
@@ -103,7 +107,8 @@ def main():
     # Allows passing an integer (webcam) or a string (file/stream)
     source = int(args.source) if args.source.isdigit() else args.source
 
-    df = run_pipeline(source, fps=args.fps, model_name=args.model, device=args.device,
+    device = args.device or detect_default_device()
+    df = run_pipeline(source, fps=args.fps, model_name=args.model, device=device,
                        conf_threshold=args.conf_threshold, tracker_config=args.tracker,
                        max_people=args.max_people)
     df.to_csv(args.out, index=False)
