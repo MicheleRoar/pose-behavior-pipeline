@@ -23,12 +23,16 @@ Schema dei 21 landmark MediaPipe Hands (indici):
     13-16 ring (MCP, PIP, DIP, TIP)
     17-20 pinky (MCP, PIP, DIP, TIP)
 
-Setup richiesto (solo sul Mac, non testabile in questo ambiente sandbox
-senza camera):
+Setup richiesto:
 
     pip install mediapipe
-    curl -L -o hand_landmarker.task \\
-        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+
+Il modello Hand Landmarker viene scaricato IN AUTOMATICO alla prima
+esecuzione in una cache fissa dentro il progetto (`<repo>/models/`), non
+serve piu' un `curl` manuale -- vedi `common/mediapipe_models.py` per i
+dettagli (stesso bug/fix di `pose/mediapipe_pose.py`: il default nudo
+"hand_landmarker.task" veniva risolto da MediaPipe relativo alla cwd,
+rompendosi se lanciato da una cwd diversa da quella del download manuale).
 """
 
 from __future__ import annotations
@@ -37,7 +41,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from common.mediapipe_models import resolve_model_path
 from pose.geometry import angle_at
+
+_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+    "hand_landmarker/float16/1/hand_landmarker.task"
+)
 
 WRIST = 0
 FINGER_TIPS = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
@@ -158,6 +168,7 @@ class HandTracker:
         import mediapipe as mp
         from mediapipe.tasks.python import vision, BaseOptions
 
+        model_path = resolve_model_path(model_path, download_url=_MODEL_URL)
         options = vision.HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
             running_mode=vision.RunningMode.VIDEO,

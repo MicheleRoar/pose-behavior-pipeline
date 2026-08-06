@@ -26,13 +26,14 @@ dalla camera — un'approssimazione ragionevole per una singola stanza di
 osservazione, ma da validare empiricamente prima di qualunque uso
 interpretativo.
 
-Setup richiesto (solo sul Mac, non testabile in questo ambiente sandbox
-senza camera):
+Setup richiesto:
 
     pip install mediapipe
-    # scarica il modello Face Landmarker (una tantum):
-    curl -L -o face_landmarker.task \\
-        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+
+Il modello Face Landmarker viene scaricato IN AUTOMATICO alla prima
+esecuzione in una cache fissa dentro il progetto (`<repo>/models/`), non
+serve piu' un `curl` manuale -- vedi `common/mediapipe_models.py` per i
+dettagli (stesso bug/fix di `pose/mediapipe_pose.py`/`pose/hands.py`).
 """
 
 from __future__ import annotations
@@ -40,6 +41,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+
+from common.mediapipe_models import resolve_model_path
+
+_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+    "face_landmarker/float16/1/face_landmarker.task"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +284,7 @@ class HeadGazeEstimator:
         import mediapipe as mp
         from mediapipe.tasks.python import vision, BaseOptions
 
+        model_path = resolve_model_path(model_path, download_url=_MODEL_URL)
         options = vision.FaceLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
             running_mode=vision.RunningMode.VIDEO,

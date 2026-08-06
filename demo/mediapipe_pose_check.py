@@ -121,110 +121,18 @@ def part3_padded_crop_box_clamped_to_frame():
     print("Parte 3: il box di ritaglio con padding resta sempre dentro i bordi del frame — OK")
 
 
-def part3b_resolve_model_path_existing_explicit_path_used_as_is():
-    """Un path passato ESPLICITAMENTE dall'utente e che esiste gia' -- vale
-    per qualunque nome di file, anche il default nudo se per caso esiste
-    nella cwd corrente -- va usato cosi' com'e', nessuna risoluzione/
-    download (nato dal bug reale: 'unable to find pose_landmarker_lite'
-    quando si lanciava da una cwd diversa da quella del curl manuale, vedi
-    il docstring di mediapipe_pose.py)."""
-    import shutil
-    import tempfile
-    from pose.mediapipe_pose import _resolve_model_path
-
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        custom_path = str(Path(tmp_dir) / "pose_landmarker_full.task")
-        Path(custom_path).write_bytes(b"fake model bytes")
-        result = _resolve_model_path(custom_path)
-        assert result == custom_path, f"un path esistente va restituito invariato, ottenuto {result}"
-        print("Parte 3b: _resolve_model_path() restituisce invariato un path esplicito gia' "
-              "esistente, nessuna risoluzione/download tentati — OK")
-    finally:
-        shutil.rmtree(tmp_dir)
-
-
-def part3c_resolve_model_path_custom_missing_path_not_touched():
-    """Path custom (nome diverso dal default nudo) che NON esiste: nessun
-    tentativo di indovinare/scaricare -- restituito invariato, cosi' il
-    chiamante (MediaPipe) fallisce con l'errore originale, piu' chiaro di
-    un download silenzioso nel posto sbagliato."""
-    from pose.mediapipe_pose import _resolve_model_path
-
-    missing = "/percorso/inesistente/pose_landmarker_full.task"
-    result = _resolve_model_path(missing)
-    assert result == missing
-    print("Parte 3c: _resolve_model_path() non tocca un path custom mancante (nome diverso dal "
-          "default nudo) — OK")
-
-
-def part3d_resolve_model_path_bare_default_uses_project_cache():
-    """Il nome nudo di default ('pose_landmarker_lite.task', quello
-    risolto in modo cwd-dipendente prima di questo fix) viene risolto
-    nella cache fissa del progetto -- riusa il file se gia' presente
-    (nessun download ripetuto), lo scarica (qui: un finto che crea solo un
-    file vuoto, nessuna rete vera) se assente."""
-    import os
-    import shutil
-    import tempfile
-    import pose.mediapipe_pose as mp_pose
-
-    tmp_dir = tempfile.mkdtemp()
-    original_cache = mp_pose._DEFAULT_MODEL_CACHE_PATH
-    original_download = mp_pose._download_pose_landmarker_lite
-    original_cwd = os.getcwd()
-    # _resolve_model_path() controlla PRIMA se il nome nudo esiste gia'
-    # nella cwd corrente (comportamento voluto: un file gia' scaricato a
-    # mano li' va rispettato) -- ci si sposta in una cartella pulita per
-    # non dipendere da eventuali file lasciati da run precedenti (es. una
-    # vecchia src/pose_landmarker_lite.task scaricata prima di questo fix).
-    os.chdir(tmp_dir)
-    try:
-        # caso 1: gia' in cache -- nessun download
-        cache_path = Path(tmp_dir) / "models" / "pose_landmarker_lite.task"
-        cache_path.parent.mkdir(parents=True)
-        cache_path.write_bytes(b"already downloaded")
-        mp_pose._DEFAULT_MODEL_CACHE_PATH = cache_path
-        download_calls = []
-        mp_pose._download_pose_landmarker_lite = lambda dest: download_calls.append(dest)
-
-        result = mp_pose._resolve_model_path("pose_landmarker_lite.task")
-        assert result == str(cache_path)
-        assert download_calls == [], "il file e' gia' nella cache -- nessun download da rifare"
-
-        # caso 2: assente -- il download (finto) viene invocato e crea il file
-        cache_path.unlink()
-
-        def fake_download(dest: Path) -> None:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(b"downloaded now")
-
-        mp_pose._download_pose_landmarker_lite = fake_download
-        result2 = mp_pose._resolve_model_path("pose_landmarker_lite.task")
-        assert result2 == str(cache_path)
-        assert cache_path.exists(), "il download finto avrebbe dovuto creare il file"
-
-        print("Parte 3d: _resolve_model_path() risolve il nome nudo di default nella cache fissa "
-              "del progetto -- riusa il file se presente, lo scarica se assente — OK")
-    finally:
-        mp_pose._DEFAULT_MODEL_CACHE_PATH = original_cache
-        mp_pose._download_pose_landmarker_lite = original_download
-        os.chdir(original_cwd)
-        shutil.rmtree(tmp_dir)
-
-
 def _find_pose_model() -> str | None:
     """Percorso del modello pose_landmarker_lite.task se presente in uno
-    dei posti noti -- la nuova cache fissa del progetto (models/ alla
-    root, vedi _resolve_model_path in mediapipe_pose.py) o la vecchia
-    convenzione accanto a src/ (per compatibilita' con chi l'aveva gia'
-    scaricato a mano prima di questo fix). None se assente ovunque, cosi'
-    i test che richiedono mediapipe/il modello vero si saltano da soli con
-    una nota invece di far fallire l'intera suite su una macchina senza il
-    modello scaricato."""
-    from pose.mediapipe_pose import _DEFAULT_MODEL_CACHE_PATH
+    dei posti noti -- la cache fissa del progetto (models/ alla root, vedi
+    common/mediapipe_models.py) o la vecchia convenzione accanto a src/
+    (per compatibilita' con chi l'aveva gia' scaricato a mano prima del
+    fix del bug cwd-path). None se assente ovunque, cosi' i test che
+    richiedono mediapipe/il modello vero si saltano da soli con una nota
+    invece di far fallire l'intera suite su una macchina senza il modello
+    scaricato."""
+    from common.mediapipe_models import MODELS_CACHE_DIR
     candidates = [
-        _DEFAULT_MODEL_CACHE_PATH,
+        MODELS_CACHE_DIR / "pose_landmarker_lite.task",
         Path(__file__).resolve().parent.parent / "src" / "pose_landmarker_lite.task",
     ]
     for candidate in candidates:
@@ -307,9 +215,6 @@ def main():
     part2_per_joint_confidence_is_preserved_not_averaged()
     part2b_empty_pose_is_all_nan_zero_confidence()
     part3_padded_crop_box_clamped_to_frame()
-    part3b_resolve_model_path_existing_explicit_path_used_as_is()
-    part3c_resolve_model_path_custom_missing_path_not_touched()
-    part3d_resolve_model_path_bare_default_uses_project_cache()
     part4_defensive_clamp_absorbs_duplicate_or_out_of_order_timestamps()
     part5_pool_per_track_gives_each_person_an_independent_stream()
     print("\nVerifica completata senza errori: la rimappatura BlazePose -> COCO-17, il calcolo "
