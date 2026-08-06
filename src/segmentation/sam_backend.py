@@ -55,19 +55,25 @@ Strategia di prompting/continuita' degli id
 
 Onesta' su cosa e' verificato qui
 --------------------------------------
-Questo modulo e' stato scritto e testato SOLO con un predictor finto
-iniettato al posto di sam3/samurai (vedi `demo/sam_backend_check.py`): la
-logica di chunking/seeding/persistenza e' verificata, la vera inferenza SAM
-NO (nessuna GPU CUDA in questo ambiente). Sulla macchina CUDA verificare
-soprattutto: la firma esatta di `init_state()` (se richiede una lista di
-frame in memoria o un percorso/cartella di frame su disco -- qui si
-assume la prima forma, vedi `_init_state()` da adattare se serve) e il
-formato esatto delle maschere restituite da `propagate_in_video()`.
+Questo modulo e' stato scritto e testato inizialmente SOLO con un predictor
+finto iniettato al posto di sam3/samurai (vedi `demo/sam_backend_check.py`,
+nessuna GPU CUDA in questo ambiente). `_init_state()` sotto e' stato pero'
+CORRETTO a partire da un test reale su una macchina CUDA (SAMURAI): il
+predictor NON accetta una lista di frame in memoria come si era assunto
+all'inizio -- si e' scontrato con "Only MP4 video and JPEG folder are
+supported". Si scrive quindi ogni chunk come sequenza JPEG in una cartella
+temporanea (vedi sotto) prima di chiamare `init_state()`. Non ancora
+confermato se SAM 3.1 ha lo stesso vincolo (eredita lo stesso codice video
+di SAM2/SAMURAI, quindi probabile) -- se si scoprisse che accetta anche
+liste di frame, `_init_state()` resta comunque overridabile per sottoclasse
+se in futuro conviene differenziare.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from typing import Iterator
 
 import cv2
@@ -177,6 +183,7 @@ class ChunkedVideoPredictorBackend:
         self.chunk_store_dir = chunk_store_dir
         self.max_people = max_people
         self._detector = None  # YOLO caricato pigramente in _detect_people()
+        self._current_chunk_tmpdir: str | None = None  # vedi _init_state()/run()
 
     # -------------------------------------------------- da implementare
     def _build_predictor(self):
@@ -184,7 +191,24 @@ class ChunkedVideoPredictorBackend:
 
     # ------------------------------------------------- override opzionale
     def _init_state(self, predictor, frames: list[np.ndarray]):
-        return predictor.init_state(frames)
+        """SAMURAI (e presumibilmente SAM 3.1, stesso codice video di
+        origine) NON accetta una lista di frame in memoria: vuole un
+        percorso a un video MP4 o a una cartella di JPEG in sequenza
+        (verificato su una macchina CUDA reale, vedi il docstring del
+        modulo). Si scrive quindi il chunk corrente come `000000.jpg`,
+        `000001.jpg`, ... in una cartella temporanea -- che resta viva
+        finche' il chunk non e' stato completamente propagato: la
+        cancella `run()` subito dopo (non qui, perche' questo metodo
+        ritorna prima che `propagate_in_video()` abbia letto i file)."""
+        self._current_chunk_tmpdir = tempfile.mkdtemp(prefix="chunked_video_predictor_")
+        for i, frame in enumerate(frames):
+            cv2.imwrite(os.path.join(self._current_chunk_tmpdir, f"{i:06d}.jpg"), frame)
+        return predictor.init_state(self._current_chunk_tmpdir)
+
+    def _cleanup_chunk_tmpdir(self) -> None:
+        if self._current_chunk_tmpdir is not None:
+            shutil.rmtree(self._current_chunk_tmpdir, ignore_errors=True)
+            self._current_chunk_tmpdir = None
 
     def _add_box_prompt(self, predictor, state, *, frame_idx: int, obj_id: int, box: np.ndarray) -> None:
         predictor.add_new_points_or_box(state, frame_idx=frame_idx, obj_id=obj_id, box=box)
@@ -233,23 +257,31 @@ class ChunkedVideoPredictorBackend:
 
             chunk_results: list[SegFrameResult] = []
             polys_by_local_frame: dict[int, dict[int, np.ndarray]] = {}
-            for local_idx, masks_by_id in self._propagate(predictor, state):
-                people = []
-                polys_this_frame: dict[int, np.ndarray] = {}
-                for obj_id, mask in masks_by_id.items():
-                    poly = _mask_to_polygon(mask)
-                    polys_this_frame[obj_id] = poly
-                    box = _polygon_to_box(poly)
-                    # SAM non produce una confidenza di detection comparabile
-                    # a quella di YOLO: 1.0 come segnaposto esplicito, MAI
-                    # usato per il tetto max_people qui (gia' applicato sopra
-                    # sui seed) -- vedi cap_by_confidence in tracking_common.py
-                    # per il caso YOLO, dove la confidenza e' invece reale.
-                    people.append((obj_id, box, poly, 1.0))
-                polys_by_local_frame[local_idx] = polys_this_frame
-                chunk_results.append(SegFrameResult(
-                    frame_index=start + local_idx, frame=chunk_frames[local_idx], people=people,
-                ))
+            try:
+                for local_idx, masks_by_id in self._propagate(predictor, state):
+                    people = []
+                    polys_this_frame: dict[int, np.ndarray] = {}
+                    for obj_id, mask in masks_by_id.items():
+                        poly = _mask_to_polygon(mask)
+                        polys_this_frame[obj_id] = poly
+                        box = _polygon_to_box(poly)
+                        # SAM non produce una confidenza di detection comparabile
+                        # a quella di YOLO: 1.0 come segnaposto esplicito, MAI
+                        # usato per il tetto max_people qui (gia' applicato sopra
+                        # sui seed) -- vedi cap_by_confidence in tracking_common.py
+                        # per il caso YOLO, dove la confidenza e' invece reale.
+                        people.append((obj_id, box, poly, 1.0))
+                    polys_by_local_frame[local_idx] = polys_this_frame
+                    chunk_results.append(SegFrameResult(
+                        frame_index=start + local_idx, frame=chunk_frames[local_idx], people=people,
+                    ))
+            finally:
+                # la cartella temporanea coi JPEG del chunk (vedi _init_state())
+                # non serve piu' una volta che propagate_in_video() e' stata
+                # consumata fino in fondo -- ripulita anche se l'inferenza
+                # solleva un'eccezione a meta' chunk, per non lasciare cartelle
+                # temporanee orfane su un video lungo con molti chunk.
+                self._cleanup_chunk_tmpdir()
 
             # controllo di coerenza (solo log, vedi docstring del modulo)
             anchor_polys = polys_by_local_frame.get(0, {})

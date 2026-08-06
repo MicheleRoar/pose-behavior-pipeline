@@ -61,13 +61,21 @@ class _FakePredictor:
     """Predictor SAM finto: 'ricorda' solo la box con cui e' stato seminato
     per ogni obj_id (posizione statica, non simula un vero movimento -- non
     e' il suo scopo, vedi il docstring del modulo) e la restituisce come
-    maschera identica per ogni frame del chunk."""
+    maschera identica per ogni frame del chunk.
+
+    `init_state()` riceve un PERCORSO a una cartella (non una lista di
+    frame in memoria) -- stessa interfaccia richiesta dal vero SAMURAI/SAM
+    (vedi `ChunkedVideoPredictorBackend._init_state()`): qui si limita a
+    contare i file JPEG scritti da `_init_state()`, cosi' il test verifica
+    davvero che quella scrittura sia avvenuta con il numero giusto di
+    frame, non solo che il codice non sollevi un'eccezione."""
 
     def __init__(self, frame_shape: tuple[int, int]):
         self.frame_shape = frame_shape
 
-    def init_state(self, frames):
-        return SimpleNamespace(num_frames=len(frames), seeds={})
+    def init_state(self, video_dir: str):
+        num_frames = len([f for f in os.listdir(video_dir) if f.endswith(".jpg")])
+        return SimpleNamespace(num_frames=num_frames, seeds={})
 
     def add_new_points_or_box(self, state, *, frame_idx, obj_id, box):
         state.seeds[obj_id] = box
@@ -188,11 +196,47 @@ def part4_non_cuda_device_rejected_immediately():
     print("PASS part4_non_cuda_device_rejected_immediately")
 
 
+def part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk():
+    # Verifica il fix del 2026-08 (confermato su una macchina CUDA reale con
+    # SAMURAI: "Only MP4 video and JPEG folder are supported", il predictor
+    # non accetta una lista di frame in memoria) -- _init_state() deve
+    # scrivere ogni chunk come cartella JPEG temporanea E ripulirla subito
+    # dopo, non lasciarne in giro una per chunk su un video con molti chunk.
+    import tempfile as tempfile_mod
+
+    tmp_dir = tempfile.mkdtemp()
+    created_dirs: list[str] = []
+    original_mkdtemp = tempfile_mod.mkdtemp
+
+    def _spy_mkdtemp(*args, **kwargs):
+        path = original_mkdtemp(*args, **kwargs)
+        created_dirs.append(path)
+        return path
+
+    tempfile_mod.mkdtemp = _spy_mkdtemp
+    try:
+        video_path = os.path.join(tmp_dir, "synthetic.mp4")
+        _make_synthetic_video(video_path)
+        backend = _run_backend(chunk_store_dir=None)
+
+        list(backend.run(video_path))  # consuma il generatore, un _init_state() per chunk
+
+        assert len(created_dirs) == 4, f"attesa una cartella temporanea per chunk (4), trovate {len(created_dirs)}"
+        for d in created_dirs:
+            assert not os.path.exists(d), f"{d} avrebbe dovuto essere ripulita dopo il suo chunk, esiste ancora"
+        print(f"PASS part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk "
+              f"({len(created_dirs)} cartelle create e ripulite, una per chunk)")
+    finally:
+        tempfile_mod.mkdtemp = original_mkdtemp
+        shutil.rmtree(tmp_dir)
+
+
 def main():
     part1_ids_stay_continuous_across_chunks()
     part2_new_person_mid_video_gets_fresh_id_with_expected_lag()
     part3_chunk_persistence_writes_one_file_per_chunk()
     part4_non_cuda_device_rejected_immediately()
+    part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk()
     print("\nTutti i test di sam_backend.py (con predictor finto) sono passati.")
 
 

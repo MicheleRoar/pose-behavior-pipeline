@@ -18,9 +18,32 @@ Import ritardato, stesso motivo di `Sam31Tracker`.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from segmentation.sam_backend import ChunkedVideoPredictorBackend
 
-DEFAULT_CHECKPOINT = "sam2.1_hiera_base_plus.pt"
+# Percorso di default, assumendo che 'samurai/' sia clonato come cartella
+# SORELLA di questo repository (vedi README -- "clonalo fuori da
+# pose-behavior-pipeline"), con i checkpoint scaricati nella sua
+# sottocartella checkpoints/. Verificato su una macchina CUDA reale (non
+# solo dedotto): un percorso assoluto tipo "/home/utente/..." si sarebbe
+# rotto su qualunque altra macchina/utente, quindi si calcola relativamente
+# alla posizione di QUESTO file invece che alla working directory da cui
+# viene lanciata la GUI (che cambiava a seconda di come si avviava
+# webui_app.py). Sovrascrivibile passando `checkpoint=` esplicito al
+# costruttore se la tua struttura di cartelle e' diversa.
+DEFAULT_CHECKPOINT = str(
+    Path(__file__).resolve().parents[3] / "samurai" / "checkpoints" / "sam2.1_hiera_base_plus.pt"
+)
+
+# NON solo "sam2.1_hiera_b+.yaml": Hydra (usato internamente da SAM2/SAMURAI
+# per caricare le config) cerca questo file DENTRO il package sam2 con
+# questo percorso relativo -- verificato su una macchina CUDA reale, l'
+# errore osservato passando solo il nome del file era "Cannot find primary
+# config 'sam2.1_hiera_b+.yaml'". Esiste anche una config SAM2.1 "standard"
+# con lo stesso nome file in un percorso diverso: questa e' quella
+# SPECIFICA di SAMURAI (con la memoria motion-aware), da non confondere.
+DEFAULT_CONFIG = "configs/samurai/sam2.1_hiera_b+.yaml"
 
 
 class SamuraiTracker(ChunkedVideoPredictorBackend):
@@ -29,7 +52,7 @@ class SamuraiTracker(ChunkedVideoPredictorBackend):
     file .pt + config .yaml associato)."""
 
     def __init__(self, *, checkpoint: str = DEFAULT_CHECKPOINT,
-                 config: str = "sam2.1_hiera_b+.yaml", **kwargs):
+                 config: str = DEFAULT_CONFIG, **kwargs):
         super().__init__(**kwargs)
         self.checkpoint = checkpoint
         self.config = config
