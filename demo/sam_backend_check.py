@@ -31,7 +31,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from segmentation.chunk_store import load_chunk  # noqa: E402
-from segmentation.sam_backend import ChunkedVideoPredictorBackend  # noqa: E402
+from segmentation.sam_backend import ChunkedVideoPredictorBackend, _to_boolean_mask  # noqa: E402
 
 FRAME_SHAPE = (64, 64)  # (height, width)
 TOTAL_FRAMES = 40
@@ -262,6 +262,51 @@ def part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk():
         shutil.rmtree(tmp_dir)
 
 
+class _FakeTorchTensor:
+    """Duck-type minimo di un torch.Tensor: solo i tre metodi usati da
+    `_to_boolean_mask()` (detach/cpu/numpy) -- verifica quel percorso senza
+    dipendere da torch (non installato in questo ambiente)."""
+
+    def __init__(self, array):
+        self._array = array
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self._array
+
+
+def part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input():
+    # Fix del 2026-08: sintomo reale osservato su una macchina CUDA
+    # ("il video parte ma non appaiono le maschere") -- causato da
+    # propagate_in_video() che restituisce logit (non gia' booleani),
+    # spesso in tensori con una dimensione canale in piu' -- vedi il
+    # docstring di _to_boolean_mask() per il perche' di ogni caso qui sotto.
+    already_bool = np.array([[True, False], [False, True]])
+    assert np.array_equal(_to_boolean_mask(already_bool), already_bool)
+
+    logits_2d = np.array([[-2.0, 3.0], [0.5, -0.1]])
+    result = _to_boolean_mask(logits_2d)
+    assert result.dtype == bool
+    assert result.tolist() == [[False, True], [True, False]], "soglia a 0.0: >0 = foreground"
+
+    logits_3d = logits_2d.reshape(1, 2, 2)  # forma (1,H,W), tipica di SAM2
+    result_3d = _to_boolean_mask(logits_3d)
+    assert result_3d.shape == (2, 2), "il canale extra va rimosso, non lasciato nella forma"
+    assert result_3d.tolist() == [[False, True], [True, False]]
+
+    tensor_like = _FakeTorchTensor(logits_2d)
+    result_tensor = _to_boolean_mask(tensor_like)
+    assert result_tensor.tolist() == [[False, True], [True, False]], \
+        "un oggetto con .detach()/.cpu()/.numpy() (duck-typing torch.Tensor) va convertito allo stesso modo"
+
+    print("PASS part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input")
+
+
 def main():
     part1_ids_stay_continuous_across_chunks()
     part2_new_person_mid_video_gets_fresh_id_with_expected_lag()
@@ -269,6 +314,7 @@ def main():
     part4_non_cuda_device_rejected_immediately()
     part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash()
     part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk()
+    part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input()
     print("\nTutti i test di sam_backend.py (con predictor finto) sono passati.")
 
 

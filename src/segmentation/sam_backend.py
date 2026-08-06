@@ -127,6 +127,42 @@ def _read_frame_range(source, start: int, end: int) -> list[np.ndarray]:
         cap.release()
 
 
+def _to_boolean_mask(mask) -> np.ndarray:
+    """Converte l'oggetto maschera restituito da `propagate_in_video()` in
+    un array numpy booleano (H,W), qualunque sia il formato di partenza --
+    verificato SOLO col predictor finto dei test fin qui (nessuna GPU CUDA
+    in questo ambiente): SAM2/SAMURAI restituiscono tipicamente un tensore
+    PyTorch di LOGIT (valori reali, non gia' 0/1), su GPU, spesso con una
+    dimensione canale in piu' (es. forma (1,H,W) invece di (H,W)). Senza
+    questa conversione `_mask_to_polygon()` riceveva dati nel formato
+    sbagliato e produceva contorni vuoti o insensati SENZA sollevare
+    un'eccezione -- da qui il sintomo osservato ("il video parte ma non
+    appaiono le maschere"), non un crash.
+
+    - Se l'oggetto ha un metodo `.detach()` (duck-typing per torch.Tensor,
+      niente `import torch` qui: non deve essere richiesto per usare il
+      solo backend YOLO), lo si porta su CPU e si converte in numpy.
+    - Se resta un array a 3 dimensioni (canale extra tipo (1,H,W)), si
+      tiene solo il primo canale.
+    - Se e' gia' booleano, si restituisce cosi' com'e' (caso del predictor
+      finto nei test, e di un ipotetico predictor che restituisce gia'
+      maschere pronte).
+    - Altrimenti si ASSUME siano logit e si soglia a 0.0 (foreground se
+      > 0), la convenzione usata da SAM2 per i suoi mask_logits. Se sulla
+      macchina CUDA le maschere risultassero palesemente sbagliate (troppo
+      piccole/grandi/vuote) nonostante questo fix, e' il primo punto da
+      controllare: potrebbero essere gia' probabilita' in [0,1], nel qual
+      caso la soglia giusta sarebbe 0.5, non 0.0."""
+    if hasattr(mask, "detach"):
+        mask = mask.detach().cpu().numpy()
+    mask = np.asarray(mask)
+    if mask.ndim == 3:
+        mask = mask[0]
+    if mask.dtype == bool:
+        return mask
+    return mask > 0.0
+
+
 def _mask_to_polygon(mask: np.ndarray) -> np.ndarray:
     """Maschera binaria (H,W) -> poligono (N,2) del contorno esterno piu'
     grande (una persona puo' produrre piu' componenti connesse per un
@@ -215,11 +251,13 @@ class ChunkedVideoPredictorBackend:
 
     def _propagate(self, predictor, state) -> Iterator[tuple[int, dict[int, np.ndarray]]]:
         """Deve restituire, per ogni frame locale al chunk, `(frame_idx,
-        {obj_id: mask_binaria})`. Adattare qui se `propagate_in_video()`
-        restituisce un formato diverso nella libreria reale (es. logits
-        invece di maschere binarie -- in quel caso sogliare qui)."""
+        {obj_id: mask_booleana})`. La conversione a maschera booleana (da
+        tensore torch/logit a numpy bool, vedi `_to_boolean_mask()`)
+        avviene QUI, non nel chiamante, cosi' il resto di `run()` puo'
+        assumere sempre lo stesso formato indipendentemente da cosa
+        restituisce la libreria reale."""
         for frame_idx, obj_ids, masks in predictor.propagate_in_video(state):
-            yield frame_idx, dict(zip(obj_ids, masks))
+            yield frame_idx, {obj_id: _to_boolean_mask(mask) for obj_id, mask in zip(obj_ids, masks)}
 
     # --------------------------------------------------------------- run
     def run(self, source, stream: bool = True) -> Iterator[SegFrameResult]:
