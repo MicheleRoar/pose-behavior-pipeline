@@ -267,6 +267,27 @@ class ChunkedVideoPredictorBackend:
                 f"{type(self).__name__} richiede device='cuda' (SAM 3.1/SAM2 "
                 f"non supportano mps/cpu al momento) -- ricevuto device={device!r}"
             )
+        if overlap < 1:
+            # La riconciliazione ID tra chunk consecutivi (reconcile_ids,
+            # vedi run() sotto) confronta le maschere sullo STESSO frame
+            # prodotto da entrambi i chunk (il "frame di ancoraggio", vedi
+            # il docstring del modulo/di chunking.py) -- con overlap=0 i
+            # chunk sono adiacenti ma non condividono NESSUN frame, quindi
+            # `prev_anchor_polys` risulterebbe sempre vuoto e ogni nuovo
+            # chunk assegnerebbe id globali TUTTI nuovi, perdendo in
+            # silenzio la continuita' d'identita' ad ogni confine -- un
+            # fallimento peggiore di un errore esplicito qui. La pipeline
+            # CHUV di produzione non ha un parametro di overlap (vedi
+            # Video-Annotation-System, chunk_size=400 senza overlap), ma
+            # riconcilia diversamente (IoU diretto tra l'ultimo frame
+            # tracciato del chunk N e il primo del chunk N+1, non un
+            # confronto sullo stesso frame) -- un design diverso da questo,
+            # non replicabile solo mettendo overlap=0 qui.
+            raise ValueError(
+                f"overlap deve essere >= 1 (ricevuto {overlap}) -- la riconciliazione "
+                "degli id tra chunk richiede almeno un frame in comune, vedi il "
+                "docstring di ChunkedVideoPredictorBackend.__init__"
+            )
         self.device = device
         self.chunk_size = chunk_size
         self.overlap = overlap

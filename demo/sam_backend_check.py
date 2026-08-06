@@ -198,6 +198,20 @@ def part4_non_cuda_device_rejected_immediately():
     print("PASS part4_non_cuda_device_rejected_immediately")
 
 
+def part4c_overlap_zero_rejected_immediately():
+    # overlap=0: prev_anchor_polys sarebbe sempre vuoto (nessun frame in
+    # comune tra chunk consecutivi, vedi il docstring di __init__) -- ogni
+    # chunk assegnerebbe id globali tutti nuovi, perdendo la continuita'
+    # d'identita' in silenzio. Va rifiutato subito, non lasciato produrre
+    # un risultato silenziosamente sbagliato.
+    try:
+        _FakeBackend(device="cuda", detect_schedule=[], overlap=0)
+        raise AssertionError("atteso ValueError per overlap=0")
+    except ValueError:
+        pass
+    print("PASS part4c_overlap_zero_rejected_immediately")
+
+
 def part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash():
     # Errore reale osservato su una macchina CUDA (col fork SAMURAI, stesso
     # sam2_video_predictor di SAM2 vanilla):
@@ -355,7 +369,12 @@ def part7_redetect_every_finds_new_person_mid_chunk_not_just_at_boundary():
         video_path = os.path.join(tmp_dir, "synthetic.mp4")
         _make_synthetic_video(video_path)
         backend = _FakeBackend(
-            device="cuda", chunk_size=TOTAL_FRAMES, overlap=0, redetect_every=5,
+            # overlap=1 (non 0): un solo chunk qui (chunk_size=TOTAL_FRAMES,
+            # nessun secondo chunk, quindi la riconciliazione tra chunk non
+            # entra mai in gioco) -- ma overlap=0 e' ora rifiutato a monte
+            # da ChunkedVideoPredictorBackend.__init__ (vedi part4c), quindi
+            # va comunque >= 1 anche qui per costruire l'oggetto.
+            device="cuda", chunk_size=TOTAL_FRAMES, overlap=1, redetect_every=5,
             # chiamate a _detect_people: bootstrap (frame 0) + una ogni
             # finestra da 5 frame (a 5, 10, 15) -- 4 in tutto
             detect_schedule=[[BOX_A], [], [BOX_B], []],
@@ -384,7 +403,12 @@ def part7b_redetect_every_ignored_when_reseed_new_people_false():
         video_path = os.path.join(tmp_dir, "synthetic.mp4")
         _make_synthetic_video(video_path)
         backend = _FakeBackend(
-            device="cuda", chunk_size=TOTAL_FRAMES, overlap=0, redetect_every=5,
+            # overlap=1 (non 0): un solo chunk qui (chunk_size=TOTAL_FRAMES,
+            # nessun secondo chunk, quindi la riconciliazione tra chunk non
+            # entra mai in gioco) -- ma overlap=0 e' ora rifiutato a monte
+            # da ChunkedVideoPredictorBackend.__init__ (vedi part4c), quindi
+            # va comunque >= 1 anche qui per costruire l'oggetto.
+            device="cuda", chunk_size=TOTAL_FRAMES, overlap=1, redetect_every=5,
             reseed_new_people=False,
             detect_schedule=[[BOX_A]],  # un solo elemento: se venisse chiamato di piu', IndexError
         )
@@ -403,6 +427,7 @@ def main():
     part2_new_person_mid_video_gets_fresh_id_with_expected_lag()
     part3_chunk_persistence_writes_one_file_per_chunk()
     part4_non_cuda_device_rejected_immediately()
+    part4c_overlap_zero_rejected_immediately()
     part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash()
     part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk()
     part6b_reseed_new_people_false_never_adds_the_late_entrant()
