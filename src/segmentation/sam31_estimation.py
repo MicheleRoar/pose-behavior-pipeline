@@ -33,24 +33,48 @@ metodi overridabili di `ChunkedVideoPredictorBackend` (`_init_state`,
 `_add_box_prompt`, `_propagate`) per riusare la logica di chunking/
 riconciliazione/persistenza senza duplicarla.
 
-Onesta' sul livello di certezza (nessuna GPU CUDA in questo ambiente,
-nessun test su una macchina reale per questo modulo specifico -- solo per
-`ChunkedVideoPredictorBackend`/`Sam2Tracker`, che parlano un'API diversa):
+Onesta' sul livello di certezza (aggiornato dopo il primo test su macchina
+CUDA reale di Michele, 2026-08-06 -- vedi sotto per cosa e' cambiato):
 - `start_session` e `add_prompt` con `text=`/`frame_index=` -- CONFERMATI
-  dal README ufficiale (snippet copiato sopra).
+  dal README ufficiale (snippet copiato sopra) E dalla run reale.
+- Forma REALE di `response` per `add_prompt` con `text=` (CONFERMATA dalla
+  run reale, diversa da quanto assunto inizialmente -- quella assunta era
+  la forma dell'API IMMAGINE di SAM 3, `boxes`/`object_ids`/`scores`, non
+  quella VIDEO):
+      {
+          "frame_index": ...,
+          "outputs": {
+              "out_obj_ids": [...],
+              "out_boxes_xywh": [...],   # (x, y, width, height) per box
+              "out_binary_masks": [...],
+          },
+      }
+  `_add_text_prompt()`/`_propagate()` leggono queste chiavi con un
+  fallback alle vecchie (`boxes`/`object_ids`/`masks`) per sicurezza, e
+  sollevano un `RuntimeError` esplicito (chiavi trovate incluse nel
+  messaggio) se non trovano nessuna delle due varianti, invece di un
+  `KeyError` muto -- vedi cosa e' successo la prima volta.
+- Formato box `out_boxes_xywh`: (x, y, larghezza, altezza), NON
+  (x1,y1,x2,y2) come il resto della pipeline (`_polygon_to_box`,
+  `_detect_people` via YOLO). Non e' inoltre chiaro dal solo valore se le
+  coordinate sono gia' in pixel o normalizzate [0,1] (convenzione comune
+  per API di detection, non documentata esplicitamente nel README) --
+  vedi `_xywh_to_xyxy_pixels()` sotto per l'euristica usata (e il suo
+  limite).
 - `add_prompt` con `box=`/`obj_id=` invece di `text=` (usato dal
   box-seeding via YOLO, mantenuto per compatibilita' con l'uso originale
-  di questa classe) -- NON mostrato nel README (che mostra solo l'esempio
-  testuale), estrapolato per analogia con SAM2. Se il predictor reale si
-  aspetta chiavi diverse, e' il primo punto da correggere.
-- Il `type` per continuare la propagazione sui frame successivi al prompt
-  (`"propagate_in_video"` sotto) e i nomi esatti dei campi in
-  `response["outputs"]` per il caso VIDEO (masks/object_ids per frame) --
-  NON mostrati nel README (che per il video si ferma al primo output del
-  prompt), scelti per coerenza col resto della libreria SAM2/SAM3. Da
-  verificare su una macchina CUDA reale confrontando con
-  `examples/sam3_video_predictor_example.ipynb` prima di fare affidamento
-  su questo modulo.
+  di questa classe) -- ANCORA NON confermato su una run reale (nella
+  prima prova YOLO non ha trovato nessuno sul frame di ancoraggio, quindi
+  questo percorso non e' mai stato eseguito): resta un'estrapolazione per
+  analogia con SAM2. Primo punto da verificare se emerge un problema qui.
+- Struttura esatta di `response["outputs"]` per `propagate_in_video`
+  (lista di frame, o altro) -- ANCORA NON confermata (il README/la prova
+  reale coprono solo la singola chiamata `add_prompt`, non la
+  propagazione multi-frame): il codice sotto prova prima le chiavi reali
+  appena confermate (`out_obj_ids`/`out_binary_masks`), poi quelle vecchie
+  come fallback, e solleva un errore esplicito con le chiavi trovate se
+  nessuna delle due corrisponde -- invece di indovinare di nuovo in
+  silenzio.
 
 Modalita' prompt testuale (`text_prompt`, es. "person")
 -----------------------------------------------------------
@@ -91,6 +115,23 @@ from segmentation.chunking import GlobalIdAllocator, reconcile_ids
 from segmentation.sam_backend import ChunkedVideoPredictorBackend, _box_to_polygon, _to_boolean_mask
 
 DEFAULT_CHECKPOINT = "facebook/sam3.1"
+
+
+def _xywh_to_xyxy_pixels(box, frame_shape: tuple[int, int]) -> np.ndarray:
+    """Converte un box SAM 3.1 `out_boxes_xywh` (x, y, larghezza, altezza)
+    nel formato (x1,y1,x2,y2) in pixel usato dal resto della pipeline
+    (`_polygon_to_box`, `_detect_people` via YOLO). Non e' documentato se
+    le coordinate arrivano gia' in pixel o normalizzate [0,1] -- si
+    assume normalizzato solo se tutti e 4 i valori sono <= 1.5 (margine
+    sopra 1.0): una persona reale occupa quasi sempre piu' di 1.5 pixel,
+    quindi il caso ambiguo (pixel scambiati per normalizzati) e'
+    improbabile. Se nell'overlay le box appaiono minuscole/ammassate in un
+    angolo, e' il primo punto da controllare a mano."""
+    x, y, w, h = (float(v) for v in box[:4])
+    height, width = frame_shape
+    if max(x, y, w, h) <= 1.5:
+        x, y, w, h = x * width, y * height, w * width, h * height
+    return np.array([x, y, x + w, y + h], dtype=float)
 
 
 class Sam31Tracker(ChunkedVideoPredictorBackend):
@@ -150,26 +191,36 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
             box=box, obj_id=obj_id,
         ))
 
-    def _add_text_prompt(self, predictor, state, *, frame_idx: int, text: str) -> dict[int, np.ndarray]:
+    def _add_text_prompt(self, predictor, state, *, frame_idx: int, text: str,
+                          frame_shape: tuple[int, int]) -> dict[int, np.ndarray]:
         """Chiama SAM 3 col prompt testuale sul frame indicato: REGISTRA il
         prompt E ritorna le istanze scoperte in un solo colpo (a
         differenza del box-prompt, qui non c'e' modo di separare 'scopri'
-        da 'traccia' -- e' lo stesso identico snippet "Basic Usage" del
-        README). Ritorna `{id_locale_SAM: box}`: questi id sono LOCALI a
-        questa chiamata/chunk, non persistenti -- la riconciliazione con
-        gli id globali avviene in `_seed_new_chunk()`, non qui."""
+        da 'traccia'). Ritorna `{id_locale_SAM: box_x1y1x2y2_pixel}`:
+        questi id sono LOCALI a questa chiamata/chunk, non persistenti --
+        la riconciliazione con gli id globali avviene in
+        `_seed_new_chunk()`, non qui.
+
+        Forma di `response` CONFERMATA su una run reale (Michele, macchina
+        CUDA, 2026-08-06) -- vedi il docstring del modulo per i dettagli e
+        cosa e' cambiato rispetto all'ipotesi iniziale (che era la forma
+        dell'API IMMAGINE, non quella VIDEO)."""
         response = predictor.handle_request(request=dict(
             type="add_prompt", session_id=state, frame_index=frame_idx, text=text,
         ))
-        outputs = response["outputs"]
-        # Forma esatta NON confermata per il caso multi-istanza da video (il
-        # README mostra masks/boxes/scores solo per l'API immagine, vedi il
-        # docstring del modulo) -- si assume qui la stessa convenzione, con
-        # un id per istanza preso da 'object_ids' se presente, altrimenti
-        # l'indice di scoperta come id locale.
-        boxes = outputs["boxes"]
-        object_ids = outputs.get("object_ids", range(len(boxes)))
-        return {int(oid): np.asarray(box, dtype=float) for oid, box in zip(object_ids, boxes)}
+        outputs = response.get("outputs", response)
+        boxes_xywh = outputs.get("out_boxes_xywh", outputs.get("boxes"))
+        if boxes_xywh is None:
+            raise RuntimeError(
+                f"SAM 3.1 non ha restituito bounding box per il prompt testuale {text!r}. "
+                f"Chiavi in response: {list(response.keys())}; "
+                f"chiavi in outputs: {list(outputs.keys())}."
+            )
+        object_ids = outputs.get("out_obj_ids", outputs.get("object_ids", range(len(boxes_xywh))))
+        return {
+            int(oid): _xywh_to_xyxy_pixels(box, frame_shape)
+            for oid, box in zip(object_ids, boxes_xywh)
+        }
 
     def _propagate(self, predictor, state, *, start_frame_idx: int = 0,
                     max_frame_num_to_track: int | None = None):
@@ -186,9 +237,21 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
         ))
         local_to_global = self._local_to_global
         for frame_out in response["outputs"]:
-            frame_idx = frame_out["frame_index"]
-            obj_ids = frame_out.get("object_ids", frame_out.get("obj_ids"))
-            masks = frame_out["masks"]
+            frame_idx = frame_out.get("frame_index", frame_out.get("frame_idx"))
+            # Come per _add_text_prompt: prova prima le chiavi REALI appena
+            # confermate (out_obj_ids/out_binary_masks, eventualmente
+            # annidate sotto "outputs" come nella risposta di add_prompt),
+            # poi le vecchie come fallback -- vedi il docstring del modulo,
+            # questa forma per propagate_in_video resta NON confermata.
+            inner = frame_out.get("outputs", frame_out)
+            obj_ids = inner.get("out_obj_ids", inner.get("object_ids", inner.get("obj_ids")))
+            masks = inner.get("out_binary_masks", inner.get("masks"))
+            if frame_idx is None or obj_ids is None or masks is None:
+                raise RuntimeError(
+                    f"SAM 3.1 propagate_in_video: struttura frame inattesa. "
+                    f"Chiavi in frame_out: {list(frame_out.keys())}; "
+                    f"chiavi in outputs annidato: {list(inner.keys()) if inner is not frame_out else '(non annidato)'}."
+                )
             remapped: dict[int, np.ndarray] = {}
             for oid, mask in zip(obj_ids, masks):
                 oid = int(oid)
@@ -208,7 +271,9 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
                 frame_shape=frame_shape, prev_anchor_polys=prev_anchor_polys, allocator=allocator,
             )
 
-        discovered = self._add_text_prompt(predictor, state, frame_idx=0, text=self.text_prompt)
+        discovered = self._add_text_prompt(
+            predictor, state, frame_idx=0, text=self.text_prompt, frame_shape=frame_shape,
+        )
 
         local_to_global: dict[int, int] = {}
         seed_boxes: dict[int, np.ndarray] = {}

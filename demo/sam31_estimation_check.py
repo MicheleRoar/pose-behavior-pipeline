@@ -62,9 +62,14 @@ class _FakeSam3Predictor:
     `start_session` apre una sessione (conta i JPEG scritti da
     `_init_state()`, stessa verifica di `sam_backend_check.py`), `add_prompt`
     con `text=` "scopre" istanze da uno script fisso (`discover_schedule`,
-    un elemento per ogni chiamata attesa), `add_prompt` con `box=`/`obj_id=`
-    registra un seed noto, `propagate_in_video` restituisce le maschere
-    statiche per gli obj_id correnti nella finestra richiesta."""
+    un elemento per ogni chiamata attesa) e risponde con la forma REALE
+    confermata su macchina CUDA (out_obj_ids/out_boxes_xywh/
+    out_binary_masks, non boxes/object_ids come ipotizzato inizialmente --
+    vedi il docstring di sam31_estimation.py), `add_prompt` con
+    `box=`/`obj_id=` registra un seed noto, `propagate_in_video`
+    restituisce le maschere statiche per gli obj_id correnti nella
+    finestra richiesta (con le stesse chiavi reali `out_obj_ids`/
+    `out_binary_masks`, annidate come per add_prompt)."""
 
     def __init__(self, frame_shape: tuple[int, int], discover_schedule: list[dict[int, np.ndarray]]):
         self.frame_shape = frame_shape
@@ -89,7 +94,25 @@ class _FakeSam3Predictor:
                 discovered = self._discover_schedule[self._discover_call_count]
                 self._discover_call_count += 1
                 session["seeds"].update(discovered)
-                return {"outputs": {"boxes": list(discovered.values()), "object_ids": list(discovered.keys())}}
+                obj_ids = list(discovered.keys())
+                # Forma REALE confermata su macchina CUDA (vedi il docstring
+                # del modulo sotto test): out_boxes_xywh e' (x,y,w,h), non
+                # (x1,y1,x2,y2) -- qui si converte da BOX_A/BOX_B (gia'
+                # x1y1x2y2, usate anche per _box_to_mask) SOLO per il
+                # payload di rete, cosi' il test verifica anche la
+                # conversione fatta da _xywh_to_xyxy_pixels().
+                boxes_xywh = [
+                    np.array([b[0], b[1], b[2] - b[0], b[3] - b[1]], dtype=float)
+                    for b in discovered.values()
+                ]
+                return {
+                    "frame_index": request["frame_index"],
+                    "outputs": {
+                        "out_obj_ids": obj_ids,
+                        "out_boxes_xywh": boxes_xywh,
+                        "out_binary_masks": [_box_to_mask(discovered[oid], self.frame_shape) for oid in obj_ids],
+                    },
+                }
             session["seeds"][request["obj_id"]] = request["box"]
             return {"outputs": {}}
 
@@ -102,7 +125,10 @@ class _FakeSam3Predictor:
             for local_idx in range(start, end):
                 obj_ids = list(session["seeds"].keys())
                 masks = [_box_to_mask(session["seeds"][oid], self.frame_shape) for oid in obj_ids]
-                outputs.append({"frame_index": local_idx, "object_ids": obj_ids, "masks": masks})
+                outputs.append({
+                    "frame_index": local_idx,
+                    "outputs": {"out_obj_ids": obj_ids, "out_binary_masks": masks},
+                })
             return {"outputs": outputs}
 
         raise ValueError(f"tipo di richiesta sconosciuto: {req_type!r}")
