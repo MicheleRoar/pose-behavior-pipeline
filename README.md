@@ -48,8 +48,14 @@ pose-behavior-pipeline/
 │   │   ├── style.css              # dark theme matching the mock
 │   │   └── app.js                 # wires the DOM to window.pywebview.api.*
 │   ├── segmentation/              # ACTIVE library: silhouettes only, no keypoints
-│   │   ├── seg_estimation.py      # YOLO26-seg + ByteTrack wrapper
-│   │   └── seg_reid.py            # hard-capped id linking (position/color/shape)
+│   │   ├── seg_estimation.py      # YOLO26-seg + ByteTrack wrapper (default backend)
+│   │   ├── seg_reid.py            # hard-capped id linking (position/color/shape)
+│   │   ├── backend.py             # SegmentationBackend protocol: run(source) -> Iterator[SegFrameResult]
+│   │   ├── chunking.py            # overlapping chunk ranges + IoU-based id reconciliation
+│   │   ├── chunk_store.py         # incremental per-chunk disk persistence (.npz)
+│   │   ├── sam_backend.py         # ChunkedVideoPredictorBackend: shared SAM/SAMURAI chunking logic
+│   │   ├── sam31_estimation.py    # Sam31Tracker (SAM 3.1, needs CUDA, gated HF checkpoint)
+│   │   └── samurai_estimation.py  # SamuraiTracker (SAM2 + motion-aware memory, needs CUDA)
 │   ├── pose/                      # ON HOLD library: everything keypoint-based
 │   │   ├── keypoints.py           # COCO-17 index names, skeleton edges
 │   │   ├── geometry.py            # shared angle/vector math
@@ -159,6 +165,56 @@ beyond Pillow and a lighter startup; `webui_app.py` needs `pywebview` but
 matches the mock closely. Both call the same generators underneath, so
 behaviour never diverges between them — only the presentation layer
 differs.
+
+## SAM 3.1 / SAMURAI segmentation backends (CUDA only)
+
+`segmentation_demo.py` / the web GUI's "Architecture" selector can pick a
+segmentation/tracking backend other than YOLO26-seg + ByteTrack:
+
+- `--backend sam31` → [SAM 3.1](https://github.com/facebookresearch/sam3)
+  (Object Multiplex). Checkpoints are **gated on Hugging Face**
+  (`facebook/sam3.1`): request access on that page, create a token at
+  huggingface.co/settings/tokens, then `pip install huggingface_hub && hf
+  auth login` before the first run. Requires Python 3.12+, PyTorch 2.7+,
+  CUDA 12.6+ — likely a separate virtualenv from the rest of this project.
+- `--backend samurai` → [SAMURAI](https://github.com/yangchris11/samurai)
+  (SAM2 + motion-aware memory). Checkpoints are public, no gated access
+  needed — a faster alternative to try while a SAM 3.1 access request is
+  pending.
+
+Both require `device=cuda` — refused immediately with a clear error
+otherwise (`segmentation/sam_backend.py::ChunkedVideoPredictorBackend`),
+since neither library declares mps/cpu support. The web GUI disables these
+two options in the dropdown unless `Api.detect_device()` reports `"cuda"`
+(and rejects the request server-side too, as a safety net either way).
+
+**Why chunked, not one pass over the whole video**: both libraries' video
+API is stateful — `init_state(video)` loads every frame's pixels into
+memory before segmenting anything — impractical for a multi-minute
+recording. The video is processed in overlapping windows instead
+(`--sam-chunk-size` frames, `--sam-overlap` frames shared between one
+window and the next, defaults 600/50): each window is seeded either from
+YOLO detections (first window, prompt only, not used for tracking) or from
+the previous window's masks at the shared boundary frame (continuing
+tracks keep the same id directly), reconciled by mask IoU as a consistency
+check. See the module docstring in `segmentation/sam_backend.py` and
+`segmentation/chunking.py` for the full design and its known limitation
+(geometry-only reconciliation can misfire in crowded scenes right at a
+chunk boundary). `--sam-chunk-store-dir` writes each completed chunk's
+masks/ids to disk (`.npz`, no image data) before moving to the next one, so
+a crash partway through a long video doesn't lose everything processed so
+far.
+
+**Honesty about what's tested**: `Sam31Tracker`/`SamuraiTracker` and the
+chunking/reconciliation/persistence logic around them are verified against
+a *fake* video predictor (`demo/sam_backend_check.py`) — there is no CUDA
+GPU in the environment this was built in, so the real `sam3`/`samurai`
+inference path has not been executed. Before relying on it: check the
+exact method names/return shapes against
+`sam3/examples/sam3_video_predictor_example.ipynb` (or the samurai/sam2
+equivalent) on the actual CUDA machine — `_init_state()` /
+`_add_box_prompt()` / `_propagate()` in `ChunkedVideoPredictorBackend` are
+the three points designed to be overridden if a signature differs.
 
 ## Usage (CLI)
 

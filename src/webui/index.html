@@ -59,9 +59,11 @@
         <h3>Model</h3>
         <label class="field-label" for="arch-select">Architecture</label>
         <select id="arch-select" class="field-input">
-          <option value="yolo">YOLO</option>
-          <option value="sam3">SAM3 (not available here)</option>
+          <option value="yolo">YOLO26 + ByteTrack</option>
+          <option value="sam31">SAM 3.1</option>
+          <option value="samurai">SAMURAI</option>
         </select>
+        <p id="arch-hint" class="hint hidden">SAM 3.1 / SAMURAI need Segmentation or Both mode, and a CUDA GPU on this machine.</p>
 
         <label class="field-label" for="mode-select">Mode</label>
         <select id="mode-select" class="field-input">
@@ -143,6 +145,17 @@
             <input id="mediapipe-pose-toggle" type="checkbox">
             <span class="switch-track"><span class="switch-thumb"></span></span>
           </label>
+        </div>
+        <div id="sam-chunk-fields" class="hidden">
+          <div class="inline-field-row">
+            <label class="field-label-inline" for="sam-chunk-size-input">Chunk size (frames)</label>
+            <input id="sam-chunk-size-input" class="field-input field-input-sm" type="number" min="10" step="10" value="600">
+          </div>
+          <div class="inline-field-row">
+            <label class="field-label-inline" for="sam-overlap-input">Overlap (frames)</label>
+            <input id="sam-overlap-input" class="field-input field-input-sm" type="number" min="1" step="1" value="50">
+          </div>
+          <p class="hint">SAM 3.1/SAMURAI process the video in overlapping windows to bound memory use (see README). Only relevant with this backend.</p>
         </div>
       </section>
 

@@ -16,6 +16,13 @@
 
 * { box-sizing: border-box; }
 
+/* Utility generica per nascondere un elemento via classList (usata da piu'
+   elementi non correlati: video-check, arch-hint, sam-chunk-fields, ...) --
+   prima esisteva solo come regola specifica per-elemento (.check-icon.hidden,
+   #video-frame.hidden), duplicata qui in forma generica per i nuovi campi
+   SAM 3.1/SAMURAI invece di aggiungerne una scoped in piu' per ciascuno. */
+.hidden { display: none; }
+
 html, body {
   margin: 0;
   padding: 0;

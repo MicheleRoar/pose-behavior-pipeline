@@ -235,6 +235,26 @@ def part11_build_status_carries_totals_and_max_people_for_the_timeline():
           "'corrente / totale' e la metrica 'tracce attive: N / max' del nuovo layout — OK")
 
 
+def part12_seg_backend_defaults_to_yolo_and_passes_through():
+    kwargs_default = build_player_kwargs({"mode": "segmentation", "source": "v.mp4", "fps": "15"})
+    assert kwargs_default["seg_backend"] == "yolo"
+    assert kwargs_default["sam_chunk_size"] == 600
+    assert kwargs_default["sam_overlap"] == 50
+    assert kwargs_default["sam_chunk_store_dir"] is None
+
+    kwargs_sam = build_player_kwargs({
+        "mode": "segmentation", "source": "v.mp4", "fps": "15",
+        "seg_backend": "sam31", "sam_chunk_size": "300", "sam_overlap": "20",
+        "sam_chunk_store_dir": "/tmp/chunks",
+    })
+    assert kwargs_sam["seg_backend"] == "sam31"
+    assert kwargs_sam["sam_chunk_size"] == 300  # stringa -> int, come max_people altrove
+    assert kwargs_sam["sam_overlap"] == 20
+    assert kwargs_sam["sam_chunk_store_dir"] == "/tmp/chunks"
+    print("Parte 12: seg_backend/sam_chunk_size/sam_overlap/sam_chunk_store_dir hanno i default giusti "
+          "('yolo'/600/50/None) e passano attraverso invariati quando specificati — OK")
+
+
 if __name__ == "__main__":
     part1_build_player_kwargs_mirrors_app_py_defaults()
     part1b_explicit_device_passes_through_unchanged()
@@ -248,6 +268,7 @@ if __name__ == "__main__":
     part9_probe_video_metadata_missing_file_returns_none_not_zero()
     part10_probe_video_metadata_reads_real_container_metadata()
     part11_build_status_carries_totals_and_max_people_for_the_timeline()
+    part12_seg_backend_defaults_to_yolo_and_passes_through()
     print("\nVerifica completata senza errori: la logica pura di webui/api.py (parametri, codifica "
           "frame, metriche, metadati video) si comporta come atteso, senza bisogno di pywebview o di "
           "una finestra vera.")

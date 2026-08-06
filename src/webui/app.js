@@ -34,6 +34,9 @@
     totalDurationS: null,
     lastTimecodeS: 0,
     maxPeople: null,
+    detectedDevice: null,  // da Api.detect_device() (vedi init()) -- usato SOLO per
+    // abilitare/disabilitare SAM 3.1/SAMURAI nel selettore Architecture, il
+    // controllo definitivo resta lato server in Api.build_player().
   };
 
   // ---------------------------------------------------------------- utils
@@ -110,7 +113,41 @@
     if (!segOnly) $("mediapipe-pose-toggle").checked = false;
     $("seg-extras-card").classList.toggle("disabled", !segOnly);
 
+    applyArchGating();
     updatePipelineFlow();
+  }
+
+  // Backend di segmentazione (YOLO/SAM 3.1/SAMURAI, vedi
+  // segmentation/sam_backend.py): SAM 3.1/SAMURAI valgono solo in
+  // Segmentation/Both E richiedono una GPU CUDA -- qui si disabilitano le
+  // opzioni non valide e si torna a "yolo" se quella selezionata smette di
+  // esserlo (es. l'utente passa a modalita' Pose). Il controllo DEFINITIVO
+  // resta comunque lato server in Api.build_player() (vedi il suo
+  // docstring): qui e' solo per non mostrare in UI una scelta che
+  // fallirebbe subito.
+  function applyArchGating() {
+    const archSelect = $("arch-select");
+    const mode = $("mode-select").value;
+    const segCapable = mode === "segmentation" || mode === "both";
+    const cudaAvailable = state.detectedDevice === "cuda";
+
+    ["sam31", "samurai"].forEach((value) => {
+      const opt = archSelect.querySelector(`option[value="${value}"]`);
+      if (opt) opt.disabled = !cudaAvailable;
+    });
+
+    const archIsSam = archSelect.value === "sam31" || archSelect.value === "samurai";
+    if (archIsSam && !cudaAvailable) {
+      setStatusPill(`${archSelect.options[archSelect.selectedIndex].text} needs a CUDA GPU — staying on YOLO`, "idle");
+      archSelect.value = "yolo";
+    } else if (archIsSam && !segCapable) {
+      setStatusPill(`${archSelect.options[archSelect.selectedIndex].text} only applies to Segmentation/Both — staying on YOLO`, "idle");
+      archSelect.value = "yolo";
+    }
+
+    const showChunkFields = archSelect.value === "sam31" || archSelect.value === "samurai";
+    $("sam-chunk-fields").classList.toggle("hidden", !showChunkFields);
+    $("arch-hint").classList.toggle("hidden", cudaAvailable);
   }
 
   const FLOW_ICONS = {
@@ -130,7 +167,11 @@
     const steps = [];
 
     if (mode === "segmentation" || mode === "both") {
-      steps.push({ label: `YOLO26${scale} Segment`, icon: "box", cls: "seg" });
+      const arch = $("arch-select").value;
+      const segLabel = arch === "sam31" ? "SAM 3.1 Segment"
+        : arch === "samurai" ? "SAMURAI Segment"
+        : `YOLO26${scale} Segment`;
+      steps.push({ label: segLabel, icon: "box", cls: "seg" });
     }
     if (mode === "pose" || mode === "both") {
       steps.push({ label: `YOLO26${scale} Pose`, icon: "box", cls: "pose" });
@@ -189,6 +230,9 @@
       with_eyebrows: $("eyebrows-toggle").checked,
       with_head_movement: $("head-movement-toggle").checked,
       with_mediapipe_pose: $("mediapipe-pose-toggle").checked,
+      seg_backend: $("arch-select").value,
+      sam_chunk_size: $("sam-chunk-size-input").value,
+      sam_overlap: $("sam-overlap-input").value,
     };
   }
 
@@ -450,14 +494,7 @@
     $("btn-fullscreen").addEventListener("click", onFullscreen);
     $("timeline-track").addEventListener("click", onTimelineClick);
     $("mode-select").addEventListener("change", applyModeGating);
-    $("arch-select").addEventListener("change", () => {
-      // SAM3 gira sulle macchine GPU dedicate del gruppo di ricerca, non
-      // qui -- stesso avviso di gui/app.py::_on_arch_change.
-      if ($("arch-select").value === "sam3") {
-        setStatusPill("SAM3 not available here — staying on YOLO", "idle");
-        $("arch-select").value = "yolo";
-      }
-    });
+    $("arch-select").addEventListener("change", applyArchGating);
     // qualunque cambio di parametro invalida il player corrente: bisogna
     // premere "Play analysis"/"Restart" per ricostruirlo (un tracker gia'
     // avviato non si puo' riconfigurare a meta' strada, vedi
@@ -467,6 +504,7 @@
       "arch-select", "mode-select", "scale-select", "max-people-input",
       "reid-toggle", "hands-toggle", "eyes-toggle", "mouth-toggle",
       "eyebrows-toggle", "head-movement-toggle", "mediapipe-pose-toggle",
+      "sam-chunk-size-input", "sam-overlap-input",
     ];
     invalidatingIds.forEach((id) => {
       $(id).addEventListener("change", () => {
@@ -476,10 +514,20 @@
     });
   }
 
-  function init() {
+  async function init() {
     wireEvents();
-    applyModeGating();
+    applyModeGating();  // chiama gia' applyArchGating(), vedi sopra
     updateTimeline();
+    try {
+      const result = await api().detect_device();
+      state.detectedDevice = result && result.device;
+    } catch (err) {
+      // aperto in un browser normale senza pywebview (vedi api()), o
+      // detect_device() ha fallito per qualche motivo: SAM 3.1/SAMURAI
+      // restano disabilitati per sicurezza (cudaAvailable resta false).
+      state.detectedDevice = null;
+    }
+    applyArchGating();
   }
 
   if (window.pywebview) {

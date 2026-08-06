@@ -108,7 +108,13 @@ def build_player_kwargs(params: dict) -> dict:
     default "s"), "max_people" (int, stringa, o None/""), "with_hands",
     "with_eyes", "with_mouth", "with_eyebrows", "with_head_movement",
     "with_mediapipe_pose" (bool), "reid" (bool, abilita re-id/seg-reid se
-    un max_people e' impostato).
+    un max_people e' impostato), "seg_backend" ("yolo"|"sam31"|"samurai",
+    default "yolo" -- gli ultimi due solo in modalita' Segmentation/Both,
+    vedi segmentation/sam_backend.py: la GATING per device=cuda avviene
+    lato JS (vedi `Api.detect_device()`) E qui in `Api.build_player()`
+    come rete di sicurezza, non in questa funzione pura che non conosce
+    ancora il device risolto), "sam_chunk_size", "sam_overlap" (int,
+    solo con seg_backend != "yolo").
     """
     mode = params.get("mode")
     if mode not in MODE_KEYS:
@@ -143,6 +149,16 @@ def build_player_kwargs(params: dict) -> dict:
     # solo in modalita' Segmentation -- vedi pipeline_runner.py.
     with_mediapipe_pose = mode == "segmentation" and bool(params.get("with_mediapipe_pose"))
 
+    # Backend di segmentazione (YOLO/SAM 3.1/SAMURAI): rilevante solo in
+    # Segmentation/Both, "yolo" altrove (ignorato da iter_pipeline_frames se
+    # mode="pose"). Il controllo "serve device=cuda" NON avviene qui (vedi
+    # docstring sopra): questa funzione resta pura, il controllo vive in
+    # Api.build_player().
+    seg_backend = str(params.get("seg_backend") or "yolo")
+    sam_chunk_size = int(params.get("sam_chunk_size") or 600)
+    sam_overlap = int(params.get("sam_overlap") or 50)
+    sam_chunk_store_dir = params.get("sam_chunk_store_dir") or None
+
     return dict(
         mode=mode, source=params["source"], fps=fps,
         device=params.get("device") or None,  # None = "auto-rileva a valle", vedi sopra
@@ -154,6 +170,8 @@ def build_player_kwargs(params: dict) -> dict:
         seg_model=f"yolo26{scale}-seg.pt", with_seg_reid=with_seg_reid,
         with_mediapipe_pose=with_mediapipe_pose,
         max_people=max_people,
+        seg_backend=seg_backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
+        sam_chunk_store_dir=sam_chunk_store_dir,
     )
 
 
@@ -257,6 +275,16 @@ class Api:
         self._total_frame_count: int | None = None
         self._total_duration_s: float | None = None
 
+    def detect_device(self) -> dict:
+        """Espone `detect_default_device()` a JS, chiamato una volta al
+        caricamento della pagina (vedi app.js): usato SOLO per abilitare o
+        disabilitare le opzioni SAM 3.1/SAMURAI nel selettore backend
+        (richiedono device='cuda', vedi segmentation/sam_backend.py) --
+        `Api.build_player()` fa comunque il controllo definitivo lato
+        server, questo e' solo per non far apparire nella UI un'opzione
+        che fallirebbe subito."""
+        return {"device": detect_default_device()}
+
     def set_window(self, window) -> None:
         """Chiamato dal launcher (webui_app.py) subito dopo
         `webview.create_window(..., js_api=api)`: serve un riferimento alla
@@ -323,6 +351,16 @@ class Api:
             # mps su Apple Silicon, altrimenti cpu -- prima era fisso a
             # "mps", il che rompeva silenziosamente su una macchina CUDA.
             kwargs["device"] = detect_default_device()
+        if kwargs["seg_backend"] != "yolo" and kwargs["device"] != "cuda":
+            # rete di sicurezza server-side: il frontend gia' disabilita la
+            # scelta SAM 3.1/SAMURAI quando detect_device() non e' "cuda"
+            # (vedi app.js), ma qui rifiutiamo comunque esplicitamente
+            # invece di lasciare che Sam31Tracker/SamuraiTracker sollevino
+            # un ValueError meno chiaro dentro il thread di riproduzione.
+            return {"ok": False, "error": (
+                f"Il backend '{kwargs['seg_backend']}' richiede una GPU CUDA "
+                f"(device rilevato: '{kwargs['device']}')."
+            )}
         with self._lock:
             self._playing = False
             self._device = kwargs["device"]

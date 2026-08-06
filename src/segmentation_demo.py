@@ -41,13 +41,43 @@ from common.device import detect_default_device
 from pose.mediapipe_pose import MediaPipePoseByTrack
 from pose.features import compute_joint_angles
 
+BACKEND_KEYS = {"yolo", "sam31", "samurai"}
+
+
+def _build_tracker(backend: str, *, model_name: str, device: str, conf_threshold: float,
+                    tracker_config: str, max_people: int | None,
+                    sam_chunk_size: int, sam_overlap: int, sam_chunk_store_dir: str | None):
+    """Istanzia il tracker giusto in base a `backend` -- unico punto in cui
+    la scelta YOLO/SAM 3.1/SAMURAI si traduce in una classe concreta.
+    Tutti e tre rispettano lo stesso protocollo `SegmentationBackend`
+    (vedi segmentation/backend.py), quindi il resto di questa funzione
+    (sotto) non ha bisogno di sapere quale sia stato scelto."""
+    if backend == "yolo":
+        return SegTracker(model_name=model_name, device=device,
+                           conf_threshold=conf_threshold, tracker=tracker_config,
+                           max_people=max_people)
+    if backend == "sam31":
+        from segmentation.sam31_estimation import Sam31Tracker
+        return Sam31Tracker(device=device, conf_threshold=conf_threshold,
+                             chunk_size=sam_chunk_size, overlap=sam_overlap,
+                             chunk_store_dir=sam_chunk_store_dir, max_people=max_people)
+    if backend == "samurai":
+        from segmentation.samurai_estimation import SamuraiTracker
+        return SamuraiTracker(device=device, conf_threshold=conf_threshold,
+                               chunk_size=sam_chunk_size, overlap=sam_overlap,
+                               chunk_store_dir=sam_chunk_store_dir, max_people=max_people)
+    raise ValueError(f"backend sconosciuto: {backend!r} (atteso 'yolo'|'sam31'|'samurai')")
+
 
 def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.pt",
                               device: str = "mps", conf_threshold: float = 0.1,
                               tracker_config: str = "bytetrack.yaml",
                               max_people: int | None = None,
                               seg_reidentifier: SegReIdentifier | None = None,
-                              mediapipe_pose_estimator: MediaPipePoseByTrack | None = None):
+                              mediapipe_pose_estimator: MediaPipePoseByTrack | None = None,
+                              backend: str = "yolo",
+                              sam_chunk_size: int = 600, sam_overlap: int = 50,
+                              sam_chunk_store_dir: str | None = None):
     """Generatore che contiene TUTTA la logica per-frame della pipeline di
     segmentazione (tracking, re-id opzionale, pose opzionale per maschera,
     disegno overlay), condiviso da `run_segmentation()` (CLI, sotto) e da
@@ -61,6 +91,13 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
     condivisa fra le persone del frame manderebbe MediaPipe in crash
     ("Input timestamp must be monotonically increasing").
 
+    `backend` sceglie il motore di tracking/segmentazione: "yolo" (default,
+    YOLO26-seg + ByteTrack, invariato), "sam31" o "samurai" (vedi
+    segmentation/sam_backend.py -- richiedono device="cuda" e le rispettive
+    librerie installate, non disponibili su mps/cpu). `sam_chunk_size` /
+    `sam_overlap` / `sam_chunk_store_dir` sono usati solo con questi ultimi
+    due (ignorati con "yolo").
+
     Disegna SEMPRE l'overlay (maschera, contorno, etichetta ID, +
     scheletro pose se `mediapipe_pose_estimator` e' attivo) sul frame
     restituito.
@@ -72,9 +109,12 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
     track_id grezzi di ByteTrack PRIMA dell'eventuale re-id (utile solo per
     le statistiche di churn stampate da `run_segmentation()`).
     """
-    tracker = SegTracker(model_name=model_name, device=device,
-                          conf_threshold=conf_threshold, tracker=tracker_config,
-                          max_people=max_people)
+    tracker = _build_tracker(
+        backend, model_name=model_name, device=device, conf_threshold=conf_threshold,
+        tracker_config=tracker_config, max_people=max_people,
+        sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
+        sam_chunk_store_dir=sam_chunk_store_dir,
+    )
 
     for frame_result in tracker.run(source=source):
         now = frame_result.frame_index / fps
@@ -133,7 +173,10 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
                       with_mediapipe_pose: bool = False,
                       pose_landmarker_model: str = "pose_landmarker_lite.task",
                       out_csv: str = "segmentation_session.csv",
-                      show_window: bool = True) -> pd.DataFrame:
+                      show_window: bool = True,
+                      backend: str = "yolo",
+                      sam_chunk_size: int = 600, sam_overlap: int = 50,
+                      sam_chunk_store_dir: str | None = None) -> pd.DataFrame:
     """CLI: consuma `iter_segmentation_frames()` (unica fonte della logica
     per-frame, condivisa con la GUI), gestisce la finestra cv2 (se
     show_window) e stampa le statistiche finali di churn/re-id."""
@@ -163,6 +206,8 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
         conf_threshold=conf_threshold, tracker_config=tracker_config,
         max_people=max_people, seg_reidentifier=seg_reidentifier,
         mediapipe_pose_estimator=mediapipe_pose_estimator,
+        backend=backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
+        sam_chunk_store_dir=sam_chunk_store_dir,
     ):
         n_frames = frame_index + 1
         for raw_id in raw_ids:
@@ -240,6 +285,18 @@ def main():
     parser.add_argument("--out", default="segmentation_session.csv", help="CSV di output")
     parser.add_argument("--no-window", action="store_true",
                          help="Esegui senza finestra video (solo log + CSV, piu' veloce)")
+    parser.add_argument("--backend", default="yolo", choices=sorted(BACKEND_KEYS),
+                         help="Motore di segmentazione/tracking: 'yolo' (default, YOLO26-seg + "
+                              "ByteTrack) | 'sam31' | 'samurai' (vedi segmentation/sam_backend.py "
+                              "-- richiedono device=cuda e le rispettive librerie installate)")
+    parser.add_argument("--sam-chunk-size", type=int, default=600,
+                         help="Solo con --backend sam31/samurai: numero di frame per chunk")
+    parser.add_argument("--sam-overlap", type=int, default=50,
+                         help="Solo con --backend sam31/samurai: frame in comune tra un chunk "
+                              "e il successivo, usati per la riconciliazione degli id")
+    parser.add_argument("--sam-chunk-store-dir", default=None,
+                         help="Solo con --backend sam31/samurai: cartella dove salvare "
+                              "incrementalmente i risultati di ogni chunk (opzionale)")
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
@@ -249,7 +306,9 @@ def main():
                       max_people=args.max_people, with_seg_reid=args.with_seg_reid,
                       with_mediapipe_pose=args.with_mediapipe_pose,
                       pose_landmarker_model=args.pose_landmarker_model,
-                      out_csv=args.out, show_window=not args.no_window)
+                      out_csv=args.out, show_window=not args.no_window,
+                      backend=args.backend, sam_chunk_size=args.sam_chunk_size,
+                      sam_overlap=args.sam_overlap, sam_chunk_store_dir=args.sam_chunk_store_dir)
 
 
 if __name__ == "__main__":
