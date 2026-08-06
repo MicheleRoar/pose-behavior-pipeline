@@ -55,21 +55,79 @@ Limiti onesti
     sulla stessa scala: trattarle come intercambiabili in analisi
     quantitative va validato.
 
-Setup richiesto (solo sul Mac, non testabile in questo ambiente sandbox
-senza camera):
+Setup richiesto:
 
     pip install mediapipe
-    # scarica il modello Pose Landmarker (una tantum; "lite" e' il piu'
-    # veloce, "full"/"heavy" sono piu' precisi ma piu' lenti):
-    curl -L -o pose_landmarker_lite.task \\
-        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+
+Il modello Pose Landmarker ("lite", il piu' veloce -- "full"/"heavy" sono
+piu' precisi ma piu' lenti, vedi `_MODEL_URL` sotto per l'URL delle altre
+varianti) viene scaricato IN AUTOMATICO alla prima esecuzione in una
+cache fissa dentro il progetto (`<repo>/models/pose_landmarker_lite.task`,
+vedi `_DEFAULT_MODEL_CACHE_PATH`), non serve piu' un `curl` manuale.
+
+Perche' il download automatico (bug reale osservato): il default
+precedente era il nome nudo `"pose_landmarker_lite.task"`, risolto da
+MediaPipe come path RELATIVO ALLA CWD -- funzionava solo se si lanciava
+lo script dalla stessa cartella in cui si era fatto il `curl` a mano, e
+falliva con un errore poco chiaro ("unable to find pose_landmarker_lite")
+se lanciato da una cwd diversa (es. `cd src && python webui_app.py`
+invece che dalla root del progetto). Un path assoluto fisso + download
+automatico rende il comportamento indipendente da dove viene lanciato lo
+script. Se invece si passa esplicitamente un `model_path` diverso
+(es. per usare la variante "full"/"heavy" gia' scaricata altrove), quel
+path viene rispettato cosi' com'e', nessun download automatico.
 """
 
 from __future__ import annotations
 
+import os
+import urllib.request
+from pathlib import Path
+
 import numpy as np
 
 from pose.keypoints import KP
+
+# Stessa variante "lite" gia' documentata prima -- vedi il docstring sopra
+# per "full"/"heavy" (sostituire "lite" con "full"/"heavy" nell'URL).
+_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+    "pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+)
+# .../pose-behavior-pipeline/src/pose/mediapipe_pose.py -> parents[2] e' la
+# root del progetto (src/pose -> src -> root), stessa convenzione di
+# Path(__file__).resolve().parents[N] gia' usata in segmentation/sam2_estimation.py.
+_DEFAULT_MODEL_CACHE_PATH = Path(__file__).resolve().parents[2] / "models" / "pose_landmarker_lite.task"
+_DEFAULT_MODEL_BASENAME = "pose_landmarker_lite.task"
+
+
+def _resolve_model_path(model_path: str) -> str:
+    """Se `model_path` esiste gia' (path esplicito dell'utente, anche
+    relativo alla cwd corrente -- comportamento invariato per chi lo passa
+    apposta), lo usa cosi' com'e'. Altrimenti, SOLO se e' il nome nudo di
+    default (non un path custom che l'utente ha sbagliato: in quel caso
+    meglio l'errore originale di MediaPipe che indovinare), lo risolve/
+    scarica nella cache fissa del progetto -- vedi il docstring del
+    modulo per il bug che questo risolve."""
+    if os.path.isfile(model_path):
+        return model_path
+    if os.path.basename(model_path) != _DEFAULT_MODEL_BASENAME:
+        return model_path
+    if not _DEFAULT_MODEL_CACHE_PATH.exists():
+        _download_pose_landmarker_lite(_DEFAULT_MODEL_CACHE_PATH)
+    return str(_DEFAULT_MODEL_CACHE_PATH)
+
+
+def _download_pose_landmarker_lite(dest: Path) -> None:
+    """Scarica il modello "lite" (~5-6 MB) in `dest`, creando le cartelle
+    mancanti. Nessun retry/hash-check: se il download si interrompe a
+    meta', il file parziale resta li' e il prossimo avvio lo tratterebbe
+    come 'gia' presente' (bug noto, accettabile per ora -- se capita,
+    basta cancellare il file e rilanciare)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[mediapipe_pose] scarico il modello Pose Landmarker (una tantum) in {dest} ...")
+    urllib.request.urlretrieve(_MODEL_URL, dest)
+    print(f"[mediapipe_pose] fatto: {dest}")
 
 # Indice landmark BlazePose (0-32, schema MediaPipe Pose Landmarker) -> nome
 # COCO-17 (pose/keypoints.py). I landmark BlazePose senza equivalente COCO
@@ -148,6 +206,7 @@ class MediaPipeCropPoseEstimator:
         import mediapipe as mp
         from mediapipe.tasks.python import vision, BaseOptions
 
+        model_path = _resolve_model_path(model_path)
         options = vision.PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
             running_mode=vision.RunningMode.VIDEO,
@@ -230,7 +289,11 @@ class MediaPipePoseByTrack:
 
     def __init__(self, model_path: str = "pose_landmarker_lite.task",
                  min_pose_detection_confidence: float = 0.5):
-        self._model_path = model_path
+        # Risolto/scaricato UNA volta qui (non ad ogni nuovo track_id in
+        # estimate()): _resolve_model_path() e' economico da richiamare,
+        # ma non ha senso ripetere il controllo/stampare il messaggio di
+        # download per ogni persona che entra in scena.
+        self._model_path = _resolve_model_path(model_path)
         self._min_conf = min_pose_detection_confidence
         self._estimators: dict[int, MediaPipeCropPoseEstimator] = {}
 

@@ -284,12 +284,13 @@ segmentation/`--with-seg-reid` tracking above; see `pose/mediapipe_pose.py`
 for why). Draws the skeleton on top of the mask and adds joint-angle
 columns (`pose_*`) to the CSV — no sliding-window features (movement
 energy, repetitiveness, gaze, hands) yet, only per-frame angles. Requires
-`pip install mediapipe` and a one-time model download:
-
-```bash
-curl -L -o pose_landmarker_lite.task \
-    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
-```
+`pip install mediapipe`; the Pose Landmarker model ("lite") downloads
+itself automatically on first use into `models/pose_landmarker_lite.task`
+at the repo root — no manual `curl` step needed anymore (see
+`pose/mediapipe_pose.py` for why the old cwd-relative default was
+fragile: it broke with "unable to find pose_landmarker_lite" when
+launched from a different working directory than the one the file had
+been downloaded into).
 
 **Pose-based pipeline (on hold — keypoints, all behavioural features):**
 
