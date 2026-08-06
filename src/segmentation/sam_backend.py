@@ -398,16 +398,37 @@ class ChunkedVideoPredictorBackend:
         """Box (x1,y1,x2,y2) delle persone rilevate da YOLO su un singolo
         frame -- usato SOLO per proporre prompt iniziali a SAM (non per
         tracciare), vedi il docstring del modulo per il perche'. Import
-        ritardato: stesso motivo di `SegTracker`."""
+        ritardato: stesso motivo di `SegTracker`.
+
+        Logga sempre cosa trova (o non trova): utile per distinguere "il
+        frame e' davvero senza persone" da "YOLO ha un problema" -- vedi
+        la sessione di debug SAMURAI in cui l'avviso 'nessuna persona da
+        seguire' usciva anche con persone chiaramente visibili nel
+        frame."""
         if self._detector is None:
             from ultralytics import YOLO
             self._detector = YOLO(self.prompt_model)
+            print(f"[{type(self).__name__}] proposer YOLO caricato: modello={self.prompt_model!r} "
+                  f"device={self.device!r} conf_threshold={self.conf_threshold}")
         result = self._detector.predict(
             source=frame, device=self.device, conf=self.conf_threshold,
             classes=[COCO_PERSON_CLASS_ID], verbose=False,
         )[0]
-        if result.boxes is None:
+        if result.boxes is None or len(result.boxes) == 0:
+            # "result.boxes is None" e "len(...) == 0 ma non None" sono
+            # entrambi "zero detection", ma distinguerli nel log serve a
+            # chi debugga: se qui compare la riga sotto anche su un frame
+            # con persone ben visibili, il sospetto si sposta da "il frame
+            # e' vuoto" a "il modello/soglia/device di questo detector ha
+            # un problema" (es. confrontare con --backend yolo sullo
+            # stesso video: se LI' YOLO trova le persone, il problema e'
+            # specifico di questa chiamata .predict(), non del modello).
+            print(f"[{type(self).__name__}] YOLO: 0 persone rilevate su questo frame "
+                  f"(conf_threshold={self.conf_threshold})")
             return []
+        confs = [round(c, 2) for c in result.boxes.conf.cpu().numpy().tolist()]
+        print(f"[{type(self).__name__}] YOLO: {len(confs)} persona/e rilevate su questo frame "
+              f"(confidenze: {confs})")
         return [box for box in result.boxes.xyxy.cpu().numpy()]
 
 
