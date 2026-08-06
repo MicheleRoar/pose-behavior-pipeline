@@ -44,6 +44,7 @@ import base64
 import json
 import threading
 import time
+import traceback
 from collections import deque
 
 import cv2
@@ -429,7 +430,17 @@ class Api:
         if self.player is None:
             return {"ok": False, "error": "No player built yet."}
         t0 = time.time()
-        frame = self.player.step_back() if back else self.player.step_forward()
+        try:
+            frame = self.player.step_back() if back else self.player.step_forward()
+        except Exception as exc:
+            # Un'eccezione qui e' quasi sempre un bug reale nel backend di
+            # segmentazione/pose (es. un modello mancante, un formato dati
+            # inatteso) -- la trasformiamo in un {"ok": False, "error": ...}
+            # come le altre chiamate di questo modulo, invece di lasciarla
+            # propagare come rifiuto di promise JS non gestito. Il
+            # traceback completo resta comunque sul terminale per il debug.
+            traceback.print_exc()
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         if not back:
             self._latency.record(time.time() - t0)
         if frame is None:
@@ -460,7 +471,23 @@ class Api:
                     return
                 fps = self._playback_fps
             t0 = time.time()
-            frame = self.player.step_forward()
+            try:
+                frame = self.player.step_forward()
+            except Exception as exc:
+                # PRIMA questa eccezione uccideva il thread daemon in
+                # silenzio: nessun errore in GUI, solo un traceback nel
+                # terminale (facile da non notare mentre si guarda la
+                # finestra, vedi la sessione di debug SAMURAI che ha
+                # scoperto questo). Ora si ferma la riproduzione e si manda
+                # l'errore a JS -- onPipelineFrame() in app.js gia' sa
+                # mostrare un {"ok": false, "error": ...} nella status pill,
+                # non serve cambiare nulla lato frontend. Il traceback
+                # completo resta comunque stampato sul terminale.
+                traceback.print_exc()
+                with self._lock:
+                    self._playing = False
+                self._push_error(exc)
+                return
             self._latency.record(time.time() - t0)
             if frame is None:
                 with self._lock:
@@ -481,6 +508,13 @@ class Api:
             return
         self._evaluate_js_safe({"ok": True, "frame": None,
                                  "status": {"is_finished": finished, "mode": self._mode}})
+
+    def _push_error(self, exc: Exception) -> None:
+        if self.window is None:
+            return
+        self._evaluate_js_safe({"ok": False, "frame": None,
+                                 "error": f"{type(exc).__name__}: {exc}",
+                                 "status": {"is_finished": True, "mode": self._mode}})
 
     def _evaluate_js_safe(self, payload: dict) -> None:
         # `window.onPipelineFrame` e' definito in webui/app.js: riceve lo
