@@ -35,15 +35,15 @@ il motion-modeling attraverso le occlusioni che era il vero valore aggiunto
 di SAMURAI per il single-target tracking.
 
 Requisiti: pacchetto `sam2` (facebookresearch/sam2, `git clone` + `pip
-install -e .`), checkpoint PUBBLICI (nessun accesso gated). Se hai gia'
-clonato `samurai/` per il tentativo precedente, va bene riusare lo STESSO
-file .pt (SAMURAI non riaddestra i pesi di SAM2, applica solo il filtro di
-Kalman a inferenza) passando `checkpoint=".../samurai/checkpoints/
-sam2.1_hiera_base_plus.pt"` esplicito al costruttore -- basta puntare `config`
+install -e .`), checkpoint PUBBLICI (nessun accesso gated). Il default sotto
+punta al checkpoint DENTRO il checkout `samurai/` (che vendorizza sam2 al
+suo interno) invece che a un clone separato di facebookresearch/sam2: va
+bene riusare lo STESSO file .pt (SAMURAI non riaddestra i pesi di SAM2,
+applica solo il filtro di Kalman a inferenza) -- basta puntare `config`
 alla config SAM2.1 "standard" invece di quella specifica di samurai
-(`configs/samurai/...`), vendorizzata nello stesso checkout. In alternativa,
-un clone pulito di facebookresearch/sam2 e' la dipendenza piu' diretta per
-chi non ha bisogno di nient'altro di SAMURAI.
+(`configs/samurai/...`), vendorizzata nello stesso checkout. Se in futuro
+preferisci un clone pulito e separato di facebookresearch/sam2, sovrascrivi
+`checkpoint=`/`config=` espliciti al costruttore.
 
 Import ritardato, stesso motivo di `Sam31Tracker`.
 """
@@ -54,13 +54,14 @@ from pathlib import Path
 
 from segmentation.sam_backend import ChunkedVideoPredictorBackend
 
-# Stessa convenzione "cartella sorella" gia' usata per samurai/ (vedi
-# README -- "clonalo fuori da pose-behavior-pipeline"): un clone pulito di
-# facebookresearch/sam2 ha la stessa struttura (sam2/checkpoints/*.pt).
-# Sovrascrivibile passando `checkpoint=` esplicito al costruttore, es. per
-# riusare il checkpoint gia' scaricato dentro un checkout samurai/.
+# Stessa convenzione "cartella sorella" gia' usata da samurai_estimation.py
+# (vedi README -- "clonalo fuori da pose-behavior-pipeline"): qui pero' si
+# punta DENTRO il checkout samurai/ gia' presente (samurai/checkpoints/*.pt),
+# non a un clone separato di facebookresearch/sam2 -- il checkpoint e'
+# identico, non serve scaricarlo due volte. Sovrascrivibile passando
+# `checkpoint=` esplicito al costruttore se preferisci un clone sam2/ a se'.
 DEFAULT_CHECKPOINT = str(
-    Path(__file__).resolve().parents[3] / "sam2" / "checkpoints" / "sam2.1_hiera_base_plus.pt"
+    Path(__file__).resolve().parents[3] / "samurai" / "checkpoints" / "sam2.1_hiera_base_plus.pt"
 )
 
 # Config SAM2.1 "standard" -- NON quella di samurai (configs/samurai/...):
