@@ -41,7 +41,7 @@ from common.device import detect_default_device
 from pose.mediapipe_pose import MediaPipePoseByTrack
 from pose.features import compute_joint_angles
 
-BACKEND_KEYS = {"yolo", "sam31", "samurai"}
+BACKEND_KEYS = {"yolo", "sam31", "sam2"}
 
 
 def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold: float,
@@ -49,7 +49,7 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
                     sam_chunk_size: int, sam_overlap: int, sam_chunk_store_dir: str | None,
                     sam_reseed_new_people: bool = True):
     """Istanzia il tracker giusto in base a `backend` -- unico punto in cui
-    la scelta YOLO/SAM 3.1/SAMURAI si traduce in una classe concreta.
+    la scelta YOLO/SAM 3.1/SAM2 si traduce in una classe concreta.
     Tutti e tre rispettano lo stesso protocollo `SegmentationBackend`
     (vedi segmentation/backend.py), quindi il resto di questa funzione
     (sotto) non ha bisogno di sapere quale sia stato scelto. Non piu'
@@ -57,7 +57,7 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
     per costruire lo stesso tracker senza passare da `iter_segmentation_
     frames()` (che disegna un overlay qui inutile).
 
-    `sam_reseed_new_people` (solo sam31/samurai, ignorato con "yolo"):
+    `sam_reseed_new_people` (solo sam31/sam2, ignorato con "yolo"):
     False da' la condizione "SAM puro" per il confronto tra metodi (vedi
     benchmark_backends.py) -- YOLO propone i box SOLO al primo frame del
     video, mai per scoprire persone nuove ai confini dei chunk successivi.
@@ -72,13 +72,13 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
                              chunk_size=sam_chunk_size, overlap=sam_overlap,
                              chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
                              reseed_new_people=sam_reseed_new_people)
-    if backend == "samurai":
-        from segmentation.samurai_estimation import SamuraiTracker
-        return SamuraiTracker(device=device, conf_threshold=conf_threshold,
-                               chunk_size=sam_chunk_size, overlap=sam_overlap,
-                               chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
-                               reseed_new_people=sam_reseed_new_people)
-    raise ValueError(f"backend sconosciuto: {backend!r} (atteso 'yolo'|'sam31'|'samurai')")
+    if backend == "sam2":
+        from segmentation.sam2_estimation import Sam2Tracker
+        return Sam2Tracker(device=device, conf_threshold=conf_threshold,
+                            chunk_size=sam_chunk_size, overlap=sam_overlap,
+                            chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
+                            reseed_new_people=sam_reseed_new_people)
+    raise ValueError(f"backend sconosciuto: {backend!r} (atteso 'yolo'|'sam31'|'sam2')")
 
 
 def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.pt",
@@ -105,7 +105,7 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
     ("Input timestamp must be monotonically increasing").
 
     `backend` sceglie il motore di tracking/segmentazione: "yolo" (default,
-    YOLO26-seg + ByteTrack, invariato), "sam31" o "samurai" (vedi
+    YOLO26-seg + ByteTrack, invariato), "sam31" o "sam2" (vedi
     segmentation/sam_backend.py -- richiedono device="cuda" e le rispettive
     librerie installate, non disponibili su mps/cpu). `sam_chunk_size` /
     `sam_overlap` / `sam_chunk_store_dir` sono usati solo con questi ultimi
@@ -301,18 +301,18 @@ def main():
                          help="Esegui senza finestra video (solo log + CSV, piu' veloce)")
     parser.add_argument("--backend", default="yolo", choices=sorted(BACKEND_KEYS),
                          help="Motore di segmentazione/tracking: 'yolo' (default, YOLO26-seg + "
-                              "ByteTrack) | 'sam31' | 'samurai' (vedi segmentation/sam_backend.py "
+                              "ByteTrack) | 'sam31' | 'sam2' (vedi segmentation/sam_backend.py "
                               "-- richiedono device=cuda e le rispettive librerie installate)")
     parser.add_argument("--sam-chunk-size", type=int, default=600,
-                         help="Solo con --backend sam31/samurai: numero di frame per chunk")
+                         help="Solo con --backend sam31/sam2: numero di frame per chunk")
     parser.add_argument("--sam-overlap", type=int, default=50,
-                         help="Solo con --backend sam31/samurai: frame in comune tra un chunk "
+                         help="Solo con --backend sam31/sam2: frame in comune tra un chunk "
                               "e il successivo, usati per la riconciliazione degli id")
     parser.add_argument("--sam-chunk-store-dir", default=None,
-                         help="Solo con --backend sam31/samurai: cartella dove salvare "
+                         help="Solo con --backend sam31/sam2: cartella dove salvare "
                               "incrementalmente i risultati di ogni chunk (opzionale)")
     parser.add_argument("--sam-no-reseed-new-people", action="store_true",
-                         help="Solo con --backend sam31/samurai: disattiva la scoperta di "
+                         help="Solo con --backend sam31/sam2: disattiva la scoperta di "
                               "persone NUOVE ai confini dei chunk (YOLO propone i box SOLO "
                               "al primo frame del video). Da' la condizione 'SAM puro' per "
                               "confrontare con la versione di default (con reseeding) -- "

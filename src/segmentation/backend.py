@@ -10,7 +10,7 @@ un iteratore di `SegFrameResult` (frame_index, frame, people = lista di
 `SegTracker` (YOLO26-seg + ByteTrack, seg_estimation.py) rispetta gia'
 questo protocollo per costruzione, senza bisogno di modifiche: e' definito
 QUI a posteriori solo per rendere esplicito il contratto che anche i nuovi
-backend (`Sam31Tracker`, `SamuraiTracker`, vedi sam_backend.py) devono
+backend (`Sam31Tracker`, `Sam2Tracker`, vedi sam_backend.py) devono
 rispettare. E' un `typing.Protocol` (duck typing statico): non serve
 ereditare da nessuna classe base, basta avere lo stesso metodo con la stessa
 firma -- `isinstance(x, SegmentationBackend)` funziona comunque grazie a
@@ -21,7 +21,7 @@ Perche' questo disaccoppiamento conta qui: `iter_segmentation_frames()` (in
 segmentation_demo.py) e tutto cio' che le sta sopra (GUI Tkinter e web,
 VideoPlayer, export CSV) trattano il backend come una scatola nera che
 produce lo stesso tipo di risultato per frame -- selezionare YOLO, SAM 3.1 o
-SAMURAI diventa quindi solo una scelta di QUALE classe istanziare dentro
+SAM2 diventa quindi solo una scelta di QUALE classe istanziare dentro
 `iter_segmentation_frames()`, zero altre modifiche a valle.
 """
 

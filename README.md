@@ -53,9 +53,9 @@ pose-behavior-pipeline/
 │   │   ├── backend.py             # SegmentationBackend protocol: run(source) -> Iterator[SegFrameResult]
 │   │   ├── chunking.py            # overlapping chunk ranges + IoU-based id reconciliation
 │   │   ├── chunk_store.py         # incremental per-chunk disk persistence (.npz)
-│   │   ├── sam_backend.py         # ChunkedVideoPredictorBackend: shared SAM/SAMURAI chunking logic
+│   │   ├── sam_backend.py         # ChunkedVideoPredictorBackend: shared SAM/SAM2 chunking logic
 │   │   ├── sam31_estimation.py    # Sam31Tracker (SAM 3.1, needs CUDA, gated HF checkpoint)
-│   │   └── samurai_estimation.py  # SamuraiTracker (SAM2 + motion-aware memory, needs CUDA)
+│   │   └── sam2_estimation.py     # Sam2Tracker (SAM2 vanilla, multi-object native, needs CUDA)
 │   ├── pose/                      # ON HOLD library: everything keypoint-based
 │   │   ├── keypoints.py           # COCO-17 index names, skeleton edges
 │   │   ├── geometry.py            # shared angle/vector math
@@ -166,7 +166,7 @@ matches the mock closely. Both call the same generators underneath, so
 behaviour never diverges between them — only the presentation layer
 differs.
 
-## SAM 3.1 / SAMURAI segmentation backends (CUDA only)
+## SAM 3.1 / SAM2 segmentation backends (CUDA only)
 
 `segmentation_demo.py` / the web GUI's "Architecture" selector can pick a
 segmentation/tracking backend other than YOLO26-seg + ByteTrack:
@@ -177,16 +177,35 @@ segmentation/tracking backend other than YOLO26-seg + ByteTrack:
   huggingface.co/settings/tokens, then `pip install huggingface_hub && hf
   auth login` before the first run. Requires Python 3.12+, PyTorch 2.7+,
   CUDA 12.6+ — likely a separate virtualenv from the rest of this project.
-- `--backend samurai` → [SAMURAI](https://github.com/yangchris11/samurai)
-  (SAM2 + motion-aware memory). Checkpoints are public, no gated access
-  needed — a faster alternative to try while a SAM 3.1 access request is
-  pending.
+- `--backend sam2` → [SAM2](https://github.com/facebookresearch/sam2)
+  vanilla (no motion-model patches). Checkpoints are public, no gated
+  access needed.
 
-Both require `device=cuda` — refused immediately with a clear error
-otherwise (`segmentation/sam_backend.py::ChunkedVideoPredictorBackend`),
-since neither library declares mps/cpu support. The web GUI disables these
-two options in the dropdown unless `Api.detect_device()` reports `"cuda"`
-(and rejects the request server-side too, as a safety net either way).
+**Why not SAMURAI**: an earlier version of this backend used
+[SAMURAI](https://github.com/yangchris11/samurai) (SAM2 + a Kalman-filter
+"motion-aware" mask selection layer) instead of plain SAM2. Confirmed on a
+real CUDA machine: SAMURAI's motion-model code
+(`sam2_base.py::_forward_sam_heads`) assumes exactly **one** tracked object
+per session — it's written and validated against single-target visual
+object tracking benchmarks (LaSOT, GOT-10k, TrackingNet), never more than
+one target per video. Seeding several people into the same session (the
+normal case here — several children/therapist in frame together) makes SAM2
+batch them together for inference, which crashes that code with
+`RuntimeError: Boolean value of Tensor with more than one value is
+ambiguous` (`ious[0][best_iou_inds]`, indexed with one entry per object
+instead of a scalar). Running SAMURAI correctly for N people would need a
+separate SAM session per person (N× the encoder cost, the heaviest part of
+the pipeline) — not worth it compared to SAM2 vanilla, which batches
+multiple objects natively at no extra cost, at the price of losing
+motion-modeling through occlusions. See `segmentation/sam2_estimation.py`
+for the full writeup.
+
+Both `sam31`/`sam2` require `device=cuda` — refused immediately with a
+clear error otherwise
+(`segmentation/sam_backend.py::ChunkedVideoPredictorBackend`), since
+neither library declares mps/cpu support. The web GUI disables these two
+options in the dropdown unless `Api.detect_device()` reports `"cuda"` (and
+rejects the request server-side too, as a safety net either way).
 
 **Why chunked, not one pass over the whole video**: both libraries' video
 API is stateful — `init_state(video)` loads every frame's pixels into
@@ -205,16 +224,18 @@ masks/ids to disk (`.npz`, no image data) before moving to the next one, so
 a crash partway through a long video doesn't lose everything processed so
 far.
 
-**Honesty about what's tested**: `Sam31Tracker`/`SamuraiTracker` and the
+**Honesty about what's tested**: `Sam31Tracker`/`Sam2Tracker` and the
 chunking/reconciliation/persistence logic around them are verified against
 a *fake* video predictor (`demo/sam_backend_check.py`) — there is no CUDA
-GPU in the environment this was built in, so the real `sam3`/`samurai`
-inference path has not been executed. Before relying on it: check the
-exact method names/return shapes against
-`sam3/examples/sam3_video_predictor_example.ipynb` (or the samurai/sam2
-equivalent) on the actual CUDA machine — `_init_state()` /
-`_add_box_prompt()` / `_propagate()` in `ChunkedVideoPredictorBackend` are
-the three points designed to be overridden if a signature differs.
+GPU in the environment this was built in, so the real `sam3`/`sam2`
+inference path has not been executed by this agent (it has by the project
+owner, on his own CUDA machine — see the SAMURAI write-up above, found
+through exactly that real testing). Before relying on it: check the exact
+method names/return shapes against
+`sam3/examples/sam3_video_predictor_example.ipynb` (or the sam2 equivalent)
+on the actual CUDA machine — `_init_state()` / `_add_box_prompt()` /
+`_propagate()` in `ChunkedVideoPredictorBackend` are the three points
+designed to be overridden if a signature differs.
 
 ## Usage (CLI)
 

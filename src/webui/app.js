@@ -35,7 +35,7 @@
     lastTimecodeS: 0,
     maxPeople: null,
     detectedDevice: null,  // da Api.detect_device() (vedi init()) -- usato SOLO per
-    // abilitare/disabilitare SAM 3.1/SAMURAI nel selettore Architecture, il
+    // abilitare/disabilitare SAM 3.1/SAM2 nel selettore Architecture, il
     // controllo definitivo resta lato server in Api.build_player().
   };
 
@@ -117,8 +117,8 @@
     updatePipelineFlow();
   }
 
-  // Backend di segmentazione (YOLO/SAM 3.1/SAMURAI, vedi
-  // segmentation/sam_backend.py): SAM 3.1/SAMURAI valgono solo in
+  // Backend di segmentazione (YOLO/SAM 3.1/SAM2, vedi
+  // segmentation/sam_backend.py): SAM 3.1/SAM2 valgono solo in
   // Segmentation/Both E richiedono una GPU CUDA -- qui si disabilitano le
   // opzioni non valide e si torna a "yolo" se quella selezionata smette di
   // esserlo (es. l'utente passa a modalita' Pose). Il controllo DEFINITIVO
@@ -131,12 +131,12 @@
     const segCapable = mode === "segmentation" || mode === "both";
     const cudaAvailable = state.detectedDevice === "cuda";
 
-    ["sam31", "samurai"].forEach((value) => {
+    ["sam31", "sam2"].forEach((value) => {
       const opt = archSelect.querySelector(`option[value="${value}"]`);
       if (opt) opt.disabled = !cudaAvailable;
     });
 
-    const archIsSam = archSelect.value === "sam31" || archSelect.value === "samurai";
+    const archIsSam = archSelect.value === "sam31" || archSelect.value === "sam2";
     if (archIsSam && !cudaAvailable) {
       setStatusPill(`${archSelect.options[archSelect.selectedIndex].text} needs a CUDA GPU — staying on YOLO`, "idle");
       archSelect.value = "yolo";
@@ -145,7 +145,7 @@
       archSelect.value = "yolo";
     }
 
-    const showChunkFields = archSelect.value === "sam31" || archSelect.value === "samurai";
+    const showChunkFields = archSelect.value === "sam31" || archSelect.value === "sam2";
     $("sam-chunk-fields").classList.toggle("hidden", !showChunkFields);
     $("arch-hint").classList.toggle("hidden", cudaAvailable);
   }
@@ -169,7 +169,7 @@
     if (mode === "segmentation" || mode === "both") {
       const arch = $("arch-select").value;
       const segLabel = arch === "sam31" ? "SAM 3.1 Segment"
-        : arch === "samurai" ? "SAMURAI Segment"
+        : arch === "sam2" ? "SAM2 Segment"
         : `YOLO26${scale} Segment`;
       steps.push({ label: segLabel, icon: "box", cls: "seg" });
     }
@@ -523,7 +523,7 @@
       state.detectedDevice = result && result.device;
     } catch (err) {
       // aperto in un browser normale senza pywebview (vedi api()), o
-      // detect_device() ha fallito per qualche motivo: SAM 3.1/SAMURAI
+      // detect_device() ha fallito per qualche motivo: SAM 3.1/SAM2
       // restano disabilitati per sicurezza (cudaAvailable resta false).
       state.detectedDevice = null;
     }

@@ -2,13 +2,19 @@
 benchmark_backends.py
 ========================
 Confronta i backend di tracking disponibili (YOLO26-seg+ByteTrack
-euristico, SAM 3.1, SAMURAI -- questi ultimi due con o senza reseeding di
+euristico, SAM 3.1, SAM2 -- questi ultimi due con o senza reseeding di
 persone nuove ai confini dei chunk, vedi segmentation/sam_backend.py) sullo
 STESSO video, per capire quale mantiene l'identita' delle persone piu'
 stabile nel tempo. Nato da un problema concreto: durante una sessione di
 gioco terapeutico i bambini entrano ed escono continuamente dall'
 inquadratura, o cambiano vestiti -- l'id di tracking dovrebbe restare lo
 stesso.
+
+Perche' SAM2 e non SAMURAI: SAMURAI e' stato rimosso dal confronto, vedi il
+docstring di `segmentation/sam2_estimation.py` -- il suo filtro di Kalman
+assume un solo oggetto tracciato per sessione e va in crash non appena si
+seminano piu' persone insieme (il caso normale qui). SAM2 vanilla supporta
+il multi-oggetto nativamente.
 
 Nessuna ground truth richiesta: le metriche qui sono di AUTO-consistenza,
 non IDF1/HOTA veri (che richiederebbero label frame-per-frame dell'
@@ -37,15 +43,15 @@ protocollo comune `SegmentationBackend`, vedi segmentation/backend.py),
 non `iter_segmentation_frames()` (che disegna l'overlay, qui inutile).
 
 Se un metodo non e' eseguibile su questa macchina (device diverso da
-"cuda" per sam31/samurai, o libreria non installata) viene SALTATO con un
+"cuda" per sam31/sam2, o libreria non installata) viene SALTATO con un
 avviso invece di far fallire l'intero confronto -- utile per rilanciare lo
 stesso comando su macchine diverse (Mac senza CUDA: gira solo "yolo";
-macchina CUDA con solo SAMURAI installato: le varianti "sam31*" vengono
+macchina CUDA con solo SAM2 installato: le varianti "sam31*" vengono
 saltate).
 
 Uso:
     python benchmark_backends.py --source video.mp4 --fps 15 \\
-        --methods yolo,sam31,sam31-noreseed,samurai,samurai-noreseed \\
+        --methods yolo,sam31,sam31-noreseed,sam2,sam2-noreseed \\
         --max-people 3 --out benchmark_results.csv
 """
 
@@ -64,8 +70,8 @@ METHOD_PRESETS = {
     "yolo": dict(backend="yolo", reseed=True),
     "sam31": dict(backend="sam31", reseed=True),
     "sam31-noreseed": dict(backend="sam31", reseed=False),
-    "samurai": dict(backend="samurai", reseed=True),
-    "samurai-noreseed": dict(backend="samurai", reseed=False),
+    "sam2": dict(backend="sam2", reseed=True),
+    "sam2-noreseed": dict(backend="sam2", reseed=False),
 }
 
 # Stesso riferimento usato altrove nel progetto (reid.py::min_signature_frames,
@@ -88,7 +94,7 @@ def run_one_method(method: str, *, source, fps: float, device: str,
     backend = preset["backend"]
     reseed = preset["reseed"]
 
-    if backend in ("sam31", "samurai") and device != "cuda":
+    if backend in ("sam31", "sam2") and device != "cuda":
         print(f"[{method}] saltato: richiede device='cuda' (rilevato {device!r})")
         return None
 
@@ -158,7 +164,7 @@ def run_benchmark(methods: list[str], *, source, fps: float, device: str | None 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Confronta i backend di tracking (YOLO/SAM 3.1/SAMURAI, con/senza "
+        description="Confronta i backend di tracking (YOLO/SAM 3.1/SAM2, con/senza "
                      "reseeding di persone nuove) sullo stesso video: quante identita' "
                      "'grezze' crea ciascuno, quanto durano le tracce, quanto e' veloce. "
                      "Nessuna ground truth richiesta -- vedi il docstring del modulo.")

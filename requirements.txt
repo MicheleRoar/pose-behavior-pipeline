@@ -17,12 +17,15 @@ Pillow>=10.0  # richiesto dalla GUI Tkinter (gui_app.py) per mostrare l'overlay 
 # GTK (pywebview[gtk]) richiede invece pacchetti di sistema (python3-gi, webkit2gtk).
 pywebview>=5.0; sys_platform != "linux"
 pywebview[qt]>=5.0; sys_platform == "linux"
-# SAM 3.1 / SAMURAI (opzionali, backend --backend sam31|samurai in
+# SAM 3.1 / SAM2 (opzionali, backend --backend sam31|sam2 in
 # segmentation_demo.py, vedi README): NON elencati come riga pip qui sopra
 # di proposito -- non sono pacchetti PyPI normali. SAM 3.1 richiede
 # 'git clone https://github.com/facebookresearch/sam3 && pip install -e .'
 # (Python 3.12+, PyTorch 2.7+, CUDA 12.6+, checkpoint gated su Hugging Face
-# facebook/sam3.1, richiede 'hf auth login'); SAMURAI richiede
-# 'git clone https://github.com/yangchris11/samurai' (checkpoint pubblici).
+# facebook/sam3.1, richiede 'hf auth login'); SAM2 richiede
+# 'git clone https://github.com/facebookresearch/sam2 && pip install -e .'
+# (checkpoint pubblici, nessun accesso gated). NON usare il fork SAMURAI
+# (yangchris11/samurai): il suo filtro di Kalman assume un solo oggetto
+# tracciato per sessione e va in crash col multi-persona, vedi README.
 # Entrambi richiedono una GPU CUDA -- non installarli per usare solo il
 # backend YOLO di default.

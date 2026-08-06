@@ -2,14 +2,14 @@
 chunking.py
 ============
 Logica di suddivisione in finestre (chunk) sovrapposte e di riconciliazione
-degli ID tra un chunk e il successivo -- indipendente da SAM/SAMURAI, usata
+degli ID tra un chunk e il successivo -- indipendente da SAM/SAM2, usata
 da `sam_backend.py`. Nessuna dipendenza pesante (solo numpy/cv2, gia'
 richiesti dal resto del progetto): testabile con maschere sintetiche, senza
 avere ne' una GPU ne' i pesi SAM installati (vedi demo/chunking_check.py).
 
 Perche' il chunking e' necessario (non solo un'ottimizzazione)
 ------------------------------------------------------------------
-L'API video di SAM 3.1 e di SAMURAI (SAM2) e' stateful: `init_state(video)`
+L'API video di SAM 3.1 e di SAM2 e' stateful: `init_state(video)`
 carica in memoria i pixel di TUTTI i frame passati, prima ancora di
 cominciare a propagare le maschere. Su un video di svariati minuti questo
 non e' semplicemente lento, e' un problema di memoria (VRAM/RAM) -- quindi

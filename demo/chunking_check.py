@@ -3,7 +3,7 @@ chunking_check.py
 ===================
 Verifica `segmentation/chunking.py` (suddivisione in chunk sovrapposti,
 IoU su poligoni rasterizzati, riconciliazione id greedy, allocatore id
-globali) con dati sintetici -- nessuna dipendenza da SAM/SAMURAI/GPU, solo
+globali) con dati sintetici -- nessuna dipendenza da SAM/SAM2/GPU, solo
 numpy/cv2 gia' richiesti dal resto del progetto.
 
 Uso:

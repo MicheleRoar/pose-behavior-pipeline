@@ -2,7 +2,7 @@
 sam_backend_check.py
 =======================
 Verifica `segmentation/sam_backend.py::ChunkedVideoPredictorBackend` con un
-predictor SAM FINTO (nessuna dipendenza da sam3/samurai/GPU CUDA) --
+predictor SAM FINTO (nessuna dipendenza da sam3/sam2/GPU CUDA) --
 stessa filosofia di `demo/device_check.py` (iniezione di un doppio finto al
 posto della libreria pesante). Genera un piccolo video sintetico su disco
 (cv2.VideoWriter) cosi' `run()` puo' leggere frame reali via
@@ -64,7 +64,7 @@ class _FakePredictor:
     maschera identica per ogni frame del chunk.
 
     `init_state()` riceve un PERCORSO a una cartella (non una lista di
-    frame in memoria) -- stessa interfaccia richiesta dal vero SAMURAI/SAM
+    frame in memoria) -- stessa interfaccia richiesta dal vero SAM2/SAM
     (vedi `ChunkedVideoPredictorBackend._init_state()`): qui si limita a
     contare i file JPEG scritti da `_init_state()`, cosi' il test verifica
     davvero che quella scrittura sia avvenuta con il numero giusto di
@@ -197,7 +197,8 @@ def part4_non_cuda_device_rejected_immediately():
 
 
 def part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash():
-    # Errore reale osservato su una macchina CUDA con SAMURAI:
+    # Errore reale osservato su una macchina CUDA (col fork SAMURAI, stesso
+    # sam2_video_predictor di SAM2 vanilla):
     # "RuntimeError: No points are provided; please add points first",
     # sollevato da propagate_in_video() quando nessun prompt e' mai stato
     # registrato -- capita se YOLO non trova nessuno nel frame di
@@ -228,8 +229,8 @@ def part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash():
 
 
 def part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk():
-    # Verifica il fix del 2026-08 (confermato su una macchina CUDA reale con
-    # SAMURAI: "Only MP4 video and JPEG folder are supported", il predictor
+    # Verifica il fix del 2026-08 (confermato su una macchina CUDA reale col
+    # fork SAMURAI: "Only MP4 video and JPEG folder are supported", il predictor
     # non accetta una lista di frame in memoria) -- _init_state() deve
     # scrivere ogni chunk come cartella JPEG temporanea E ripulirla subito
     # dopo, non lasciarne in giro una per chunk su un video con molti chunk.

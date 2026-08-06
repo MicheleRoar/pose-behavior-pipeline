@@ -1,10 +1,10 @@
 """
 sam_backend.py
 ================
-Base condivisa da `Sam31Tracker` (sam31_estimation.py) e `SamuraiTracker`
-(samurai_estimation.py): entrambe le librerie espongono la STESSA API video
+Base condivisa da `Sam31Tracker` (sam31_estimation.py) e `Sam2Tracker`
+(sam2_estimation.py): entrambe le librerie espongono la STESSA API video
 stateful (documentazione ufficiale: facebookresearch/sam3 e
-yangchris11/samurai) --
+facebookresearch/sam2) --
 
     state = predictor.init_state(frames)
     predictor.add_new_points_or_box(state, frame_idx=..., obj_id=..., box=...)
@@ -14,7 +14,7 @@ yangchris11/samurai) --
 -- quindi tutta la logica di chunking/prompting/riconciliazione/persistenza
 vive UNA volta sola qui; le due sottoclassi implementano solo
 `_build_predictor()` (quale libreria importare/istanziare, import ritardato
-perche' ne' sam3 ne' samurai sono installabili in questo ambiente: servono
+perche' ne' sam3 ne' sam2 sono installabili in questo ambiente: servono
 Python 3.12+/CUDA 12.6+, vedi requirements.txt).
 
 Perche' il chunking (vedi anche segmentation/chunking.py)
@@ -56,17 +56,33 @@ Strategia di prompting/continuita' degli id
 Onesta' su cosa e' verificato qui
 --------------------------------------
 Questo modulo e' stato scritto e testato inizialmente SOLO con un predictor
-finto iniettato al posto di sam3/samurai (vedi `demo/sam_backend_check.py`,
+finto iniettato al posto di sam3/sam2 (vedi `demo/sam_backend_check.py`,
 nessuna GPU CUDA in questo ambiente). `_init_state()` sotto e' stato pero'
-CORRETTO a partire da un test reale su una macchina CUDA (SAMURAI): il
-predictor NON accetta una lista di frame in memoria come si era assunto
-all'inizio -- si e' scontrato con "Only MP4 video and JPEG folder are
-supported". Si scrive quindi ogni chunk come sequenza JPEG in una cartella
-temporanea (vedi sotto) prima di chiamare `init_state()`. Non ancora
-confermato se SAM 3.1 ha lo stesso vincolo (eredita lo stesso codice video
-di SAM2/SAMURAI, quindi probabile) -- se si scoprisse che accetta anche
-liste di frame, `_init_state()` resta comunque overridabile per sottoclasse
-se in futuro conviene differenziare.
+CORRETTO a partire da un test reale su una macchina CUDA (col fork
+SAMURAI, che vendorizza lo stesso `sam2_video_predictor` di SAM2 vanilla --
+stesso comportamento atteso con `Sam2Tracker`): il predictor NON accetta
+una lista di frame in memoria come si era assunto all'inizio -- si e'
+scontrato con "Only MP4 video and JPEG folder are supported". Si scrive
+quindi ogni chunk come sequenza JPEG in una cartella temporanea (vedi
+sotto) prima di chiamare `init_state()`. Non ancora confermato se SAM 3.1
+ha lo stesso vincolo (eredita lo stesso codice video di SAM2, quindi
+probabile) -- se si scoprisse che accetta anche liste di frame,
+`_init_state()` resta comunque overridabile per sottoclasse se in futuro
+conviene differenziare.
+
+Perche' Sam2Tracker e non SamuraiTracker
+------------------------------------------
+`SamuraiTracker` (rimosso) usava lo stesso predictor con la modalita'
+motion-aware di SAMURAI attiva. Verificato su una macchina CUDA reale:
+quel codice (`sam2_base.py::_forward_sam_heads`) assume un solo oggetto
+per sessione (scritto/validato sui benchmark di visual object tracking
+single-target LaSOT/GOT-10k/TrackingNet) -- seminando piu' persone nella
+stessa sessione (il caso normale qui) va in crash con `RuntimeError:
+Boolean value of Tensor with more than one value is ambiguous`. SAM2
+vanilla (`Sam2Tracker`, sam2_estimation.py) usa lo stesso predictor SENZA
+quella patch: supporta il multi-oggetto batchato nativamente, a costo di
+perdere il motion-modeling attraverso le occlusioni. Vedi il docstring di
+`segmentation/sam2_estimation.py` per il dettaglio completo.
 """
 
 from __future__ import annotations
@@ -131,7 +147,7 @@ def _to_boolean_mask(mask) -> np.ndarray:
     """Converte l'oggetto maschera restituito da `propagate_in_video()` in
     un array numpy booleano (H,W), qualunque sia il formato di partenza --
     verificato SOLO col predictor finto dei test fin qui (nessuna GPU CUDA
-    in questo ambiente): SAM2/SAMURAI restituiscono tipicamente un tensore
+    in questo ambiente): SAM2 restituisce tipicamente un tensore
     PyTorch di LOGIT (valori reali, non gia' 0/1), su GPU, spesso con una
     dimensione canale in piu' (es. forma (1,H,W) invece di (H,W)). Senza
     questa conversione `_mask_to_polygon()` riceveva dati nel formato
@@ -203,12 +219,12 @@ class ChunkedVideoPredictorBackend:
                  max_people: int | None = None,
                  reseed_new_people: bool = True):
         if device != "cuda":
-            # SAM 3.1/SAMURAI non dichiarano supporto mps/cpu (vedi ricerca
+            # SAM 3.1/SAM2 non dichiarano supporto mps/cpu (vedi ricerca
             # citata nel README) -- meglio fallire subito con un messaggio
             # chiaro che lasciar provare e ottenere un errore oscuro dentro
             # la libreria.
             raise ValueError(
-                f"{type(self).__name__} richiede device='cuda' (SAM 3.1/SAMURAI "
+                f"{type(self).__name__} richiede device='cuda' (SAM 3.1/SAM2 "
                 f"non supportano mps/cpu al momento) -- ricevuto device={device!r}"
             )
         self.device = device
@@ -221,7 +237,7 @@ class ChunkedVideoPredictorBackend:
         self.max_people = max_people
         # Se False: YOLO viene chiamato SOLO al bootstrap del chunk 0 (deve
         # pur esserci un primo prompt da qualche parte), mai per scoprire
-        # persone NUOVE ai confini dei chunk successivi -- SAM/SAMURAI resta
+        # persone NUOVE ai confini dei chunk successivi -- SAM/SAM2 resta
         # libero di gestire (o non gestire) da solo l'ingresso di qualcuno
         # a meta' video. Serve per ottenere una condizione "SAM puro" da
         # confrontare con quella di default (con reseeding), invece di
@@ -237,7 +253,7 @@ class ChunkedVideoPredictorBackend:
 
     # ------------------------------------------------- override opzionale
     def _init_state(self, predictor, frames: list[np.ndarray]):
-        """SAMURAI (e presumibilmente SAM 3.1, stesso codice video di
+        """SAM2 (e presumibilmente SAM 3.1, stesso codice video di
         origine) NON accetta una lista di frame in memoria: vuole un
         percorso a un video MP4 o a una cartella di JPEG in sequenza
         (verificato su una macchina CUDA reale, vedi il docstring del
@@ -316,7 +332,7 @@ class ChunkedVideoPredictorBackend:
                     # succedere con un video che si apre su una stanza vuota,
                     # o se YOLO manca la detection su quel frame specifico
                     # (illuminazione, posa, soglia di confidenza).
-                    # `propagate_in_video()` di SAM/SAMURAI SOLLEVA un errore
+                    # `propagate_in_video()` di SAM/SAM2 SOLLEVA un errore
                     # ("No points are provided; please add points first") se
                     # chiamata senza nessun prompt registrato -- qui si
                     # emettono frame vuoti invece di far esplodere l'intera
@@ -402,9 +418,10 @@ class ChunkedVideoPredictorBackend:
 
         Logga sempre cosa trova (o non trova): utile per distinguere "il
         frame e' davvero senza persone" da "YOLO ha un problema" -- vedi
-        la sessione di debug SAMURAI in cui l'avviso 'nessuna persona da
-        seguire' usciva anche con persone chiaramente visibili nel
-        frame."""
+        la sessione di debug con SAMURAI in cui l'avviso 'nessuna persona
+        da seguire' usciva anche con persone chiaramente visibili nel
+        frame (poi risolta: il vero problema era il crash multi-oggetto di
+        SAMURAI, non YOLO, vedi il docstring del modulo)."""
         if self._detector is None:
             from ultralytics import YOLO
             self._detector = YOLO(self.prompt_model)

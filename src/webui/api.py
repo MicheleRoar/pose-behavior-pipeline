@@ -109,7 +109,7 @@ def build_player_kwargs(params: dict) -> dict:
     default "s"), "max_people" (int, stringa, o None/""), "with_hands",
     "with_eyes", "with_mouth", "with_eyebrows", "with_head_movement",
     "with_mediapipe_pose" (bool), "reid" (bool, abilita re-id/seg-reid se
-    un max_people e' impostato), "seg_backend" ("yolo"|"sam31"|"samurai",
+    un max_people e' impostato), "seg_backend" ("yolo"|"sam31"|"sam2",
     default "yolo" -- gli ultimi due solo in modalita' Segmentation/Both,
     vedi segmentation/sam_backend.py: la GATING per device=cuda avviene
     lato JS (vedi `Api.detect_device()`) E qui in `Api.build_player()`
@@ -150,7 +150,7 @@ def build_player_kwargs(params: dict) -> dict:
     # solo in modalita' Segmentation -- vedi pipeline_runner.py.
     with_mediapipe_pose = mode == "segmentation" and bool(params.get("with_mediapipe_pose"))
 
-    # Backend di segmentazione (YOLO/SAM 3.1/SAMURAI): rilevante solo in
+    # Backend di segmentazione (YOLO/SAM 3.1/SAM2): rilevante solo in
     # Segmentation/Both, "yolo" altrove (ignorato da iter_pipeline_frames se
     # mode="pose"). Il controllo "serve device=cuda" NON avviene qui (vedi
     # docstring sopra): questa funzione resta pura, il controllo vive in
@@ -279,7 +279,7 @@ class Api:
     def detect_device(self) -> dict:
         """Espone `detect_default_device()` a JS, chiamato una volta al
         caricamento della pagina (vedi app.js): usato SOLO per abilitare o
-        disabilitare le opzioni SAM 3.1/SAMURAI nel selettore backend
+        disabilitare le opzioni SAM 3.1/SAM2 nel selettore backend
         (richiedono device='cuda', vedi segmentation/sam_backend.py) --
         `Api.build_player()` fa comunque il controllo definitivo lato
         server, questo e' solo per non far apparire nella UI un'opzione
@@ -354,9 +354,9 @@ class Api:
             kwargs["device"] = detect_default_device()
         if kwargs["seg_backend"] != "yolo" and kwargs["device"] != "cuda":
             # rete di sicurezza server-side: il frontend gia' disabilita la
-            # scelta SAM 3.1/SAMURAI quando detect_device() non e' "cuda"
+            # scelta SAM 3.1/SAM2 quando detect_device() non e' "cuda"
             # (vedi app.js), ma qui rifiutiamo comunque esplicitamente
-            # invece di lasciare che Sam31Tracker/SamuraiTracker sollevino
+            # invece di lasciare che Sam31Tracker/Sam2Tracker sollevino
             # un ValueError meno chiaro dentro il thread di riproduzione.
             return {"ok": False, "error": (
                 f"Il backend '{kwargs['seg_backend']}' richiede una GPU CUDA "
@@ -477,8 +477,9 @@ class Api:
                 # PRIMA questa eccezione uccideva il thread daemon in
                 # silenzio: nessun errore in GUI, solo un traceback nel
                 # terminale (facile da non notare mentre si guarda la
-                # finestra, vedi la sessione di debug SAMURAI che ha
-                # scoperto questo). Ora si ferma la riproduzione e si manda
+                # finestra, vedi la sessione di debug con SAMURAI che ha
+                # scoperto questo, poi rimosso -- vedi sam2_estimation.py).
+                # Ora si ferma la riproduzione e si manda
                 # l'errore a JS -- onPipelineFrame() in app.js gia' sa
                 # mostrare un {"ok": false, "error": ...} nella status pill,
                 # non serve cambiare nulla lato frontend. Il traceback

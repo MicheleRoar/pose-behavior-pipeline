@@ -4,8 +4,8 @@ benchmark_backends_check.py
 Verifica `benchmark_backends.py`: la parte di aggregazione (durata delle
 tracce, numero di id grezzi, percentuale "brevi", fps di elaborazione) con
 un tracker FINTO iniettato al posto di `build_tracker()` (nessuna
-dipendenza da YOLO/SAM/SAMURAI reali, stessa filosofia degli altri
-demo/*_check.py), e la logica di skip per i metodi sam31/samurai quando il
+dipendenza da YOLO/SAM/SAM2 reali, stessa filosofia degli altri
+demo/*_check.py), e la logica di skip per i metodi sam31/sam2 quando il
 device rilevato non e' "cuda".
 
 Uso:
