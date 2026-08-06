@@ -255,6 +255,29 @@ def part12_seg_backend_defaults_to_yolo_and_passes_through():
           "('yolo'/600/50/None) e passano attraverso invariati quando specificati — OK")
 
 
+def part13_sam_redetect_every_and_text_prompt_defaults_and_passthrough():
+    kwargs_default = build_player_kwargs({"mode": "segmentation", "source": "v.mp4", "fps": "15"})
+    assert kwargs_default["sam_redetect_every"] is None
+    assert kwargs_default["sam_text_prompt"] is None
+
+    kwargs_set = build_player_kwargs({
+        "mode": "segmentation", "source": "v.mp4", "fps": "15",
+        "seg_backend": "sam31", "sam_redetect_every": "120", "sam_text_prompt": "person",
+    })
+    assert kwargs_set["sam_redetect_every"] == 120  # stringa -> int
+    assert kwargs_set["sam_text_prompt"] == "person"
+
+    # stringa vuota == non impostato, come max_people altrove (non "0"/"" letterale)
+    kwargs_empty = build_player_kwargs({
+        "mode": "segmentation", "source": "v.mp4", "fps": "15",
+        "sam_redetect_every": "", "sam_text_prompt": "",
+    })
+    assert kwargs_empty["sam_redetect_every"] is None
+    assert kwargs_empty["sam_text_prompt"] is None
+    print("Parte 13: sam_redetect_every/sam_text_prompt hanno default None e passano attraverso "
+          "invariati quando specificati (stringa vuota == non impostato) — OK")
+
+
 if __name__ == "__main__":
     part1_build_player_kwargs_mirrors_app_py_defaults()
     part1b_explicit_device_passes_through_unchanged()
@@ -267,6 +290,8 @@ if __name__ == "__main__":
     part8_build_status_uses_people_count_not_len_rows()
     part9_probe_video_metadata_missing_file_returns_none_not_zero()
     part10_probe_video_metadata_reads_real_container_metadata()
+    part12_seg_backend_defaults_to_yolo_and_passes_through()
+    part13_sam_redetect_every_and_text_prompt_defaults_and_passthrough()
     part11_build_status_carries_totals_and_max_people_for_the_timeline()
     part12_seg_backend_defaults_to_yolo_and_passes_through()
     print("\nVerifica completata senza errori: la logica pura di webui/api.py (parametri, codifica "

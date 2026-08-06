@@ -84,7 +84,9 @@ def run_one_method(method: str, *, source, fps: float, device: str,
                     model_scale: str = "s", conf_threshold: float = 0.1,
                     tracker_config: str = "bytetrack.yaml",
                     max_people: int | None = None,
-                    sam_chunk_size: int = 600, sam_overlap: int = 50) -> dict | None:
+                    sam_chunk_size: int = 600, sam_overlap: int = 50,
+                    sam_redetect_every: int | None = None,
+                    sam_text_prompt: str | None = None) -> dict | None:
     """Esegue UN metodo sul video e ritorna un dict di metriche, oppure
     `None` se il metodo va saltato (device incompatibile o libreria
     mancante -- vedi il docstring del modulo). Non solleva mai per uno di
@@ -105,6 +107,7 @@ def run_one_method(method: str, *, source, fps: float, device: str,
             max_people=max_people, sam_chunk_size=sam_chunk_size,
             sam_overlap=sam_overlap, sam_chunk_store_dir=None,
             sam_reseed_new_people=reseed,
+            sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
         )
     except ImportError as exc:
         print(f"[{method}] saltato: {exc}")
@@ -189,6 +192,13 @@ def main():
                               "(molto maggiore del numero reale = identita' perse/reinventate)")
     parser.add_argument("--sam-chunk-size", type=int, default=600)
     parser.add_argument("--sam-overlap", type=int, default=50)
+    parser.add_argument("--sam-redetect-every", type=int, default=None,
+                         help="Ri-esegue YOLO ogni N frame dentro il chunk invece che solo "
+                              "all'inizio (solo sam31/sam2) -- vedi ChunkedVideoPredictorBackend "
+                              "in segmentation/sam_backend.py")
+    parser.add_argument("--sam-text-prompt", default=None,
+                         help="Prompt testuale per la scoperta persone via SAM 3.1 "
+                              "(es. 'person'), svincolata da YOLO -- ignorato per gli altri metodi")
     parser.add_argument("--out", default="benchmark_results.csv")
     args = parser.parse_args()
 
@@ -198,6 +208,7 @@ def main():
         model_scale=args.scale, conf_threshold=args.conf_threshold,
         tracker_config=args.tracker, max_people=args.max_people,
         sam_chunk_size=args.sam_chunk_size, sam_overlap=args.sam_overlap,
+        sam_redetect_every=args.sam_redetect_every, sam_text_prompt=args.sam_text_prompt,
     )
     if df.empty:
         print("Nessun metodo eseguito (tutti saltati) -- niente da salvare.")

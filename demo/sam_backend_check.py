@@ -80,8 +80,10 @@ class _FakePredictor:
     def add_new_points_or_box(self, state, *, frame_idx, obj_id, box):
         state.seeds[obj_id] = box
 
-    def propagate_in_video(self, state):
-        for local_idx in range(state.num_frames):
+    def propagate_in_video(self, state, *, start_frame_idx=0, max_frame_num_to_track=None):
+        end = state.num_frames if max_frame_num_to_track is None \
+            else min(state.num_frames, start_frame_idx + max_frame_num_to_track)
+        for local_idx in range(start_frame_idx, end):
             obj_ids = list(state.seeds.keys())
             masks = [_box_to_mask(state.seeds[oid], self.frame_shape) for oid in obj_ids]
             yield local_idx, obj_ids, masks
@@ -338,6 +340,64 @@ def part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input():
     print("PASS part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input")
 
 
+def part7_redetect_every_finds_new_person_mid_chunk_not_just_at_boundary():
+    # Il problema segnalato da Michele confrontando YOLO+ByteTrack (rileva
+    # su OGNI frame) con Sam2Tracker (rilevava solo al frame di ancoraggio
+    # del chunk, una volta ogni chunk_size frame): una persona che entra a
+    # META' chunk restava invisibile fino al chunk SUCCESSIVO (o per
+    # sempre, se il video finiva prima). Qui: un solo chunk di 20 frame,
+    # redetect_every=5 -> A rilevata al bootstrap (frame 0), B rilevata
+    # dalla ri-detection al frame 10 (a meta' del chunk, non al suo
+    # confine) -- verifica che B compaia esattamente da li' in poi, non
+    # solo al prossimo chunk (che qui non esiste nemmeno: e' un solo chunk).
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        video_path = os.path.join(tmp_dir, "synthetic.mp4")
+        _make_synthetic_video(video_path)
+        backend = _FakeBackend(
+            device="cuda", chunk_size=TOTAL_FRAMES, overlap=0, redetect_every=5,
+            # chiamate a _detect_people: bootstrap (frame 0) + una ogni
+            # finestra da 5 frame (a 5, 10, 15) -- 4 in tutto
+            detect_schedule=[[BOX_A], [], [BOX_B], []],
+        )
+
+        results = list(backend.run(video_path))
+        ids_per_frame = {r.frame_index: {p[0] for p in r.people} for r in results}
+
+        assert all(len(ids_per_frame[f]) == 1 for f in range(0, 10)), \
+            "prima della ri-detection al frame 10, deve esserci solo A"
+        assert all(len(ids_per_frame[f]) == 2 for f in range(10, TOTAL_FRAMES)), \
+            "dal frame 10 in poi (ri-detection MID-CHUNK, non a un confine di chunk), deve comparire anche B"
+        print("PASS part7_redetect_every_finds_new_person_mid_chunk_not_just_at_boundary")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def part7b_redetect_every_ignored_when_reseed_new_people_false():
+    # La ri-detection periodica e' comunque un modo di scoprire persone
+    # NUOVE via YOLO -- deve rispettare reseed_new_people=False (condizione
+    # "SAM puro") esattamente come il reseeding al confine di chunk: con
+    # reseed_new_people=False, redetect_every non deve MAI chiamare
+    # _detect_people() dentro il chunk (solo il bootstrap del chunk 0).
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        video_path = os.path.join(tmp_dir, "synthetic.mp4")
+        _make_synthetic_video(video_path)
+        backend = _FakeBackend(
+            device="cuda", chunk_size=TOTAL_FRAMES, overlap=0, redetect_every=5,
+            reseed_new_people=False,
+            detect_schedule=[[BOX_A]],  # un solo elemento: se venisse chiamato di piu', IndexError
+        )
+
+        results = list(backend.run(video_path))
+        ids_per_frame = {r.frame_index: {p[0] for p in r.people} for r in results}
+        assert all(len(ids) == 1 for ids in ids_per_frame.values()), \
+            "con reseed_new_people=False nessuna ri-detection deve aggiungere B, anche con redetect_every impostato"
+        print("PASS part7b_redetect_every_ignored_when_reseed_new_people_false")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
 def main():
     part1_ids_stay_continuous_across_chunks()
     part2_new_person_mid_video_gets_fresh_id_with_expected_lag()
@@ -347,6 +407,8 @@ def main():
     part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk()
     part6b_reseed_new_people_false_never_adds_the_late_entrant()
     part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input()
+    part7_redetect_every_finds_new_person_mid_chunk_not_just_at_boundary()
+    part7b_redetect_every_ignored_when_reseed_new_people_false()
     print("\nTutti i test di sam_backend.py (con predictor finto) sono passati.")
 
 

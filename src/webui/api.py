@@ -115,7 +115,11 @@ def build_player_kwargs(params: dict) -> dict:
     lato JS (vedi `Api.detect_device()`) E qui in `Api.build_player()`
     come rete di sicurezza, non in questa funzione pura che non conosce
     ancora il device risolto), "sam_chunk_size", "sam_overlap" (int,
-    solo con seg_backend != "yolo").
+    solo con seg_backend != "yolo"), "sam_redetect_every" (int o None/"",
+    solo con seg_backend != "yolo" -- ri-detection periodica dentro il
+    chunk, vedi sam_backend.py), "sam_text_prompt" (stringa o None/"",
+    solo con seg_backend == "sam31" -- prompt testuale SAM 3, vedi
+    sam31_estimation.py).
     """
     mode = params.get("mode")
     if mode not in MODE_KEYS:
@@ -159,6 +163,9 @@ def build_player_kwargs(params: dict) -> dict:
     sam_chunk_size = int(params.get("sam_chunk_size") or 600)
     sam_overlap = int(params.get("sam_overlap") or 50)
     sam_chunk_store_dir = params.get("sam_chunk_store_dir") or None
+    sam_redetect_every_raw = params.get("sam_redetect_every")
+    sam_redetect_every = int(sam_redetect_every_raw) if sam_redetect_every_raw else None
+    sam_text_prompt = params.get("sam_text_prompt") or None
 
     return dict(
         mode=mode, source=params["source"], fps=fps,
@@ -172,7 +179,8 @@ def build_player_kwargs(params: dict) -> dict:
         with_mediapipe_pose=with_mediapipe_pose,
         max_people=max_people,
         seg_backend=seg_backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
-        sam_chunk_store_dir=sam_chunk_store_dir,
+        sam_chunk_store_dir=sam_chunk_store_dir, sam_redetect_every=sam_redetect_every,
+        sam_text_prompt=sam_text_prompt,
     )
 
 

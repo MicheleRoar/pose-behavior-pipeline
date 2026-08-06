@@ -79,6 +79,7 @@ def iter_pipeline_frames(
     seg_model: str = "yolo26s-seg.pt", with_seg_reid: bool = False,
     seg_backend: str = "yolo", sam_chunk_size: int = 600, sam_overlap: int = 50,
     sam_chunk_store_dir: str | None = None,
+    sam_redetect_every: int | None = None, sam_text_prompt: str | None = None,
     # -- pose dentro la maschera, MediaPipe (usata solo se mode e'
     # "segmentation" -- vedi pose/mediapipe_pose.py e _iter_segmentation) --
     with_mediapipe_pose: bool = False,
@@ -113,6 +114,7 @@ def iter_pipeline_frames(
             conf_threshold=conf_threshold, tracker_config=tracker_config,
             seg_backend=seg_backend, sam_chunk_size=sam_chunk_size,
             sam_overlap=sam_overlap, sam_chunk_store_dir=sam_chunk_store_dir,
+            sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
         )
     elif mode == "both":
         yield from _iter_both(
@@ -127,6 +129,7 @@ def iter_pipeline_frames(
             conf_threshold=conf_threshold, tracker_config=tracker_config,
             seg_backend=seg_backend, sam_chunk_size=sam_chunk_size,
             sam_overlap=sam_overlap, sam_chunk_store_dir=sam_chunk_store_dir,
+            sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
         )
     else:
         raise ValueError(f"mode sconosciuto: {mode!r} (atteso 'pose'|'segmentation'|'both')")
@@ -158,7 +161,8 @@ def _iter_segmentation(*, source, fps, device, seg_model, max_people,
                         pose_landmarker_model="pose_landmarker_lite.task",
                         conf_threshold, tracker_config,
                         seg_backend="yolo", sam_chunk_size=600, sam_overlap=50,
-                        sam_chunk_store_dir=None) -> Iterator[RunnerFrame]:
+                        sam_chunk_store_dir=None, sam_redetect_every=None,
+                        sam_text_prompt=None) -> Iterator[RunnerFrame]:
     if with_seg_reid and max_people is None:
         raise ValueError("with_seg_reid richiede max_people (il tetto rigido ha senso "
                           "solo con un numero di persone noto)")
@@ -172,7 +176,8 @@ def _iter_segmentation(*, source, fps, device, seg_model, max_people,
         max_people=max_people, seg_reidentifier=seg_reidentifier,
         mediapipe_pose_estimator=mediapipe_pose_estimator,
         backend=seg_backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
-        sam_chunk_store_dir=sam_chunk_store_dir,
+        sam_chunk_store_dir=sam_chunk_store_dir, sam_redetect_every=sam_redetect_every,
+        sam_text_prompt=sam_text_prompt,
     ):
         # In segmentazione non c'e' finestra scorrevole: una riga per persona
         # tracciata per frame, quindi len(rows) e' gia' il conteggio esatto.
@@ -185,7 +190,8 @@ def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
                with_reid, blur_faces, window_seconds,
                seg_model, with_seg_reid, max_people, conf_threshold,
                tracker_config, seg_backend="yolo", sam_chunk_size=600,
-               sam_overlap=50, sam_chunk_store_dir=None) -> Iterator[RunnerFrame]:
+               sam_overlap=50, sam_chunk_store_dir=None,
+               sam_redetect_every=None, sam_text_prompt=None) -> Iterator[RunnerFrame]:
     """Fa girare le due pipeline in parallelo e disegna lo scheletro pose
     (+ mani/viso se attivi) DIRETTAMENTE sul frame gia' annotato dalla
     segmentazione, invece di affiancare due pannelli -- vedi il docstring
@@ -222,7 +228,8 @@ def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
         conf_threshold=conf_threshold, tracker_config=tracker_config,
         max_people=max_people, seg_reidentifier=seg_reidentifier,
         backend=seg_backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
-        sam_chunk_store_dir=sam_chunk_store_dir,
+        sam_chunk_store_dir=sam_chunk_store_dir, sam_redetect_every=sam_redetect_every,
+        sam_text_prompt=sam_text_prompt,
     )
 
     # zip() (non zip_longest): se le due sorgenti indipendenti finissero con

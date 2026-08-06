@@ -47,7 +47,9 @@ BACKEND_KEYS = {"yolo", "sam31", "sam2"}
 def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold: float,
                     tracker_config: str, max_people: int | None,
                     sam_chunk_size: int, sam_overlap: int, sam_chunk_store_dir: str | None,
-                    sam_reseed_new_people: bool = True):
+                    sam_reseed_new_people: bool = True,
+                    sam_redetect_every: int | None = None,
+                    sam_text_prompt: str | None = None):
     """Istanzia il tracker giusto in base a `backend` -- unico punto in cui
     la scelta YOLO/SAM 3.1/SAM2 si traduce in una classe concreta.
     Tutti e tre rispettano lo stesso protocollo `SegmentationBackend`
@@ -61,7 +63,21 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
     False da' la condizione "SAM puro" per il confronto tra metodi (vedi
     benchmark_backends.py) -- YOLO propone i box SOLO al primo frame del
     video, mai per scoprire persone nuove ai confini dei chunk successivi.
-    Default True (comportamento gia' in uso finora, invariato)."""
+    Default True (comportamento gia' in uso finora, invariato).
+
+    `sam_redetect_every` (solo sam31/sam2): richiama YOLO ogni N frame
+    DENTRO il chunk, non solo al suo confine -- risolve il problema
+    "sam2 produce molte meno maschere di yolo+bytetrack sullo stesso
+    video" (YOLO+ByteTrack rileva su ogni frame, altrimenti SAM lo fa una
+    volta ogni `sam_chunk_size` frame), vedi sam_backend.py. `None`
+    (default) = comportamento originale, una sola detection per chunk.
+
+    `sam_text_prompt` (SOLO sam31, ignorato altrove -- SAM2 non ha prompt
+    testuale): se impostato (es. "person"), SAM 3.1 scopre le persone DA
+    SOLO nel chunk invece di affidarsi a YOLO come proposer -- stessa
+    tecnica della pipeline di produzione CHUV (`psifx video tracking sam3
+    inference --text_prompt`), vedi sam31_estimation.py per i dettagli e i
+    limiti di certezza sull'API reale."""
     if backend == "yolo":
         return SegTracker(model_name=model_name, device=device,
                            conf_threshold=conf_threshold, tracker=tracker_config,
@@ -71,13 +87,15 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
         return Sam31Tracker(device=device, conf_threshold=conf_threshold,
                              chunk_size=sam_chunk_size, overlap=sam_overlap,
                              chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
-                             reseed_new_people=sam_reseed_new_people)
+                             reseed_new_people=sam_reseed_new_people,
+                             redetect_every=sam_redetect_every, text_prompt=sam_text_prompt)
     if backend == "sam2":
         from segmentation.sam2_estimation import Sam2Tracker
         return Sam2Tracker(device=device, conf_threshold=conf_threshold,
                             chunk_size=sam_chunk_size, overlap=sam_overlap,
                             chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
-                            reseed_new_people=sam_reseed_new_people)
+                            reseed_new_people=sam_reseed_new_people,
+                            redetect_every=sam_redetect_every)
     raise ValueError(f"backend sconosciuto: {backend!r} (atteso 'yolo'|'sam31'|'sam2')")
 
 
@@ -90,7 +108,9 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
                               backend: str = "yolo",
                               sam_chunk_size: int = 600, sam_overlap: int = 50,
                               sam_chunk_store_dir: str | None = None,
-                              sam_reseed_new_people: bool = True):
+                              sam_reseed_new_people: bool = True,
+                              sam_redetect_every: int | None = None,
+                              sam_text_prompt: str | None = None):
     """Generatore che contiene TUTTA la logica per-frame della pipeline di
     segmentazione (tracking, re-id opzionale, pose opzionale per maschera,
     disegno overlay), condiviso da `run_segmentation()` (CLI, sotto) e da
@@ -127,6 +147,7 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
         tracker_config=tracker_config, max_people=max_people,
         sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
         sam_chunk_store_dir=sam_chunk_store_dir, sam_reseed_new_people=sam_reseed_new_people,
+        sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
     )
 
     for frame_result in tracker.run(source=source):
@@ -190,7 +211,9 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
                       backend: str = "yolo",
                       sam_chunk_size: int = 600, sam_overlap: int = 50,
                       sam_chunk_store_dir: str | None = None,
-                      sam_reseed_new_people: bool = True) -> pd.DataFrame:
+                      sam_reseed_new_people: bool = True,
+                      sam_redetect_every: int | None = None,
+                      sam_text_prompt: str | None = None) -> pd.DataFrame:
     """CLI: consuma `iter_segmentation_frames()` (unica fonte della logica
     per-frame, condivisa con la GUI), gestisce la finestra cv2 (se
     show_window) e stampa le statistiche finali di churn/re-id."""
@@ -222,6 +245,7 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
         mediapipe_pose_estimator=mediapipe_pose_estimator,
         backend=backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
         sam_chunk_store_dir=sam_chunk_store_dir, sam_reseed_new_people=sam_reseed_new_people,
+        sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
     ):
         n_frames = frame_index + 1
         for raw_id in raw_ids:
@@ -317,6 +341,19 @@ def main():
                               "al primo frame del video). Da' la condizione 'SAM puro' per "
                               "confrontare con la versione di default (con reseeding) -- "
                               "vedi benchmark_backends.py e segmentation/sam_backend.py.")
+    parser.add_argument("--sam-redetect-every", type=int, default=None,
+                         help="Solo con --backend sam31/sam2: richiama YOLO ogni N frame "
+                              "DENTRO il chunk (non solo al suo confine) per scoprire persone "
+                              "nuove piu' spesso -- utile se sam31/sam2 producono molte meno "
+                              "maschere di yolo+bytetrack sullo stesso video (YOLO+ByteTrack "
+                              "rileva su ogni frame). Default: nessuna ri-detection intermedia.")
+    parser.add_argument("--sam-text-prompt", default=None,
+                         help="Solo con --backend sam31 (SAM2 non ha prompt testuale): concetto "
+                              "aperto (es. 'person') con cui SAM 3.1 scopre le persone DA SOLO "
+                              "nel chunk, senza YOLO come proposer -- stessa tecnica della "
+                              "pipeline CHUV (psifx --text_prompt). Vedi sam31_estimation.py "
+                              "per i limiti di certezza sull'API reale (non ancora verificata "
+                              "su una macchina CUDA in questo progetto).")
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
@@ -329,7 +366,8 @@ def main():
                       out_csv=args.out, show_window=not args.no_window,
                       backend=args.backend, sam_chunk_size=args.sam_chunk_size,
                       sam_overlap=args.sam_overlap, sam_chunk_store_dir=args.sam_chunk_store_dir,
-                      sam_reseed_new_people=not args.sam_no_reseed_new_people)
+                      sam_reseed_new_people=not args.sam_no_reseed_new_people,
+                      sam_redetect_every=args.sam_redetect_every, sam_text_prompt=args.sam_text_prompt)
 
 
 if __name__ == "__main__":

@@ -148,6 +148,11 @@
     const showChunkFields = archSelect.value === "sam31" || archSelect.value === "sam2";
     $("sam-chunk-fields").classList.toggle("hidden", !showChunkFields);
     $("arch-hint").classList.toggle("hidden", cudaAvailable);
+
+    // Il text-prompt (svincolato da YOLO) esiste solo per SAM 3.1: SAM2 e
+    // SAMURAI non hanno concept-prompting, richiedono sempre un box iniziale.
+    const showTextPrompt = archSelect.value === "sam31" && cudaAvailable && segCapable;
+    $("sam31-text-prompt-field").classList.toggle("hidden", !showTextPrompt);
   }
 
   const FLOW_ICONS = {
@@ -233,6 +238,8 @@
       seg_backend: $("arch-select").value,
       sam_chunk_size: $("sam-chunk-size-input").value,
       sam_overlap: $("sam-overlap-input").value,
+      sam_redetect_every: $("sam-redetect-every-input").value,
+      sam_text_prompt: $("sam-text-prompt-input").value,
     };
   }
 
@@ -505,6 +512,7 @@
       "reid-toggle", "hands-toggle", "eyes-toggle", "mouth-toggle",
       "eyebrows-toggle", "head-movement-toggle", "mediapipe-pose-toggle",
       "sam-chunk-size-input", "sam-overlap-input",
+      "sam-redetect-every-input", "sam-text-prompt-input",
     ];
     invalidatingIds.forEach((id) => {
       $(id).addEventListener("change", () => {
