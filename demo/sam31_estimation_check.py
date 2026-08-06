@@ -134,7 +134,10 @@ class _FakeSam3Predictor:
             raise RuntimeError(f"invalid stream request type: {req_type}")
         session = self._sessions[request["session_id"]]
         start = request["start_frame_index"]
-        max_n = request["max_frame_num_to_track"]
+        # Chiave OMESSA (non None esplicito) quando non impostata -- vedi
+        # sam31_estimation.py::_propagate() -- .get() invece di [] per
+        # rispecchiare esattamente cosa manda il codice reale.
+        max_n = request.get("max_frame_num_to_track")
         end = session["num_frames"] if max_n is None else min(session["num_frames"], start + max_n)
         for local_idx in range(start, end):
             obj_ids = list(session["seeds"].keys())

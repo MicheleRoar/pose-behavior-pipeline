@@ -249,18 +249,24 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
         `handle_request()` resta corretto solo per le richieste a risposta
         singola (`start_session`, `add_prompt`, gia' confermate). Nomi
         esatti dei campi della richiesta di streaming (`start_frame_index`
-        invece di `start_frame_idx`, `propagation_direction`) NON
-        confermati con la stessa certezza -- dedotti per coerenza con la
-        chiave `frame_index` gia' confermata in `add_prompt`: se il
-        prossimo errore e' di nuovo un "invalid request"/parametro
-        sconosciuto, e' il primo punto da rivedere."""
-        stream = predictor.handle_stream_request(request=dict(
-            type="propagate_in_video", session_id=state,
-            start_frame_index=start_frame_idx, max_frame_num_to_track=max_frame_num_to_track,
-            propagation_direction="forward",
-        ))
+        invece di `start_frame_idx`, `propagation_direction`) -- dedotti
+        per coerenza con la chiave `frame_index` gia' confermata in
+        `add_prompt`, poi corroborati indipendentemente (stessi nomi)
+        confrontando col predictor ufficiale SAM 3: se il prossimo errore
+        e' di nuovo un "invalid request"/parametro sconosciuto, e' il
+        primo punto da rivedere. `max_frame_num_to_track` viene OMESSO
+        dalla richiesta se `None` invece di passarlo esplicitamente
+        (difensivo: se l'API valida i tipi rigidamente, un `None`
+        esplicito potrebbe rompersi dove una chiave assente andrebbe al
+        default)."""
+        request = {
+            "type": "propagate_in_video", "session_id": state,
+            "propagation_direction": "forward", "start_frame_index": start_frame_idx,
+        }
+        if max_frame_num_to_track is not None:
+            request["max_frame_num_to_track"] = max_frame_num_to_track
         local_to_global = self._local_to_global
-        for response in stream:
+        for response in predictor.handle_stream_request(request=request):
             outputs = response.get("outputs", response)
             frame_idx = response.get("frame_index", outputs.get("frame_index"))
             obj_ids = outputs.get("out_obj_ids", outputs.get("object_ids", outputs.get("obj_ids")))
@@ -276,7 +282,7 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
                 oid = int(oid)
                 global_id = local_to_global.get(oid, oid)
                 remapped[global_id] = _to_boolean_mask(mask)
-            yield frame_idx, remapped
+            yield int(frame_idx), remapped
 
     # ------------------------------------------------------------ seeding
     def _seed_new_chunk(self, predictor, state, *, chunk_frames: list[np.ndarray],
