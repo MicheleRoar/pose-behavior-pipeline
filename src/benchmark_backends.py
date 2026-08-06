@@ -49,15 +49,43 @@ stesso comando su macchine diverse (Mac senza CUDA: gira solo "yolo";
 macchina CUDA con solo SAM2 installato: le varianti "sam31*" vengono
 saltate).
 
+Sweep di chunk_size/overlap/redetect_every
+-------------------------------------------
+Nato da un problema concreto: quale combinazione di questi tre parametri
+(vedi segmentation/sam_backend.py::ChunkedVideoPredictorBackend) va bene
+per LE TUE registrazioni (durata, frequenza con cui i bambini entrano/
+escono) non si puo' indovinare a tavolino. `--sam-chunk-size`/
+`--sam-overlap`/`--sam-redetect-every` accettano ORA una lista separata
+da virgole invece di un solo valore (es. `--sam-chunk-size 300,600`):
+si esegue automaticamente il prodotto cartesiano di tutte le combinazioni,
+UNA SOLA VOLTA per metodo se non specifichi liste (comportamento
+originale, invariato). La sweep si applica solo ai metodi che usano
+davvero questi parametri (`sam31`/`sam2*`) -- per "yolo" (che li ignora)
+gira una volta sola, non ripetuto per ogni combinazione. Un elemento
+vuoto tra le virgole in `--sam-redetect-every` (es. `100,`) include anche
+il caso "disattivato" nello stesso confronto. Ogni riga del CSV riporta i
+parametri usati (`sam_chunk_size`/`sam_overlap`/`sam_redetect_every`,
+`None` per "yolo" dove non pertinenti) e un `run_label` leggibile, cosi'
+si puo' ordinare/filtrare per `n_raw_ids`/`short_lived_ids_pct` e scegliere
+la combinazione migliore invece di tirare a indovinare.
+
 Uso:
     python benchmark_backends.py --source video.mp4 --fps 15 \\
         --methods yolo,sam31,sam31-noreseed,sam2,sam2-noreseed \\
         --max-people 3 --out benchmark_results.csv
+
+    # sweep: 2 chunk_size x 2 overlap x 3 redetect_every (incluso "off")
+    # per sam31, in aggiunta a un singolo run yolo -- 12 righe totali
+    python benchmark_backends.py --source video.mp4 --fps 15 \\
+        --methods yolo,sam31 --sam-text-prompt person \\
+        --sam-chunk-size 300,600 --sam-overlap 30,50 \\
+        --sam-redetect-every 100,200, --out sweep.csv
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import time
 from collections import defaultdict
 
@@ -127,10 +155,17 @@ def run_one_method(method: str, *, source, fps: float, device: str,
     short_lived = sum(1 for v in lifespans if v < SHORT_LIVED_THRESHOLD_FRAMES)
     median_frames = lifespans[len(lifespans) // 2] if lifespans else 0
 
+    # Riportati nell'output anche per un run singolo (non solo in sweep):
+    # None per "yolo", che li riceve ma li ignora (SegTracker non li usa)
+    # -- cosi' il CSV non lascia intendere che siano stati applicati.
+    sam_params_relevant = backend != "yolo"
     return {
         "method": method,
         "backend": backend,
         "reseed_new_people": reseed,
+        "sam_chunk_size": sam_chunk_size if sam_params_relevant else None,
+        "sam_overlap": sam_overlap if sam_params_relevant else None,
+        "sam_redetect_every": sam_redetect_every if sam_params_relevant else None,
         "n_frames": n_frames,
         "n_raw_ids": n_ids,
         "lifespan_min_frames": lifespans[0] if lifespans else 0,
@@ -147,22 +182,74 @@ def run_one_method(method: str, *, source, fps: float, device: str,
 
 
 def run_benchmark(methods: list[str], *, source, fps: float, device: str | None = None,
+                   sam_chunk_sizes: list[int] = (600,), sam_overlaps: list[int] = (50,),
+                   sam_redetect_everys: list[int | None] = (None,),
                    **kwargs) -> pd.DataFrame:
     """Esegue tutti i `methods` (nell'ordine dato) sullo stesso `source` e
-    ritorna un DataFrame con una riga per metodo NON saltato. Colonna
+    ritorna un DataFrame con una riga per combinazione NON saltata. Colonna
     mancante di un metodo saltato: semplicemente assente dal risultato,
     non una riga con valori nulli -- il chiamante vede subito quanti/quali
-    metodi hanno davvero girato."""
+    metodi hanno davvero girato.
+
+    `sam_chunk_sizes`/`sam_overlaps`/`sam_redetect_everys` (liste, default
+    un solo valore ciascuna -- comportamento originale invariato se non
+    specificate): per i metodi che usano davvero questi parametri
+    (`backend` != "yolo") si esegue il prodotto cartesiano di tutte le
+    combinazioni, vedi il docstring del modulo per il perche' (nessun modo
+    di sapere a priori quale combinazione va bene per una registrazione
+    specifica). Per "yolo" (che li ignora) si esegue UN SOLO run, non
+    ripetuto per ogni combinazione -- sprecherebbe tempo per righe
+    identiche."""
     device = device or detect_default_device()
     rows = []
     for method in methods:
         if method not in METHOD_PRESETS:
             raise ValueError(f"metodo sconosciuto: {method!r} (atteso uno tra {sorted(METHOD_PRESETS)})")
-        print(f"--- {method} ---")
-        result = run_one_method(method, source=source, fps=fps, device=device, **kwargs)
-        if result is not None:
-            rows.append(result)
+        backend = METHOD_PRESETS[method]["backend"]
+        sweeping = backend != "yolo"
+        combos = (
+            list(itertools.product(sam_chunk_sizes, sam_overlaps, sam_redetect_everys))
+            if sweeping else [(sam_chunk_sizes[0], sam_overlaps[0], sam_redetect_everys[0])]
+        )
+        multi_combo = sweeping and len(combos) > 1
+        for chunk_size, overlap, redetect_every in combos:
+            if sweeping and chunk_size <= overlap:
+                print(f"[{method}] saltata combinazione non valida: "
+                      f"chunk_size={chunk_size} <= overlap={overlap}")
+                continue
+            label = method
+            if multi_combo:
+                label = f"{method}[cs={chunk_size},ov={overlap},rd={redetect_every}]"
+            print(f"--- {label} ---")
+            result = run_one_method(
+                method, source=source, fps=fps, device=device,
+                sam_chunk_size=chunk_size, sam_overlap=overlap, sam_redetect_every=redetect_every,
+                **kwargs,
+            )
+            if result is not None:
+                result["run_label"] = label
+                rows.append(result)
     return pd.DataFrame(rows)
+
+
+def _parse_int_list(raw: str, *, allow_none: bool = False) -> list[int | None]:
+    """'600,300' -> [600, 300]. Un elemento vuoto tra le virgole (es.
+    '100,') diventa `None` se `allow_none=True` -- serve a includere il
+    caso "disattivato" (redetect_every=None) nella stessa sweep invece di
+    dover lanciare un comando separato. Stringa vuota/tutta vuota ->
+    `[None]` se `allow_none`, altrimenti lista vuota (errore a valle, un
+    parametro senza `allow_none` deve avere almeno un valore)."""
+    values: list[int | None] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part == "":
+            if allow_none:
+                values.append(None)
+            continue
+        values.append(int(part))
+    if not values and allow_none:
+        values = [None]
+    return values
 
 
 def main():
@@ -190,11 +277,20 @@ def main():
                          help="Numero noto di partecipanti alla sessione, se lo conosci -- "
                               "usato come tetto per YOLO e per interpretare n_raw_ids "
                               "(molto maggiore del numero reale = identita' perse/reinventate)")
-    parser.add_argument("--sam-chunk-size", type=int, default=600)
-    parser.add_argument("--sam-overlap", type=int, default=50)
-    parser.add_argument("--sam-redetect-every", type=int, default=None,
-                         help="Ri-esegue YOLO ogni N frame dentro il chunk invece che solo "
-                              "all'inizio (solo sam31/sam2) -- vedi ChunkedVideoPredictorBackend "
+    parser.add_argument("--sam-chunk-size", default="600",
+                         help="Uno o piu' valori separati da virgola (es. '300,600') -- con "
+                              "piu' di un valore si esegue la sweep su tutte le combinazioni "
+                              "con --sam-overlap/--sam-redetect-every (solo sam31/sam2, vedi "
+                              "il docstring del modulo). Default: '600' (un solo run, come prima)")
+    parser.add_argument("--sam-overlap", default="50",
+                         help="Come --sam-chunk-size, uno o piu' valori separati da virgola. "
+                              "Default: '50'")
+    parser.add_argument("--sam-redetect-every", default="",
+                         help="Uno o piu' valori separati da virgola (es. '100,200'). Un "
+                              "elemento vuoto tra le virgole (es. '100,') include anche il caso "
+                              "'disattivato' nella stessa sweep. Default: '' (disattivato, un "
+                              "solo run, come prima) -- ri-esegue YOLO ogni N frame dentro il "
+                              "chunk invece che solo all'inizio, vedi ChunkedVideoPredictorBackend "
                               "in segmentation/sam_backend.py")
     parser.add_argument("--sam-text-prompt", default=None,
                          help="Prompt testuale per la scoperta persone via SAM 3.1 "
@@ -203,12 +299,15 @@ def main():
     args = parser.parse_args()
 
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    sam_chunk_sizes = _parse_int_list(args.sam_chunk_size)
+    sam_overlaps = _parse_int_list(args.sam_overlap)
+    sam_redetect_everys = _parse_int_list(args.sam_redetect_every, allow_none=True)
     df = run_benchmark(
         methods, source=args.source, fps=args.fps, device=args.device,
         model_scale=args.scale, conf_threshold=args.conf_threshold,
         tracker_config=args.tracker, max_people=args.max_people,
-        sam_chunk_size=args.sam_chunk_size, sam_overlap=args.sam_overlap,
-        sam_redetect_every=args.sam_redetect_every, sam_text_prompt=args.sam_text_prompt,
+        sam_chunk_sizes=sam_chunk_sizes, sam_overlaps=sam_overlaps,
+        sam_redetect_everys=sam_redetect_everys, sam_text_prompt=args.sam_text_prompt,
     )
     if df.empty:
         print("Nessun metodo eseguito (tutti saltati) -- niente da salvare.")
