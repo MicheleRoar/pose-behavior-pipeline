@@ -67,14 +67,22 @@ CUDA reale di Michele, 2026-08-06 -- vedi sotto per cosa e' cambiato):
   prima prova YOLO non ha trovato nessuno sul frame di ancoraggio, quindi
   questo percorso non e' mai stato eseguito): resta un'estrapolazione per
   analogia con SAM2. Primo punto da verificare se emerge un problema qui.
-- Struttura esatta di `response["outputs"]` per `propagate_in_video`
-  (lista di frame, o altro) -- ANCORA NON confermata (il README/la prova
-  reale coprono solo la singola chiamata `add_prompt`, non la
-  propagazione multi-frame): il codice sotto prova prima le chiavi reali
-  appena confermate (`out_obj_ids`/`out_binary_masks`), poi quelle vecchie
+- `propagate_in_video` NON passa da `handle_request()` -- CONFERMATO su
+  una run reale (Michele, macchina CUDA, 2026-08-06): il dispatcher SAM 3
+  ha sollevato `RuntimeError("invalid request type: propagate_in_video")`.
+  La propagazione multi-frame usa un metodo STREAMING separato,
+  `handle_stream_request()`, che ritorna un generatore (una risposta per
+  frame), vedi `_propagate()` sotto. `handle_request()` resta corretto
+  solo per `start_session`/`add_prompt` (risposta singola, confermato).
+- Nomi esatti dei campi della richiesta di streaming (`start_frame_index`
+  invece di `start_frame_idx`, `propagation_direction="forward"`) e forma
+  esatta di ogni risposta del generatore -- NON confermati con la stessa
+  certezza del cambio di metodo: dedotti per coerenza con la chiave
+  `frame_index` gia' confermata in `add_prompt`. Il codice prova prima le
+  chiavi reali gia' confermate per `add_prompt` (`out_obj_ids`/
+  `out_binary_masks`, per analogia riusate anche qui), poi quelle vecchie
   come fallback, e solleva un errore esplicito con le chiavi trovate se
-  nessuna delle due corrisponde -- invece di indovinare di nuovo in
-  silenzio.
+  nessuna corrisponde -- invece di indovinare di nuovo in silenzio.
 
 Modalita' prompt testuale (`text_prompt`, es. "person")
 -----------------------------------------------------------
@@ -230,27 +238,38 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
         mappa costruita da `_seed_new_chunk()`. Un id assente dalla mappa
         (caso box-mode, o box-prompt di `redetect_every`) passa invariato:
         e' gia' l'id globale, essendo stato scelto da noi al momento del
-        seeding (vedi `_add_box_prompt`)."""
-        response = predictor.handle_request(request=dict(
+        seeding (vedi `_add_box_prompt`).
+
+        CONFERMATO su una run reale (Michele, macchina CUDA, 2026-08-06):
+        `handle_request()` NON riconosce `type="propagate_in_video"` --
+        il dispatcher SAM 3 solleva `RuntimeError("invalid request type")`.
+        La propagazione multi-frame passa da un metodo STREAMING separato,
+        `handle_stream_request()`, che ritorna un GENERATORE (una risposta
+        per frame) invece di un unico dict con una lista "outputs" --
+        `handle_request()` resta corretto solo per le richieste a risposta
+        singola (`start_session`, `add_prompt`, gia' confermate). Nomi
+        esatti dei campi della richiesta di streaming (`start_frame_index`
+        invece di `start_frame_idx`, `propagation_direction`) NON
+        confermati con la stessa certezza -- dedotti per coerenza con la
+        chiave `frame_index` gia' confermata in `add_prompt`: se il
+        prossimo errore e' di nuovo un "invalid request"/parametro
+        sconosciuto, e' il primo punto da rivedere."""
+        stream = predictor.handle_stream_request(request=dict(
             type="propagate_in_video", session_id=state,
-            start_frame_idx=start_frame_idx, max_frame_num_to_track=max_frame_num_to_track,
+            start_frame_index=start_frame_idx, max_frame_num_to_track=max_frame_num_to_track,
+            propagation_direction="forward",
         ))
         local_to_global = self._local_to_global
-        for frame_out in response["outputs"]:
-            frame_idx = frame_out.get("frame_index", frame_out.get("frame_idx"))
-            # Come per _add_text_prompt: prova prima le chiavi REALI appena
-            # confermate (out_obj_ids/out_binary_masks, eventualmente
-            # annidate sotto "outputs" come nella risposta di add_prompt),
-            # poi le vecchie come fallback -- vedi il docstring del modulo,
-            # questa forma per propagate_in_video resta NON confermata.
-            inner = frame_out.get("outputs", frame_out)
-            obj_ids = inner.get("out_obj_ids", inner.get("object_ids", inner.get("obj_ids")))
-            masks = inner.get("out_binary_masks", inner.get("masks"))
+        for response in stream:
+            outputs = response.get("outputs", response)
+            frame_idx = response.get("frame_index", outputs.get("frame_index"))
+            obj_ids = outputs.get("out_obj_ids", outputs.get("object_ids", outputs.get("obj_ids")))
+            masks = outputs.get("out_binary_masks", outputs.get("masks"))
             if frame_idx is None or obj_ids is None or masks is None:
                 raise RuntimeError(
-                    f"SAM 3.1 propagate_in_video: struttura frame inattesa. "
-                    f"Chiavi in frame_out: {list(frame_out.keys())}; "
-                    f"chiavi in outputs annidato: {list(inner.keys()) if inner is not frame_out else '(non annidato)'}."
+                    f"SAM 3.1 handle_stream_request: risposta frame inattesa. "
+                    f"Chiavi in response: {list(response.keys())}; "
+                    f"chiavi in outputs: {list(outputs.keys()) if outputs is not response else '(non annidato)'}."
                 )
             remapped: dict[int, np.ndarray] = {}
             for oid, mask in zip(obj_ids, masks):

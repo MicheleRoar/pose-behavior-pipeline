@@ -58,18 +58,19 @@ def _box_to_mask(box: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
 
 
 class _FakeSam3Predictor:
-    """Simula `handle_request()` di SAM 3 (vedi il docstring del modulo):
-    `start_session` apre una sessione (conta i JPEG scritti da
-    `_init_state()`, stessa verifica di `sam_backend_check.py`), `add_prompt`
-    con `text=` "scopre" istanze da uno script fisso (`discover_schedule`,
-    un elemento per ogni chiamata attesa) e risponde con la forma REALE
-    confermata su macchina CUDA (out_obj_ids/out_boxes_xywh/
-    out_binary_masks, non boxes/object_ids come ipotizzato inizialmente --
-    vedi il docstring di sam31_estimation.py), `add_prompt` con
-    `box=`/`obj_id=` registra un seed noto, `propagate_in_video`
-    restituisce le maschere statiche per gli obj_id correnti nella
-    finestra richiesta (con le stesse chiavi reali `out_obj_ids`/
-    `out_binary_masks`, annidate come per add_prompt)."""
+    """Simula `handle_request()`/`handle_stream_request()` di SAM 3 (vedi
+    il docstring di sam31_estimation.py): `start_session` apre una sessione
+    (conta i JPEG scritti da `_init_state()`, stessa verifica di
+    `sam_backend_check.py`), `add_prompt` con `text=` "scopre" istanze da
+    uno script fisso (`discover_schedule`, un elemento per ogni chiamata
+    attesa) e risponde con la forma REALE confermata su macchina CUDA
+    (out_obj_ids/out_boxes_xywh/out_binary_masks, non boxes/object_ids come
+    ipotizzato inizialmente), `add_prompt` con `box=`/`obj_id=` registra un
+    seed noto. `handle_request()` RIFIUTA "propagate_in_video" (come il
+    dispatcher SAM 3 reale, confermato su macchina CUDA) -- la
+    propagazione passa da `handle_stream_request()`, un GENERATORE che
+    restituisce le maschere statiche per gli obj_id correnti, una risposta
+    per frame, nella finestra richiesta."""
 
     def __init__(self, frame_shape: tuple[int, int], discover_schedule: list[dict[int, np.ndarray]]):
         self.frame_shape = frame_shape
@@ -116,22 +117,32 @@ class _FakeSam3Predictor:
             session["seeds"][request["obj_id"]] = request["box"]
             return {"outputs": {}}
 
-        if req_type == "propagate_in_video":
-            session = self._sessions[request["session_id"]]
-            start = request["start_frame_idx"]
-            max_n = request["max_frame_num_to_track"]
-            end = session["num_frames"] if max_n is None else min(session["num_frames"], start + max_n)
-            outputs = []
-            for local_idx in range(start, end):
-                obj_ids = list(session["seeds"].keys())
-                masks = [_box_to_mask(session["seeds"][oid], self.frame_shape) for oid in obj_ids]
-                outputs.append({
-                    "frame_index": local_idx,
-                    "outputs": {"out_obj_ids": obj_ids, "out_binary_masks": masks},
-                })
-            return {"outputs": outputs}
+        # CONFERMATO su una run reale (vedi il docstring del modulo sotto
+        # test): handle_request() NON riconosce "propagate_in_video", solo
+        # handle_stream_request() lo fa -- qui si replica lo stesso rifiuto
+        # del dispatcher SAM 3 reale, cosi' il test fallisce rumorosamente
+        # se il codice sotto test tornasse per errore a chiamare
+        # handle_request() per la propagazione.
+        raise RuntimeError(f"invalid request type: {req_type}")
 
-        raise ValueError(f"tipo di richiesta sconosciuto: {req_type!r}")
+    def handle_stream_request(self, *, request: dict):
+        """Simula la propagazione VIDEO reale: un GENERATORE, una risposta
+        per frame (non un unico dict con una lista "outputs"), vedi il
+        docstring del modulo sotto test per la conferma su macchina CUDA."""
+        req_type = request["type"]
+        if req_type != "propagate_in_video":
+            raise RuntimeError(f"invalid stream request type: {req_type}")
+        session = self._sessions[request["session_id"]]
+        start = request["start_frame_index"]
+        max_n = request["max_frame_num_to_track"]
+        end = session["num_frames"] if max_n is None else min(session["num_frames"], start + max_n)
+        for local_idx in range(start, end):
+            obj_ids = list(session["seeds"].keys())
+            masks = [_box_to_mask(session["seeds"][oid], self.frame_shape) for oid in obj_ids]
+            yield {
+                "frame_index": local_idx,
+                "outputs": {"out_obj_ids": obj_ids, "out_binary_masks": masks},
+            }
 
 
 def _make_tracker(fake_predictor, **kwargs) -> Sam31Tracker:
