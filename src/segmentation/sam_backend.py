@@ -200,7 +200,8 @@ class ChunkedVideoPredictorBackend:
                  prompt_model: str = "yolo26s-seg.pt",
                  conf_threshold: float = 0.1,
                  chunk_store_dir: str | None = None,
-                 max_people: int | None = None):
+                 max_people: int | None = None,
+                 reseed_new_people: bool = True):
         if device != "cuda":
             # SAM 3.1/SAMURAI non dichiarano supporto mps/cpu (vedi ricerca
             # citata nel README) -- meglio fallire subito con un messaggio
@@ -218,6 +219,15 @@ class ChunkedVideoPredictorBackend:
         self.conf_threshold = conf_threshold
         self.chunk_store_dir = chunk_store_dir
         self.max_people = max_people
+        # Se False: YOLO viene chiamato SOLO al bootstrap del chunk 0 (deve
+        # pur esserci un primo prompt da qualche parte), mai per scoprire
+        # persone NUOVE ai confini dei chunk successivi -- SAM/SAMURAI resta
+        # libero di gestire (o non gestire) da solo l'ingresso di qualcuno
+        # a meta' video. Serve per ottenere una condizione "SAM puro" da
+        # confrontare con quella di default (con reseeding), invece di
+        # avere un solo metodo ibrido spacciato per "capacita' di SAM" --
+        # vedi la discussione sulla baseline falsata e benchmark_backends.py.
+        self.reseed_new_people = reseed_new_people
         self._detector = None  # YOLO caricato pigramente in _detect_people()
         self._current_chunk_tmpdir: str | None = None  # vedi _init_state()/run()
 
@@ -279,9 +289,15 @@ class ChunkedVideoPredictorBackend:
             else:
                 for global_id, poly in prev_anchor_polys.items():
                     seed_boxes[global_id] = _polygon_to_box(poly)
-                for box in self._detect_people(chunk_frames[0]):
-                    if not _overlaps_any(box, seed_boxes.values(), frame_shape, NEW_PERSON_IOU_THRESHOLD):
-                        seed_boxes[allocator.next_id()] = box  # persona nuova, mai vista prima
+                if self.reseed_new_people:
+                    for box in self._detect_people(chunk_frames[0]):
+                        if not _overlaps_any(box, seed_boxes.values(), frame_shape, NEW_PERSON_IOU_THRESHOLD):
+                            seed_boxes[allocator.next_id()] = box  # persona nuova, mai vista prima
+                # se reseed_new_people e' False: nessuna chiamata a YOLO qui,
+                # SAM/SAMURAI continua SOLO le tracce gia' note (o non ne
+                # trova piu' nessuna se tutti sono usciti dal campo) -- e'
+                # la condizione "SAM puro" per il confronto in
+                # benchmark_backends.py.
 
             if self.max_people is not None and len(seed_boxes) > self.max_people:
                 # tetto rigido, stessa logica di cap_by_confidence altrove nel

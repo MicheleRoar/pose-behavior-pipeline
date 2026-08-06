@@ -44,14 +44,24 @@ from pose.features import compute_joint_angles
 BACKEND_KEYS = {"yolo", "sam31", "samurai"}
 
 
-def _build_tracker(backend: str, *, model_name: str, device: str, conf_threshold: float,
+def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold: float,
                     tracker_config: str, max_people: int | None,
-                    sam_chunk_size: int, sam_overlap: int, sam_chunk_store_dir: str | None):
+                    sam_chunk_size: int, sam_overlap: int, sam_chunk_store_dir: str | None,
+                    sam_reseed_new_people: bool = True):
     """Istanzia il tracker giusto in base a `backend` -- unico punto in cui
     la scelta YOLO/SAM 3.1/SAMURAI si traduce in una classe concreta.
     Tutti e tre rispettano lo stesso protocollo `SegmentationBackend`
     (vedi segmentation/backend.py), quindi il resto di questa funzione
-    (sotto) non ha bisogno di sapere quale sia stato scelto."""
+    (sotto) non ha bisogno di sapere quale sia stato scelto. Non piu'
+    "privata" (senza underscore): riusata anche da `benchmark_backends.py`
+    per costruire lo stesso tracker senza passare da `iter_segmentation_
+    frames()` (che disegna un overlay qui inutile).
+
+    `sam_reseed_new_people` (solo sam31/samurai, ignorato con "yolo"):
+    False da' la condizione "SAM puro" per il confronto tra metodi (vedi
+    benchmark_backends.py) -- YOLO propone i box SOLO al primo frame del
+    video, mai per scoprire persone nuove ai confini dei chunk successivi.
+    Default True (comportamento gia' in uso finora, invariato)."""
     if backend == "yolo":
         return SegTracker(model_name=model_name, device=device,
                            conf_threshold=conf_threshold, tracker=tracker_config,
@@ -60,12 +70,14 @@ def _build_tracker(backend: str, *, model_name: str, device: str, conf_threshold
         from segmentation.sam31_estimation import Sam31Tracker
         return Sam31Tracker(device=device, conf_threshold=conf_threshold,
                              chunk_size=sam_chunk_size, overlap=sam_overlap,
-                             chunk_store_dir=sam_chunk_store_dir, max_people=max_people)
+                             chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
+                             reseed_new_people=sam_reseed_new_people)
     if backend == "samurai":
         from segmentation.samurai_estimation import SamuraiTracker
         return SamuraiTracker(device=device, conf_threshold=conf_threshold,
                                chunk_size=sam_chunk_size, overlap=sam_overlap,
-                               chunk_store_dir=sam_chunk_store_dir, max_people=max_people)
+                               chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
+                               reseed_new_people=sam_reseed_new_people)
     raise ValueError(f"backend sconosciuto: {backend!r} (atteso 'yolo'|'sam31'|'samurai')")
 
 
@@ -77,7 +89,8 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
                               mediapipe_pose_estimator: MediaPipePoseByTrack | None = None,
                               backend: str = "yolo",
                               sam_chunk_size: int = 600, sam_overlap: int = 50,
-                              sam_chunk_store_dir: str | None = None):
+                              sam_chunk_store_dir: str | None = None,
+                              sam_reseed_new_people: bool = True):
     """Generatore che contiene TUTTA la logica per-frame della pipeline di
     segmentazione (tracking, re-id opzionale, pose opzionale per maschera,
     disegno overlay), condiviso da `run_segmentation()` (CLI, sotto) e da
@@ -109,11 +122,11 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
     track_id grezzi di ByteTrack PRIMA dell'eventuale re-id (utile solo per
     le statistiche di churn stampate da `run_segmentation()`).
     """
-    tracker = _build_tracker(
+    tracker = build_tracker(
         backend, model_name=model_name, device=device, conf_threshold=conf_threshold,
         tracker_config=tracker_config, max_people=max_people,
         sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
-        sam_chunk_store_dir=sam_chunk_store_dir,
+        sam_chunk_store_dir=sam_chunk_store_dir, sam_reseed_new_people=sam_reseed_new_people,
     )
 
     for frame_result in tracker.run(source=source):
@@ -176,7 +189,8 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
                       show_window: bool = True,
                       backend: str = "yolo",
                       sam_chunk_size: int = 600, sam_overlap: int = 50,
-                      sam_chunk_store_dir: str | None = None) -> pd.DataFrame:
+                      sam_chunk_store_dir: str | None = None,
+                      sam_reseed_new_people: bool = True) -> pd.DataFrame:
     """CLI: consuma `iter_segmentation_frames()` (unica fonte della logica
     per-frame, condivisa con la GUI), gestisce la finestra cv2 (se
     show_window) e stampa le statistiche finali di churn/re-id."""
@@ -207,7 +221,7 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
         max_people=max_people, seg_reidentifier=seg_reidentifier,
         mediapipe_pose_estimator=mediapipe_pose_estimator,
         backend=backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
-        sam_chunk_store_dir=sam_chunk_store_dir,
+        sam_chunk_store_dir=sam_chunk_store_dir, sam_reseed_new_people=sam_reseed_new_people,
     ):
         n_frames = frame_index + 1
         for raw_id in raw_ids:
@@ -297,6 +311,12 @@ def main():
     parser.add_argument("--sam-chunk-store-dir", default=None,
                          help="Solo con --backend sam31/samurai: cartella dove salvare "
                               "incrementalmente i risultati di ogni chunk (opzionale)")
+    parser.add_argument("--sam-no-reseed-new-people", action="store_true",
+                         help="Solo con --backend sam31/samurai: disattiva la scoperta di "
+                              "persone NUOVE ai confini dei chunk (YOLO propone i box SOLO "
+                              "al primo frame del video). Da' la condizione 'SAM puro' per "
+                              "confrontare con la versione di default (con reseeding) -- "
+                              "vedi benchmark_backends.py e segmentation/sam_backend.py.")
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
@@ -308,7 +328,8 @@ def main():
                       pose_landmarker_model=args.pose_landmarker_model,
                       out_csv=args.out, show_window=not args.no_window,
                       backend=args.backend, sam_chunk_size=args.sam_chunk_size,
-                      sam_overlap=args.sam_overlap, sam_chunk_store_dir=args.sam_chunk_store_dir)
+                      sam_overlap=args.sam_overlap, sam_chunk_store_dir=args.sam_chunk_store_dir,
+                      sam_reseed_new_people=not args.sam_no_reseed_new_people)
 
 
 if __name__ == "__main__":

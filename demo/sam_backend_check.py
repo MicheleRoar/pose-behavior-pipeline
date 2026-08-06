@@ -280,6 +280,36 @@ class _FakeTorchTensor:
         return self._array
 
 
+def part6b_reseed_new_people_false_never_adds_the_late_entrant():
+    # Confronto "SAM puro" vs "SAM + reseeding" (vedi discussione sulla
+    # baseline falsata): con reseed_new_people=False, YOLO viene chiamato
+    # SOLO al bootstrap del chunk 0 -- la persona B (che nello scenario di
+    # part2 entra a meta' video) non deve MAI comparire, perche' nessuno la
+    # scopre piu' dopo il chunk 0.
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        video_path = os.path.join(tmp_dir, "synthetic.mp4")
+        _make_synthetic_video(video_path)
+        backend = _FakeBackend(
+            device="cuda", chunk_size=CHUNK_SIZE, overlap=OVERLAP,
+            detect_schedule=[[BOX_A], [], [BOX_B], []],  # B verrebbe "vista" al chunk 2 se reseed fosse attivo
+            reseed_new_people=False,
+        )
+
+        results = list(backend.run(video_path))
+        ids_per_frame = {r.frame_index: {p[0] for p in r.people} for r in results}
+
+        all_ids = set()
+        for ids in ids_per_frame.values():
+            all_ids |= ids
+        assert len(all_ids) == 1, f"con reseed disattivato B non deve mai comparire, id trovati: {all_ids}"
+        assert all(len(ids) == 1 for ids in ids_per_frame.values()), \
+            "ogni frame deve avere solo A, mai B, per tutta la sessione"
+        print("PASS part6b_reseed_new_people_false_never_adds_the_late_entrant")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
 def part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input():
     # Fix del 2026-08: sintomo reale osservato su una macchina CUDA
     # ("il video parte ma non appaiono le maschere") -- causato da
@@ -314,6 +344,7 @@ def main():
     part4_non_cuda_device_rejected_immediately()
     part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash()
     part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk()
+    part6b_reseed_new_people_false_never_adds_the_late_entrant()
     part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input()
     print("\nTutti i test di sam_backend.py (con predictor finto) sono passati.")
 
