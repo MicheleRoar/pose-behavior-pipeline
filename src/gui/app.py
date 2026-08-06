@@ -124,8 +124,11 @@ class App:
         # -- max number of people ------------------------------------------------
         max_row = ttk.Frame(control)
         max_row.pack(fill="x", pady=(0, 10))
-        ttk.Label(max_row, text="Max number of people:").pack(side="left")
-        self.max_people_var = tk.StringVar(value="2")
+        ttk.Label(max_row, text="Max number of people (optional):").pack(side="left")
+        # Nessun default -- deve essere l'utente a impostarlo esplicitamente,
+        # non un tetto silenzioso a "2" applicato anche se non lo tocca
+        # (vedi la stessa correzione in webui/index.html).
+        self.max_people_var = tk.StringVar(value="")
         ttk.Entry(max_row, textvariable=self.max_people_var, width=4).pack(side="left", padx=(6, 0))
 
         # -- re-identification --------------------------------------------------------
