@@ -196,6 +196,37 @@ def part4_non_cuda_device_rejected_immediately():
     print("PASS part4_non_cuda_device_rejected_immediately")
 
 
+def part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash():
+    # Errore reale osservato su una macchina CUDA con SAMURAI:
+    # "RuntimeError: No points are provided; please add points first",
+    # sollevato da propagate_in_video() quando nessun prompt e' mai stato
+    # registrato -- capita se YOLO non trova nessuno nel frame di
+    # ancoraggio del primo chunk (es. video che si apre su una stanza
+    # vuota). Qui si verifica che il nostro codice lo gestisca PRIMA di
+    # arrivare a chiamare propagate_in_video, restituendo frame vuoti
+    # invece di propagare l'eccezione.
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        video_path = os.path.join(tmp_dir, "synthetic.mp4")
+        _make_synthetic_video(video_path)
+        # tutti i chunk restituiscono lista vuota da _detect_people(): mai
+        # nessuna persona rilevata in tutto il video
+        backend = _FakeBackend(
+            device="cuda", chunk_size=CHUNK_SIZE, overlap=OVERLAP,
+            detect_schedule=[[], [], [], []],
+        )
+
+        results = list(backend.run(video_path))  # non deve sollevare nulla
+
+        frame_indices = [r.frame_index for r in results]
+        assert frame_indices == list(range(TOTAL_FRAMES)), \
+            f"anche senza nessuna persona rilevata, la copertura frame deve restare completa, ottenuto {frame_indices}"
+        assert all(r.people == [] for r in results), "nessuna persona rilevata -> tutti i frame devono avere people=[]"
+        print("PASS part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
 def part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk():
     # Verifica il fix del 2026-08 (confermato su una macchina CUDA reale con
     # SAMURAI: "Only MP4 video and JPEG folder are supported", il predictor
@@ -236,6 +267,7 @@ def main():
     part2_new_person_mid_video_gets_fresh_id_with_expected_lag()
     part3_chunk_persistence_writes_one_file_per_chunk()
     part4_non_cuda_device_rejected_immediately()
+    part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash()
     part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk()
     print("\nTutti i test di sam_backend.py (con predictor finto) sono passati.")
 

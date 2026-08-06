@@ -252,35 +252,63 @@ class ChunkedVideoPredictorBackend:
                 # prima delle nuove, essendo inserite per prime nel dict).
                 seed_boxes = dict(list(seed_boxes.items())[: self.max_people])
 
-            for global_id, box in seed_boxes.items():
-                self._add_box_prompt(predictor, state, frame_idx=0, obj_id=global_id, box=box)
-
             chunk_results: list[SegFrameResult] = []
             polys_by_local_frame: dict[int, dict[int, np.ndarray]] = {}
             try:
-                for local_idx, masks_by_id in self._propagate(predictor, state):
-                    people = []
-                    polys_this_frame: dict[int, np.ndarray] = {}
-                    for obj_id, mask in masks_by_id.items():
-                        poly = _mask_to_polygon(mask)
-                        polys_this_frame[obj_id] = poly
-                        box = _polygon_to_box(poly)
-                        # SAM non produce una confidenza di detection comparabile
-                        # a quella di YOLO: 1.0 come segnaposto esplicito, MAI
-                        # usato per il tetto max_people qui (gia' applicato sopra
-                        # sui seed) -- vedi cap_by_confidence in tracking_common.py
-                        # per il caso YOLO, dove la confidenza e' invece reale.
-                        people.append((obj_id, box, poly, 1.0))
-                    polys_by_local_frame[local_idx] = polys_this_frame
-                    chunk_results.append(SegFrameResult(
-                        frame_index=start + local_idx, frame=chunk_frames[local_idx], people=people,
-                    ))
+                if not seed_boxes:
+                    # Nessuna persona da seguire in questo chunk: ne' una
+                    # traccia da continuare (prev_anchor_polys vuoto) ne' una
+                    # nuova rilevata da YOLO sul frame di ancoraggio -- puo'
+                    # succedere con un video che si apre su una stanza vuota,
+                    # o se YOLO manca la detection su quel frame specifico
+                    # (illuminazione, posa, soglia di confidenza).
+                    # `propagate_in_video()` di SAM/SAMURAI SOLLEVA un errore
+                    # ("No points are provided; please add points first") se
+                    # chiamata senza nessun prompt registrato -- qui si
+                    # emettono frame vuoti invece di far esplodere l'intera
+                    # pipeline per una porzione di video senza nessuno in
+                    # campo. Se questo compare per OGNI chunk (non solo
+                    # occasionalmente), il problema e' quasi certamente a
+                    # monte: verificare che `_detect_people()` trovi davvero
+                    # qualcuno sul frame (es. salvare chunk_frames[0] su
+                    # disco e controllarlo a occhio, o stampare
+                    # `len(self._detect_people(chunk_frames[0]))`).
+                    print(f"[{type(self).__name__}] avviso: nessuna persona da seguire "
+                          f"nel frame di ancoraggio del chunk {chunk_index} (frame "
+                          f"originale {start}) -- salto la propagazione, frame vuoti "
+                          f"per questo chunk.")
+                    chunk_results = [
+                        SegFrameResult(frame_index=start + i, frame=f, people=[])
+                        for i, f in enumerate(chunk_frames)
+                    ]
+                else:
+                    for global_id, box in seed_boxes.items():
+                        self._add_box_prompt(predictor, state, frame_idx=0, obj_id=global_id, box=box)
+
+                    for local_idx, masks_by_id in self._propagate(predictor, state):
+                        people = []
+                        polys_this_frame: dict[int, np.ndarray] = {}
+                        for obj_id, mask in masks_by_id.items():
+                            poly = _mask_to_polygon(mask)
+                            polys_this_frame[obj_id] = poly
+                            box = _polygon_to_box(poly)
+                            # SAM non produce una confidenza di detection comparabile
+                            # a quella di YOLO: 1.0 come segnaposto esplicito, MAI
+                            # usato per il tetto max_people qui (gia' applicato sopra
+                            # sui seed) -- vedi cap_by_confidence in tracking_common.py
+                            # per il caso YOLO, dove la confidenza e' invece reale.
+                            people.append((obj_id, box, poly, 1.0))
+                        polys_by_local_frame[local_idx] = polys_this_frame
+                        chunk_results.append(SegFrameResult(
+                            frame_index=start + local_idx, frame=chunk_frames[local_idx], people=people,
+                        ))
             finally:
                 # la cartella temporanea coi JPEG del chunk (vedi _init_state())
                 # non serve piu' una volta che propagate_in_video() e' stata
-                # consumata fino in fondo -- ripulita anche se l'inferenza
-                # solleva un'eccezione a meta' chunk, per non lasciare cartelle
-                # temporanee orfane su un video lungo con molti chunk.
+                # consumata fino in fondo (o non e' mai stata chiamata, vedi
+                # sopra) -- ripulita anche se l'inferenza solleva un'eccezione
+                # a meta' chunk, per non lasciare cartelle temporanee orfane
+                # su un video lungo con molti chunk.
                 self._cleanup_chunk_tmpdir()
 
             # controllo di coerenza (solo log, vedi docstring del modulo)
