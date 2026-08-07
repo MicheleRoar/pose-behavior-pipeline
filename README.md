@@ -1,83 +1,48 @@
 # Pose-based behavioural feature pipeline
 
 Real-time and batch pipeline for extracting quantitative behavioural
-markers from interaction video, using multi-person pose estimation
-(YOLO26-pose + ByteTrack) and time-series feature engineering on keypoints.
-Runs on Apple Silicon (MPS, no CUDA) as a fast-iterating companion to a
-CUDA/SAM3-based production pipeline for video-based child neurodevelopment
-research — new modules and re-identification strategies get prototyped and
-validated here on non-protected data before being ported over.
+markers from interaction video, using multi-person pose/segmentation
+tracking and time-series feature engineering. Runs on Apple Silicon
+(MPS, no CUDA) as a testing/development platform alongside a
+CUDA/SAM3-based production pipeline for child neurodevelopment research
+— a companion for fast iteration, not a replacement.
 
-Motivated by two strands of literature: automated General Movements
-Assessment for early cerebral-palsy detection, and 2D pose-based autism
-screening from RGB video (Kojovic et al. 2021, Univ. of Geneva, 80.9%
-classification accuracy). Features here are exploratory and technical, not
-validated diagnostic markers — any clinical use requires ethics-committee
-approval and validation on annotated data.
+Exploratory and technical, not validated diagnostic markers. Any
+clinical use requires ethics-committee approval and validation on
+annotated data.
 
-**Current status:** on real footage (overhead camera, fast motion,
-artificial lighting) the pose model produced too many spurious ids (50+ in
-a few minutes even with tracker/threshold tuning). The active pipeline is
-temporarily `segmentation_demo.py` (YOLO26-seg + ByteTrack, silhouettes
-only, no keypoints) to test whether a model that only has to outline a
-person — instead of regressing 17 precise keypoints — tracks more
-continuously. If confirmed, the plan is to reattach pose *inside* the
-tracked silhouette rather than replace it permanently — see
-`segmentation/seg_estimation.py`. The pose-based pipeline (`pipeline.py`,
-`live_demo.py`, and everything under `pose/`, which everything keypoint-
-based depends on) stays in the repository, tested, on hold.
+**Current status:** active pipeline is segmentation-based
+(`segmentation_demo.py`, YOLO26-seg + ByteTrack, no keypoints) — the
+pose model alone produced too many spurious ids on real footage. Plan
+is to reattach pose *inside* the tracked silhouette (see
+`segmentation/seg_estimation.py`). The pose-based pipeline
+(`pipeline.py`, `live_demo.py`, `pose/`) stays in the repo, on hold.
+SAM 3.1 integration is the current priority.
 
 ## Structure
 
 ```
 pose-behavior-pipeline/
 ├── src/
-│   ├── gui_app.py                 # Tkinter GUI launcher: cd src && python gui_app.py
-│   ├── webui_app.py               # Web GUI launcher (pywebview): cd src && python webui_app.py
+│   ├── webui_app.py               # GUI launcher: cd src && python webui_app.py
 │   ├── segmentation_demo.py       # ACTIVE main CLI: overlay + CSV, no keypoints
-│   ├── track_stability_check.py   # ACTIVE diagnostic: id count/lifespan, no overlay/CSV
-│   ├── pipeline.py                # batch CLI (recorded video, pose-based, on hold)
-│   ├── live_demo.py               # real-time CLI (Canon R8 / webcam, pose-based, on hold)
-│   ├── gui/                       # local Tkinter GUI (video file + parameter picker + live overlay)
-│   │   ├── app.py                 # control panel + embedded video (Tkinter/PIL)
-│   │   ├── video_player.py        # frame cache + seek (Back/Forward without re-inference)
-│   │   └── pipeline_runner.py     # dispatches to iter_live_frames()/iter_segmentation_frames()
-│   ├── webui/                     # "Behaviour Vision Lab" web GUI (pywebview + HTML/CSS/JS)
-│   │   ├── api.py                 # pywebview bridge: reuses VideoPlayer/iter_pipeline_frames as-is
-│   │   ├── index.html             # layout: header, sidebar cards, video panel, status bar
-│   │   ├── style.css              # dark theme matching the mock
-│   │   └── app.js                 # wires the DOM to window.pywebview.api.*
+│   ├── track_stability_check.py   # ACTIVE diagnostic: id count/lifespan
+│   ├── pipeline.py                # batch CLI (pose-based, on hold)
+│   ├── live_demo.py               # real-time CLI (pose-based, on hold)
+│   ├── gui/                       # shared player/dispatch logic behind the GUI
+│   ├── webui/                     # "Behaviour Vision Lab" GUI (pywebview + HTML/CSS/JS)
 │   ├── segmentation/              # ACTIVE library: silhouettes only, no keypoints
 │   │   ├── seg_estimation.py      # YOLO26-seg + ByteTrack wrapper (default backend)
 │   │   ├── seg_reid.py            # hard-capped id linking (position/color/shape)
-│   │   ├── backend.py             # SegmentationBackend protocol: run(source) -> Iterator[SegFrameResult]
-│   │   ├── chunking.py            # overlapping chunk ranges + IoU-based id reconciliation
-│   │   ├── chunk_store.py         # incremental per-chunk disk persistence (.npz)
-│   │   ├── sam_backend.py         # ChunkedVideoPredictorBackend: shared SAM/SAM2 chunking logic
-│   │   ├── sam31_estimation.py    # Sam31Tracker (SAM 3.1, needs CUDA, gated HF checkpoint)
-│   │   └── sam2_estimation.py     # Sam2Tracker (SAM2 vanilla, multi-object native, needs CUDA)
+│   │   ├── sam_backend.py         # shared SAM/SAM2 chunking logic
+│   │   ├── sam31_estimation.py    # SAM 3.1 (needs CUDA, gated HF checkpoint)
+│   │   └── sam2_estimation.py     # SAM2 vanilla (needs CUDA)
 │   ├── pose/                      # ON HOLD library: everything keypoint-based
-│   │   ├── keypoints.py           # COCO-17 index names, skeleton edges
-│   │   ├── geometry.py            # shared angle/vector math
-│   │   ├── pose_estimation.py     # YOLO-pose + ByteTrack wrapper
-│   │   ├── features.py            # angles, velocity, symmetry, repetitiveness, synchrony
-│   │   ├── gaze_head.py           # head pose, mouth/eye/eyebrow signals (MediaPipe)
-│   │   ├── hands.py               # finger-level tracking (MediaPipe HandLandmarker)
-│   │   ├── mediapipe_pose.py      # single-person pose (MediaPipe), applied per tracked mask
-│   │   ├── reid.py                # re-id after exit/re-entry (body-shape signature + color)
-│   │   ├── chuv_features.py       # reference-pipeline feature set, replicated in real time
-│   │   └── anonymize.py           # face blurring
-│   ├── common/                    # shared by both pipelines
-│   │   ├── tracking_common.py     # shared max_people per-frame cap logic
-│   │   ├── device.py              # auto-detect cuda/mps/cpu, default for --device everywhere
-│   │   ├── yolo_models.py         # resolves bare YOLO weight names into models/, cwd-independent
-│   │   ├── mediapipe_models.py    # same fix, for MediaPipe Tasks (.task) models
-│   │   └── viz.py                 # overlay drawing
+│   ├── common/                    # shared: device detection, model-path resolution, drawing
 │   └── configs/
 │       └── bytetrack_permissive.yaml  # tuned ByteTrack config for hard scenes
-├── models/                        # auto-downloaded weights (.pt, .task) — gitignored, not code,
-│                                   # created on first run regardless of the launch cwd
-└── demo/                          # camera-free tests for every module above
+├── models/                        # auto-downloaded weights — gitignored, not code
+└── tests/                          # camera-free tests for every module above
 ```
 
 ## Setup
@@ -85,161 +50,38 @@ pose-behavior-pipeline/
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+pip install pywebview   # for the GUI
 ```
 
-## GUI (recommended for exploratory use)
+## GUI
 
 ```bash
-cd src && python gui_app.py
-```
-
-A local Tkinter window (starts maximized), fully in English: load a video
-file, pick the pipeline mode (Segmentation / Pose estimation / Both), model
-size, FPS, max number of people, re-identification on/off, and — only when
-the mode is Pose estimation or Both — Hands and four independent Face
-checkboxes (Eyes, Mouth, Eyebrows, Head movement — pick any subset, they
-share a single underlying MediaPipe FaceLandmarker call per frame so
-enabling more of them is nearly free). Then Play to watch the overlay live
-in the same window, with Back/Forward to step through already-processed
-frames instantly (from a cache, no re-inference) or resume live processing
-past the cached point. SAM3 is listed under model architecture but not
-selectable yet — it will run on the group's GPU machines, not this Mac;
-picking it shows a note and reverts to YOLO. "Both" runs both pipelines
-independently on the same source and draws the pose skeleton (+ hands/face
-if enabled) directly on top of the segmentation overlay (same frame, not
-side by side) — the two pipelines still don't share an identity, so the
-"ID N" label stays the segmentation's; the pose skeleton has no label of
-its own to avoid two conflicting numberings on the same person, see
-`gui/pipeline_runner.py`. In Segmentation mode only, an extra "MediaPipe
-pose (inside each tracked mask)" checkbox draws a skeleton inside each
-already-tracked silhouette — see `pose/mediapipe_pose.py` below for what
-this does and doesn't do. Internally the GUI calls the exact same
-`iter_live_frames()` / `iter_segmentation_frames()` generators as the CLIs
-below, not a reimplementation — CLI and GUI can't drift apart.
-
-## Web GUI ("Behaviour Vision Lab")
-
-```bash
-pip install pywebview   # not in the default install, only this GUI needs it
 cd src && python webui_app.py
 ```
 
-A second, visually-polished GUI (dark theme, pill toggle switches, a
-pipeline-flow diagram, live metrics) matching a provided mockup — an
-alternative presentation layer over the *exact same* pipeline, not a
-reimplementation: `webui/api.py` calls `VideoPlayer` and
-`iter_pipeline_frames()` (the same `gui/video_player.py` /
-`gui/pipeline_runner.py` used by the Tkinter GUI) unchanged. Built with
-[pywebview](https://pywebview.flowrl.com/) (a native window wrapping a
-local `webui/index.html` + `style.css` + `app.js`, with a Python `Api`
-class exposed to JS as `window.pywebview.api.<method>(...)`) rather than a
-separate HTTP server, to avoid an extra dependency and port/lifecycle
-management.
+Load a video, pick pipeline mode (Segmentation / Pose estimation /
+Both), model size, max people, re-identification settings. Same
+generators as the CLIs underneath (`gui/pipeline_runner.py`), so
+behaviour never diverges — see that module and `webui/api.py` for the
+full design.
 
-Same controls as the Tkinter GUI (video source, mode, model size, max
-people, re-identification, hands/face sub-checkboxes gated to Pose
-estimation/Both, MediaPipe pose-per-mask gated to Segmentation), plus:
+## SAM 3.1 / SAM2 (CUDA only)
 
-- A status bar with a pipeline-flow diagram built from the ACTUAL
-  configured steps (e.g. `YOLO26s Segment → ByteTrack → Re-ID → MediaPipe
-  Pose`), not a fixed label — see `app.js::updatePipelineFlow()`.
-- Live metrics (current frame, processing FPS, average latency, active
-  tracks) computed from real timing/data, not decorative: FPS/latency come
-  from a rolling average of actual `step_forward()` wall-clock time
-  (`webui/api.py::_LatencyTracker`), active tracks from
-  `RunnerFrame.people_count` (reliable even in Pose mode before the sliding
-  feature window fills — see `gui/pipeline_runner.py`).
-- A timeline scrubber restricted to the already-processed prefix
-  (`gui/video_player.py::VideoPlayer.seek()`, instant, no re-inference);
-  clicking beyond it triggers sequential catch-up processing instead of an
-  impossible instant jump — trackers are sequential/stateful, same
-  constraint as Back/Forward in the Tkinter GUI, see that module's
-  docstring.
+`--backend sam31`/`sam2` swap in
+[SAM 3.1](https://github.com/facebookresearch/sam3) or
+[SAM2](https://github.com/facebookresearch/sam2). SAM 3.1 checkpoints
+are gated on Hugging Face (`facebook/sam3.1` — request access, then
+`hf auth login`); SAM2's are public. Both need `device=cuda`, Python
+3.12+, PyTorch 2.7+, CUDA 12.6+. Processed in overlapping chunks
+(`--sam-chunk-size`/`--sam-overlap`, default 600/50) — see
+`segmentation/sam_backend.py`'s docstring for the chunking design and
+why SAMURAI was dropped for vanilla SAM2.
 
-Deliberate differences from the mock, not oversights: Face stays as four
-independent checkboxes rather than one combined "Face" toggle (collapsing
-them back would silently revert an earlier explicit request); there's no
-functional volume control (this pipeline has no audio); the "GPU" badge
-shows the configured device string (e.g. `mps`) rather than live
-utilization telemetry, which isn't reliably queryable from pure
-Python/PyTorch on Apple Silicon.
-
-Pick whichever GUI fits: `gui_app.py` (Tkinter) has no extra dependency
-beyond Pillow and a lighter startup; `webui_app.py` needs `pywebview` but
-matches the mock closely. Both call the same generators underneath, so
-behaviour never diverges between them — only the presentation layer
-differs.
-
-## SAM 3.1 / SAM2 segmentation backends (CUDA only)
-
-`segmentation_demo.py` / the web GUI's "Architecture" selector can pick a
-segmentation/tracking backend other than YOLO26-seg + ByteTrack:
-
-- `--backend sam31` → [SAM 3.1](https://github.com/facebookresearch/sam3)
-  (Object Multiplex). Checkpoints are **gated on Hugging Face**
-  (`facebook/sam3.1`): request access on that page, create a token at
-  huggingface.co/settings/tokens, then `pip install huggingface_hub && hf
-  auth login` before the first run. Requires Python 3.12+, PyTorch 2.7+,
-  CUDA 12.6+ — likely a separate virtualenv from the rest of this project.
-- `--backend sam2` → [SAM2](https://github.com/facebookresearch/sam2)
-  vanilla (no motion-model patches). Checkpoints are public, no gated
-  access needed.
-
-**Why not SAMURAI**: an earlier version of this backend used
-[SAMURAI](https://github.com/yangchris11/samurai) (SAM2 + a Kalman-filter
-"motion-aware" mask selection layer) instead of plain SAM2. Confirmed on a
-real CUDA machine: SAMURAI's motion-model code
-(`sam2_base.py::_forward_sam_heads`) assumes exactly **one** tracked object
-per session — it's written and validated against single-target visual
-object tracking benchmarks (LaSOT, GOT-10k, TrackingNet), never more than
-one target per video. Seeding several people into the same session (the
-normal case here — several children/therapist in frame together) makes SAM2
-batch them together for inference, which crashes that code with
-`RuntimeError: Boolean value of Tensor with more than one value is
-ambiguous` (`ious[0][best_iou_inds]`, indexed with one entry per object
-instead of a scalar). Running SAMURAI correctly for N people would need a
-separate SAM session per person (N× the encoder cost, the heaviest part of
-the pipeline) — not worth it compared to SAM2 vanilla, which batches
-multiple objects natively at no extra cost, at the price of losing
-motion-modeling through occlusions. See `segmentation/sam2_estimation.py`
-for the full writeup.
-
-Both `sam31`/`sam2` require `device=cuda` — refused immediately with a
-clear error otherwise
-(`segmentation/sam_backend.py::ChunkedVideoPredictorBackend`), since
-neither library declares mps/cpu support. The web GUI disables these two
-options in the dropdown unless `Api.detect_device()` reports `"cuda"` (and
-rejects the request server-side too, as a safety net either way).
-
-**Why chunked, not one pass over the whole video**: both libraries' video
-API is stateful — `init_state(video)` loads every frame's pixels into
-memory before segmenting anything — impractical for a multi-minute
-recording. The video is processed in overlapping windows instead
-(`--sam-chunk-size` frames, `--sam-overlap` frames shared between one
-window and the next, defaults 600/50): each window is seeded either from
-YOLO detections (first window, prompt only, not used for tracking) or from
-the previous window's masks at the shared boundary frame (continuing
-tracks keep the same id directly), reconciled by mask IoU as a consistency
-check. See the module docstring in `segmentation/sam_backend.py` and
-`segmentation/chunking.py` for the full design and its known limitation
-(geometry-only reconciliation can misfire in crowded scenes right at a
-chunk boundary). `--sam-chunk-store-dir` writes each completed chunk's
-masks/ids to disk (`.npz`, no image data) before moving to the next one, so
-a crash partway through a long video doesn't lose everything processed so
-far.
-
-**Honesty about what's tested**: `Sam31Tracker`/`Sam2Tracker` and the
-chunking/reconciliation/persistence logic around them are verified against
-a *fake* video predictor (`demo/sam_backend_check.py`) — there is no CUDA
-GPU in the environment this was built in, so the real `sam3`/`sam2`
-inference path has not been executed by this agent (it has by the project
-owner, on his own CUDA machine — see the SAMURAI write-up above, found
-through exactly that real testing). Before relying on it: check the exact
-method names/return shapes against
-`sam3/examples/sam3_video_predictor_example.ipynb` (or the sam2 equivalent)
-on the actual CUDA machine — `_init_state()` / `_add_box_prompt()` /
-`_propagate()` in `ChunkedVideoPredictorBackend` are the three points
-designed to be overridden if a signature differs.
+Not yet run against the real `sam3`/`sam2` API in this environment (no
+CUDA here) — verified against a fake predictor only
+(`demo/sam_backend_check.py`). Check `_init_state()` /
+`_add_box_prompt()` / `_propagate()` against the real API before
+relying on it.
 
 ## Usage (CLI)
 
@@ -251,148 +93,54 @@ cd src && python segmentation_demo.py --source video.mp4 --fps 15 \
     --conf-threshold 0.1 --max-people 2 --out session_seg.csv
 ```
 
-`--model yolo26s-seg.pt` (and every other bare YOLO weight name used
-throughout this README/the GUIs) auto-downloads on first use into
-`models/` at the repo root, same fix and same motivation as the
-MediaPipe Tasks models below (`common/yolo_models.py`) — cwd-independent,
-no manual placement needed regardless of which folder the command is
-launched from.
+Model weights auto-download into `models/` on first use, regardless of
+launch cwd. `--max-people N`: known headcount, caps detections per
+frame. `--with-seg-reid` (needs `--max-people`) links ids to a fixed
+identity pool instead of just capping — see `seg_reid.py`.
+`--with-mediapipe-pose` adds a skeleton inside each tracked mask — see
+`pose/mediapipe_pose.py`.
 
-Add `--no-window` to skip the live overlay (faster, log + CSV only). Same
-flags as the diagnostic-only `track_stability_check.py`, plus the overlay
-and the CSV (frame, track_id, bbox, mask centroid, mask area, box
-confidence). `--max-people N`: known session headcount (2 for a 1v1
-child-caregiver session, up to ~10 for a group) — keeps only the N most
-confident detections per frame. `--tracker configs/bytetrack_permissive.yaml`:
-longer track memory and more tolerant thresholds for scenes with heavy ID
-churn (overhead camera, fast motion, artificial lighting) — see that file
-for details. Keep `--conf-threshold` at or below 0.1: ByteTrack's own
-low-confidence recovery stage expects to see weak detections, a higher
-value strips them out first.
-
-For a small, certain headcount (1-2 people), `--with-seg-reid` goes
-further: it links every raw ByteTrack id to a fixed pool of `--max-people`
-identities (position/color/shape of the silhouette, see `seg_reid.py`),
-guaranteeing — not just discouraging — that no more than `--max-people`
-ids are ever created in the whole session. A new raw id always tries a
-threshold-based soft match to a recently-missing identity first (covers
-the common case: brief occlusion, edge-of-frame exit/re-entry), even while
-under the cap — without this, setting `--max-people` generously above the
-real headcount (e.g. 20 as a safety margin for ~10 kids) meant the cap was
-never actually reached, so soft-matching never kicked in and every
-disappearance opened a new id instead of relinking (visible as a brief id
-swap that "corrects itself" a moment later). Only once the cap is truly
-reached does it fall back to `reid.py`'s optional `max_people` behavior
-with no escape valve: an unmatched track is always bound to the closest
-known identity regardless of signal strength. Read `seg_reid.py`'s
-docstring for the trade-offs both of these accept.
-
-Optionally, `--with-mediapipe-pose` applies MediaPipe Pose Landmarker in
-SINGLE-person mode inside the crop of each already-tracked mask (not a
-multi-person detector on the whole frame — MediaPipe has no built-in
-frame-to-frame tracking, so identity is borrowed entirely from the
-segmentation/`--with-seg-reid` tracking above; see `pose/mediapipe_pose.py`
-for why). Draws the skeleton on top of the mask and adds joint-angle
-columns (`pose_*`) to the CSV — no sliding-window features (movement
-energy, repetitiveness, gaze, hands) yet, only per-frame angles. Requires
-`pip install mediapipe`; the Pose Landmarker model ("lite") downloads
-itself automatically on first use into `models/pose_landmarker_lite.task`
-at the repo root — no manual `curl` step needed anymore (see
-`pose/mediapipe_pose.py` for why the old cwd-relative default was
-fragile: it broke with "unable to find pose_landmarker_lite" when
-launched from a different working directory than the one the file had
-been downloaded into).
-
-**Pose-based pipeline (on hold — keypoints, all behavioural features):**
+**Pose-based pipeline (on hold):**
 
 ```bash
 cd src && python pipeline.py --source video.mp4 --fps 30 --out features.csv
 cd src && python live_demo.py --source 0 --fps 30 --out live_session.csv
 ```
 
-`--device` is optional everywhere in this project (CLIs and both GUIs):
-left unset, it auto-detects the best available backend -- `cuda` if an
-NVIDIA GPU is available, else `mps` on Apple Silicon, else `cpu` (see
-`common/device.py`). Pass `--device cuda`/`--device mps`/`--device cpu`
-explicitly to override.
-
-Optional flags stack freely: `--with-eyes` (blink rate), `--with-mouth`
-(opening + repetitiveness), `--with-eyebrows` (raise), `--with-head-movement`
-(yaw/pitch, shake/nod, shared-attention proxy between two people) — all four
-independent, share one MediaPipe FaceLandmarker call per frame so enabling
-more of them barely costs anything extra — `--with-hands` (finger tracking),
-`--with-reid` (re-identification across exit/re-entry), `--with-chuv-features`
-(reference feature set), `--target-track-id N` (restrict face/hand signals to
-one person), `--blur-faces`, plus the same
-`--tracker`/`--conf-threshold`/`--max-people` as above (with `--with-reid`,
-once `--max-people` identities are confirmed, an unmatched re-entry is forced
-onto the closest missing identity instead of minting a new one — the one
-deliberate exception to reid.py's "discount, never force" rule, see
-`reid.py` for the safety guardrails). See `--help` on each script for the
-full flag list and defaults.
+`--device` auto-detects cuda/mps/cpu. Flags stack freely:
+`--with-eyes/mouth/eyebrows/head-movement`, `--with-hands`, `--with-reid`,
+`--with-chuv-features`, `--target-track-id N`, `--blur-faces`, plus
+`--tracker`/`--conf-threshold`/`--max-people`. See `--help` per script,
+and `reid.py`'s docstring for re-identification details.
 
 ## Modules, briefly
 
-- **`pose/features.py`** — joint angles, movement energy, left/right
-  symmetry, an FFT-based repetitive-motion score, child-caregiver
-  proximity and motor synchrony.
-- **`pose/gaze_head.py`** — head pose (yaw/pitch/roll), a 2D shared-attention
-  proxy, mouth aspect ratio, blink rate, eyebrow raise. Single uncalibrated
-  camera, so treat as a rough proxy, not 3D gaze tracking. In `live_demo.py`
-  these are exposed as four independent flags (`--with-eyes`/`--with-mouth`/
-  `--with-eyebrows`/`--with-head-movement`), not one on/off switch, even
-  though they all come from a single FaceLandmarker call per frame.
-- **`pose/hands.py`** — 21 landmarks/hand, finger flexion, open/closed
-  index, fingertip repetitiveness. Matched to the nearest YOLO wrist.
-- **`pose/mediapipe_pose.py`** — MediaPipe Pose Landmarker in single-person
-  mode, applied inside a bbox crop rather than the whole frame, with the 33
-  BlazePose landmarks remapped onto the same COCO-17 names used everywhere
-  else (`pose/keypoints.py`) so existing feature code doesn't care which
-  model produced the keypoints. Built specifically to reuse the
-  segmentation pipeline's already-stable tracking (see its docstring for
-  why this design — no multi-person tracking of its own) rather than
-  building a second one from scratch. `MediaPipePoseByTrack` pools one
-  landmarker instance per `track_id` instead of sharing a single one across
-  everyone in the frame — MediaPipe's VIDEO running mode keeps per-instance
-  temporal state and requires strictly increasing timestamps, so a shared
-  instance called once per person per frame (same frame timestamp for each)
-  crashes with `ValueError: Input timestamp must be monotonically
-  increasing` as soon as a second person appears in the same frame.
-- **`pose/reid.py`** — restores a person's ID after they leave and re-enter
-  frame (or get briefly occluded in place, e.g. someone putting a jacket
-  on them), using a clothing-invariant body-proportion signature
-  (shoulders/hips/limbs + head geometry), optionally boosted by
-  shirt/pants/hair color and by being in roughly the same spot shortly
-  after disappearing. Retries the match every frame with a rolling window
-  instead of once, and only compares against people who went missing
-  before the current track appeared (avoids false matches between someone
-  present the whole time and someone else who leaves later). All auxiliary
-  signals only ever discount the distance, never force a match — the
-  strongest single signal wins, they don't stack. Verified on synthetic
-  scenarios in `demo/reid_check.py` / `demo/reid_color_check.py`; default
-  thresholds aren't validated on real footage and need on-camera
-  calibration.
-- **`pose/chuv_features.py`** — real-time reimplementation of the reference
-  pipeline's feature formulas (angles, distances, symmetry, COM, temporal
-  derivatives), for testing that strategy without CUDA or clinical video.
-  Feature engineering only — no trained classifier.
+- **`pose/features.py`** — joint angles, movement energy, symmetry,
+  repetitive-motion score, proximity/synchrony.
+- **`pose/gaze_head.py`** — head pose, shared-attention proxy, mouth
+  ratio, blink rate, eyebrow raise (rough proxy, single camera).
+- **`pose/hands.py`** — finger flexion, fingertip repetitiveness.
+- **`pose/mediapipe_pose.py`** — single-person MediaPipe pose remapped
+  onto COCO-17, applied inside a bbox crop.
+- **`pose/reid.py`** — restores identity after exit/re-entry, via a
+  body-proportion signature optionally boosted by color/position/
+  embedding (never forced, strongest signal wins).
+- **`pose/chuv_features.py`** — real-time reimplementation of the
+  reference pipeline's feature formulas. No trained classifier.
 
 ## Known limitations
 
-- ByteTrack alone loses identity on full exit/re-entry or major appearance
-  change; `pose/reid.py` (pose pipeline) / `segmentation/seg_reid.py`
-  (segmentation pipeline) mitigate but don't eliminate this.
-- All thresholds (activity, self-touch, blink, reid distance) are
-  reasonable starting points, not clinically validated — calibrate on your
-  own footage.
-- COCO-17 (YOLO-pose) lacks toe/heel keypoints present in BODY-25, so a few
-  reference-pipeline features can't be replicated here.
-- No trained classifier included — only feature extraction.
+- ByteTrack alone loses identity on full exit/re-entry or major
+  appearance change; `reid.py`/`seg_reid.py` mitigate, don't eliminate.
+- Thresholds (activity, self-touch, blink, reid distance) are starting
+  points, not clinically validated.
+- COCO-17 lacks toe/heel keypoints present in BODY-25.
+- No trained classifier — feature extraction only.
 
 ## Ethics & privacy
 
-Video of minors in a clinical context requires: face blurring as early as
-possible in the pipeline (`pose/anonymize.py` — not currently wired into
-the active segmentation pipeline, see status above), compliance with the
-Swiss LPD and, where applicable, GDPR, and separation of raw video from
-derived features with distinct retention policies.
+Video of minors in a clinical context requires: face blurring as early
+as possible (`pose/anonymize.py` — not yet wired into the active
+pipeline), compliance with Swiss LPD and, where applicable, GDPR, and
+separation of raw video from derived features with distinct retention
+policies.

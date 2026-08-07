@@ -5,7 +5,7 @@ Verifies `segmentation/chunk_store.py` (save/load round-trip to disk) with
 synthetic `SegFrameResult` -- no SAM/GPU dependency.
 
 Usage:
-    python demo/chunk_store_check.py
+    python tests/chunk_store_check.py
 """
 
 import os

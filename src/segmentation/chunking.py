@@ -6,7 +6,7 @@ reconciling IDs between one chunk and the next -- independent of
 SAM/SAM2, used by `sam_backend.py`. No heavy dependency (only numpy/cv2,
 already required by the rest of the project): testable with synthetic
 masks, without needing a GPU or the SAM weights installed (see
-demo/chunking_check.py).
+tests/chunking_check.py).
 
 Why chunking is necessary (not just an optimization)
 ------------------------------------------------------------------

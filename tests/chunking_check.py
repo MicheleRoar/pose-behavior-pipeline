@@ -7,7 +7,7 @@ synthetic data -- no dependency on SAM/SAM2/GPU, only numpy/cv2 already
 required by the rest of the project.
 
 Usage:
-    python demo/chunking_check.py
+    python tests/chunking_check.py
 """
 
 import os

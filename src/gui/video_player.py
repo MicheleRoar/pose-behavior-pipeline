@@ -20,7 +20,7 @@ and sliding feature windows rely on would be lost. So:
 `generator_factory` (typically `lambda: iter_pipeline_frames(**kwargs)`)
 and returns already-ready `RunnerFrame` objects (overlay already drawn).
 This makes it testable without a real video, see
-`demo/video_player_check.py`, which injects a synthetic generator.
+`tests/video_player_check.py`, which injects a synthetic generator.
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ viz.py
 Drawing utilities shared between the live pipeline (`live_demo.py`, which
 reads from Canon R8 / webcam / video file) and the verification scripts
 runnable in environments without a camera (see
-`demo/live_render_check.py`), so the same rendering logic is tested even
+`tests/live_render_check.py`), so the same rendering logic is tested even
 where a real video source isn't available.
 """
 

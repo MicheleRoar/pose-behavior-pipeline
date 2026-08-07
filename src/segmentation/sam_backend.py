@@ -83,7 +83,7 @@ sub-window, re-detection ONLY proposes any new entries.
 Honesty about what's verified here
 --------------------------------------
 This module was initially written and tested ONLY with a fake predictor
-injected in place of sam3/sam2 (see `demo/sam_backend_check.py`, no CUDA
+injected in place of sam3/sam2 (see `tests/sam_backend_check.py`, no CUDA
 GPU in this environment). `_init_state()` below was however CORRECTED
 based on a real test on a CUDA machine (with the SAMURAI fork, which
 vendors the same `sam2_video_predictor` as vanilla SAM2 -- same expected

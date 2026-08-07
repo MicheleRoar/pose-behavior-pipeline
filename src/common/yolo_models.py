@@ -10,7 +10,7 @@ resolved relative to the cwd works only when launching from the one
 folder where the file happened to land, and fails elsewhere), applied
 here to the Ultralytics side instead of MediaPipe Tasks. Kept as a
 separate small module rather than folding into `mediapipe_models.py`:
-`demo/mediapipe_models_check.py` monkeypatches
+`tests/mediapipe_models_check.py` monkeypatches
 `mediapipe_models.MODELS_CACHE_DIR` directly, so that module's public
 surface is left untouched here.
 

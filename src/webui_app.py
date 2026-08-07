@@ -28,9 +28,9 @@ unchanged), different presentation. See the README for which one to pick:
 Requires a real video source and a graphical display: not runnable in the
 sandbox environment used to develop the rest of the pipeline. The bridge's
 pure logic (parameters, frame encoding, metrics) is instead verified
-separately, with no pywebview or window, in `demo/webui_api_check.py`; the
+separately, with no pywebview or window, in `tests/webui_api_check.py`; the
 cache/seek logic behind Play/Back/Forward/timeline is verified in
-`demo/video_player_check.py`.
+`tests/video_player_check.py`.
 """
 
 from __future__ import annotations

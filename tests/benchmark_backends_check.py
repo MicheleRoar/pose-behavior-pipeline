@@ -4,12 +4,12 @@ benchmark_backends_check.py
 Verifies `benchmark_backends.py`: the aggregation part (track duration,
 number of raw ids, "short" percentage, processing fps) with a FAKE
 tracker injected in place of `build_tracker()` (no dependency on real
-YOLO/SAM/SAM2, same philosophy as the other demo/*_check.py), and the
+YOLO/SAM/SAM2, same philosophy as the other tests/*_check.py), and the
 skip logic for the sam31/sam2 methods when the detected device is not
 "cuda".
 
 Usage:
-    python demo/benchmark_backends_check.py
+    python tests/benchmark_backends_check.py
 """
 
 import os

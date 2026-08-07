@@ -112,7 +112,7 @@ def blazepose_to_coco(landmarks, frame_offset_xy: tuple[float, float],
     `frame_offset_xy`: top-left corner of the crop in the full frame
     (x1, y1). `crop_size_wh`: crop dimensions in pixels. Isolated from
     the class that calls MediaPipe so it's testable without
-    mediapipe/camera (see demo/mediapipe_pose_check.py).
+    mediapipe/camera (see tests/mediapipe_pose_check.py).
     """
     x1, y1 = frame_offset_xy
     crop_w, crop_h = crop_size_wh

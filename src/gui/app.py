@@ -26,7 +26,7 @@ Design choices (see also pipeline_runner.py and video_player.py):
 Not runnable in the sandbox used to develop the rest of the pipeline
 (needs a real display and a real video). The cache/seek logic behind
 Play/Forward/Back is verified separately, without a GUI, in
-`demo/video_player_check.py`.
+`tests/video_player_check.py`.
 """
 
 from __future__ import annotations

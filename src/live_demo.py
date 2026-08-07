@@ -49,7 +49,7 @@ Note: this script requires `ultralytics` + `opencv-python` installed
 (see requirements.txt) and a real video source; it is not runnable in
 the sandbox environment used to develop the rest of the pipeline. The
 rendering logic (skeleton + metrics overlay) is instead verified
-separately in `demo/live_render_check.py` with synthetic data.
+separately in `tests/live_render_check.py` with synthetic data.
 """
 
 from __future__ import annotations

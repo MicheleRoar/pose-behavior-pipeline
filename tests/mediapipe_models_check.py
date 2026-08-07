@@ -16,7 +16,7 @@ fail with "unable to find <model name>" -- cause: the default was the
 bare file name, resolved by MediaPipe as a path RELATIVE TO THE CWD.
 
 Usage:
-    python demo/mediapipe_models_check.py
+    python tests/mediapipe_models_check.py
 """
 
 import os

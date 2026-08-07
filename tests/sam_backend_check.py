@@ -3,7 +3,7 @@ sam_backend_check.py
 =======================
 Verifies `segmentation/sam_backend.py::ChunkedVideoPredictorBackend` with
 a FAKE SAM predictor (no dependency on sam3/sam2/CUDA GPU) -- same
-philosophy as `demo/device_check.py` (injecting a fake double in place of
+philosophy as `tests/device_check.py` (injecting a fake double in place of
 the heavy library). Generates a small synthetic video on disk
 (cv2.VideoWriter) so `run()` can read real frames via cv2.VideoCapture
 exactly as it would with a real video.
@@ -16,7 +16,7 @@ an id never used before, there are no duplicate or missing frames in the
 final output, and disk persistence writes one file per chunk.
 
 Usage:
-    python demo/sam_backend_check.py
+    python tests/sam_backend_check.py
 """
 
 import os

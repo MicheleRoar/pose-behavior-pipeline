@@ -19,7 +19,7 @@ Requires a real video source and a graphical display: not runnable in the
 sandbox environment used to develop the rest of the pipeline. The
 cache/seek logic behind Play/Forward/Back (in `gui/video_player.py`) is
 instead verified separately, with no GUI or video, in
-`demo/video_player_check.py`.
+`tests/video_player_check.py`.
 """
 
 from __future__ import annotations

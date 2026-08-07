@@ -35,7 +35,7 @@ Silicon, see the discussion in the README.
 The `webview` import is delayed (only inside the methods that need it),
 so `build_player_kwargs` / `encode_frame_jpeg_b64` / `build_status` /
 `_LatencyTracker` remain testable without pywebview installed -- see
-`demo/webui_api_check.py`.
+`tests/webui_api_check.py`.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def probe_video_metadata(path: str) -> dict:
 
     Isolated from `Api` to be testable without pywebview (a real video
     file is enough, or in tests it's bypassed by passing a path that
-    doesn't open -- see `demo/webui_api_check.py`). Returns `None`
+    doesn't open -- see `tests/webui_api_check.py`). Returns `None`
     values if the file doesn't open or the container doesn't declare
     these metadata (happens with some codecs/containers): the caller
     must treat them as "unknown duration", not as zero.
@@ -103,7 +103,7 @@ def build_player_kwargs(params: dict) -> dict:
     """Pure function: converts the parameter dict sent from JS into the
     arguments expected by `iter_pipeline_frames(...)`. Isolated from
     `Api` to be testable without a real window -- see
-    `demo/webui_api_check.py`. Mirrors EXACTLY the logic of
+    `tests/webui_api_check.py`. Mirrors EXACTLY the logic of
     `gui/app.py::App._build_player()` (same defaults, same conditional
     gating of hands/face/reid/mediapipe-pose based on mode), so the web
     GUI's behavior doesn't diverge from the Tkinter one.
@@ -114,7 +114,7 @@ def build_player_kwargs(params: dict) -> dict:
     absent/None, THIS function leaves it None -- it's `Api.build_player()`,
     not this pure function, that resolves it with
     `detect_default_device()`, so `build_player_kwargs` stays testable
-    without requiring torch installed, see `demo/webui_api_check.py`),
+    without requiring torch installed, see `tests/webui_api_check.py`),
     "scale" ("n"|"s"|"m", default "s"), "max_people" (int, string, or
     None/""), "with_hands", "with_eyes", "with_mouth", "with_eyebrows",
     "with_head_movement", "with_mediapipe_pose" (bool), "reid" (bool,
@@ -286,7 +286,7 @@ def build_player_kwargs(params: dict) -> dict:
 def encode_frame_jpeg_b64(frame_bgr, max_width: int = 1600, quality: int = 80) -> str:
     """BGR ndarray -> base64 JPEG data-URL ready for an `<img src="...">`.
     Isolated to be testable without pywebview/a camera (see
-    `demo/webui_api_check.py`, which passes it a synthetic array).
+    `tests/webui_api_check.py`, which passes it a synthetic array).
     Resizes only downward (never upward) up to `max_width`, the same
     non-goal as `MAX_DISPLAY_WIDTH` in gui/app.py: it only affects
     what's shown/transferred, never the source resolution used for

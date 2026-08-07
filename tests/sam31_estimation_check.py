@@ -18,7 +18,7 @@ Two scenarios:
   a very different box (no overlap) gets a new id.
 
 Usage:
-    python demo/sam31_estimation_check.py
+    python tests/sam31_estimation_check.py
 """
 
 import os

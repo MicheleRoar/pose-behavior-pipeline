@@ -35,7 +35,7 @@ def make_skeleton(shoulder_w: float, hip_w: float, upper_arm: float, forearm: fl
                    rng: np.random.Generator | None = None) -> np.ndarray:
     """Synthetic COCO-17 skeleton consistent with the given proportions
     (as a fraction of torso length), centered on (tx, ty). Unlike
-    `demo/synth_data.py` (which scales ALL joints uniformly, so it always
+    `tests/synth_data.py` (which scales ALL joints uniformly, so it always
     produces the same normalized signature), here each segment has an
     independent ratio — necessary to simulate different people.
     """

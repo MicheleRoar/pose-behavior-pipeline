@@ -12,7 +12,7 @@ sensible output, without depending on Ultralytics/torch (heavy to install
 in this sandbox environment) or on real video data.
 
 Run with:  python synthetic_demo.py
-Output: demo_outputs/features.csv, demo_outputs/*.png
+Output: test_outputs/features.csv, test_outputs/*.png
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from pose.features import (
 )
 from synth_data import make_child_sequence, make_caregiver_sequence
 
-OUT_DIR = Path(__file__).resolve().parent / "demo_outputs"
+OUT_DIR = Path(__file__).resolve().parent / "test_outputs"
 OUT_DIR.mkdir(exist_ok=True)
 
 FPS = 30.0

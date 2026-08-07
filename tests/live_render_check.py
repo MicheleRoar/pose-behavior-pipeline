@@ -14,7 +14,7 @@ separately on the Mac): useful to understand how much frame-budget margin
 is left for YOLO inference given a target FPS.
 
 Run with: python live_render_check.py
-Output: demo_outputs/live_render_check.mp4, demo_outputs/live_frame_timing.csv
+Output: test_outputs/live_render_check.mp4, test_outputs/live_frame_timing.csv
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from pose.features import compute_joint_angles, repetitive_motion_score
 from common.viz import draw_skeleton, draw_text_block, draw_fps
 from synth_data import make_child_sequence, make_caregiver_sequence
 
-OUT_DIR = Path(__file__).resolve().parent / "demo_outputs"
+OUT_DIR = Path(__file__).resolve().parent / "test_outputs"
 OUT_DIR.mkdir(exist_ok=True)
 
 FPS = 30.0
