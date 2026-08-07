@@ -1,17 +1,17 @@
 """
 keypoints.py
 ============
-Costanti e utility condivise per lo schema di keypoint COCO-17, usato sia da
-Ultralytics YOLO-pose sia da molte altre pipeline di pose estimation.
+Shared constants and utilities for the COCO-17 keypoint schema, used both
+by Ultralytics YOLO-pose and by many other pose estimation pipelines.
 
-Avere questo modulo separato permette di riutilizzare gli indici in
-`features.py`, `anonymize.py` e negli script di analisi, evitando "numeri
-magici" sparsi nel codice.
+Having this as a separate module allows reusing the indices in
+`features.py`, `anonymize.py`, and analysis scripts, avoiding "magic
+numbers" scattered around the code.
 """
 
 from __future__ import annotations
 
-# Schema COCO-17: indice -> nome del keypoint
+# COCO-17 schema: index -> keypoint name
 COCO17 = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
@@ -21,10 +21,10 @@ COCO17 = [
 
 KP = {name: idx for idx, name in enumerate(COCO17)}
 
-# Keypoint della testa, usati per l'anonimizzazione (blur del volto)
+# Head keypoints, used for anonymization (face blurring)
 HEAD_KEYPOINTS = ["nose", "left_eye", "right_eye", "left_ear", "right_ear"]
 
-# Coppie sinistra/destra per il calcolo di indici di simmetria
+# Left/right pairs for computing symmetry indices
 LR_PAIRS = [
     ("left_shoulder", "right_shoulder"),
     ("left_elbow", "right_elbow"),
@@ -34,8 +34,8 @@ LR_PAIRS = [
     ("left_ankle", "right_ankle"),
 ]
 
-# Connessioni scheletriche standard COCO-17, usate per disegnare lo
-# scheletro sopra il frame video (overlay in tempo reale)
+# Standard COCO-17 skeleton connections, used to draw the skeleton over the
+# video frame (real-time overlay)
 SKELETON_EDGES = [
     ("left_shoulder", "right_shoulder"),
     ("left_shoulder", "left_elbow"), ("left_elbow", "left_wrist"),
@@ -48,7 +48,7 @@ SKELETON_EDGES = [
     ("left_eye", "left_ear"), ("right_eye", "right_ear"),
 ]
 
-# Terne (a, b, c) per il calcolo di angoli articolari all'articolazione b
+# (a, b, c) triplets for computing joint angles at joint b
 JOINT_ANGLE_TRIPLETS = {
     "left_elbow_angle": ("left_shoulder", "left_elbow", "left_wrist"),
     "right_elbow_angle": ("right_shoulder", "right_elbow", "right_wrist"),

@@ -1,14 +1,14 @@
 """
 benchmark_backends_check.py
 ==============================
-Verifica `benchmark_backends.py`: la parte di aggregazione (durata delle
-tracce, numero di id grezzi, percentuale "brevi", fps di elaborazione) con
-un tracker FINTO iniettato al posto di `build_tracker()` (nessuna
-dipendenza da YOLO/SAM/SAM2 reali, stessa filosofia degli altri
-demo/*_check.py), e la logica di skip per i metodi sam31/sam2 quando il
-device rilevato non e' "cuda".
+Verifies `benchmark_backends.py`: the aggregation part (track duration,
+number of raw ids, "short" percentage, processing fps) with a FAKE
+tracker injected in place of `build_tracker()` (no dependency on real
+YOLO/SAM/SAM2, same philosophy as the other demo/*_check.py), and the
+skip logic for the sam31/sam2 methods when the detected device is not
+"cuda".
 
-Uso:
+Usage:
     python demo/benchmark_backends_check.py
 """
 
@@ -25,9 +25,9 @@ from segmentation.seg_estimation import SegFrameResult  # noqa: E402
 
 
 class _FakeTracker:
-    """Tracker finto: restituisce una sequenza di `SegFrameResult` fissata
-    a mano, per verificare che `run_one_method()` aggreghi le metriche
-    giuste a partire da un input noto (non un video/modello vero)."""
+    """Fake tracker: returns a hand-fixed sequence of `SegFrameResult`, to
+    verify that `run_one_method()` aggregates the right metrics from a
+    known input (not a real video/model)."""
 
     def __init__(self, results):
         self._results = results
@@ -37,11 +37,11 @@ class _FakeTracker:
 
 
 def _fake_results():
-    # id 1 presente in tutti e 3 i frame, id 2 solo nel frame di mezzo
-    # (traccia piu' "corta") -- quello che conta e' il confronto RELATIVO
-    # tra le due durate, non il valore assoluto (entrambe sotto
-    # SHORT_LIVED_THRESHOLD_FRAMES=15, volutamente: un video di test da 3
-    # frame non deve pretendere di avere tracce "lunghe" in senso assoluto).
+    # id 1 present in all 3 frames, id 2 only in the middle frame (a
+    # "shorter" track) -- what matters is the RELATIVE comparison between
+    # the two durations, not the absolute value (both intentionally below
+    # SHORT_LIVED_THRESHOLD_FRAMES=15: a 3-frame test video shouldn't
+    # claim to have "long" tracks in an absolute sense).
     box = np.array([0.0, 0.0, 10.0, 10.0])
     poly = np.array([[0, 0], [10, 0], [10, 10]])
     return [
@@ -66,17 +66,17 @@ def part1_run_one_method_aggregates_lifespans_correctly():
     assert result["method"] == "yolo"
     assert result["n_frames"] == 3
     assert result["n_raw_ids"] == 2
-    assert result["lifespan_min_frames"] == 1, "id 2 e' presente in un solo frame"
-    assert result["lifespan_max_frames"] == 3, "id 1 e' presente in tutti e 3 i frame"
-    assert result["short_lived_ids_pct"] == 100.0, "entrambi gli id sono sotto la soglia (15 frame)"
+    assert result["lifespan_min_frames"] == 1, "id 2 is present in only one frame"
+    assert result["lifespan_max_frames"] == 3, "id 1 is present in all 3 frames"
+    assert result["short_lived_ids_pct"] == 100.0, "both ids are below the threshold (15 frames)"
     assert result["lifespan_median_s"] == round(result["lifespan_median_frames"] / 15.0, 2), \
-        "la conversione in secondi deve usare l'fps passato"
+        "the conversion to seconds must use the passed fps"
     print("PASS part1_run_one_method_aggregates_lifespans_correctly")
 
 
 def part2_sam_methods_skipped_without_cuda():
     result = bb.run_one_method("sam31", source="unused.mp4", fps=15.0, device="mps")
-    assert result is None, "sam31 su device!='cuda' deve essere saltato (None), senza costruire nulla"
+    assert result is None, "sam31 on device!='cuda' must be skipped (None), without building anything"
     print("PASS part2_sam_methods_skipped_without_cuda")
 
 
@@ -88,24 +88,24 @@ def part3_run_benchmark_skips_gracefully_and_keeps_valid_methods():
     finally:
         bb.build_tracker = original_build_tracker
 
-    assert len(df) == 1, "sam31 va saltato (device mps), deve restare solo 'yolo' (finto)"
+    assert len(df) == 1, "sam31 must be skipped (mps device), only 'yolo' (fake) should remain"
     assert df.iloc[0]["method"] == "yolo"
     print("PASS part3_run_benchmark_skips_gracefully_and_keeps_valid_methods")
 
 
 def part4_unknown_method_raises():
     try:
-        bb.run_benchmark(["metodo-inventato"], source="unused.mp4", fps=15.0, device="cpu")
-        raise AssertionError("atteso ValueError per un metodo sconosciuto")
+        bb.run_benchmark(["made-up-method"], source="unused.mp4", fps=15.0, device="cpu")
+        raise AssertionError("expected ValueError for an unknown method")
     except ValueError:
         pass
     print("PASS part4_unknown_method_raises")
 
 
 def part5_sweep_produces_cartesian_product_for_sam_only():
-    # sam_chunk_size/overlap/redetect_every riportati nel CSV: yolo li
-    # ignora (un solo run, None nelle colonne), sam31 esegue il prodotto
-    # cartesiano di tutte le combinazioni date.
+    # sam_chunk_size/overlap/redetect_every reported in the CSV: yolo
+    # ignores them (a single run, None in the columns), sam31 runs the
+    # cartesian product of all given combinations.
     original_build_tracker = bb.build_tracker
     bb.build_tracker = lambda *a, **k: _FakeTracker(_fake_results())
     try:
@@ -119,26 +119,26 @@ def part5_sweep_produces_cartesian_product_for_sam_only():
     yolo_rows = df[df["method"] == "yolo"]
     sam_rows = df[df["method"] == "sam31"]
     assert len(yolo_rows) == 1, \
-        "yolo ignora i tre parametri sam_* -- un solo run, non ripetuto per ogni combinazione"
-    # pandas converte None -> NaN in una colonna numerica mista con gli
-    # interi delle righe sam31 -- pd.isna(), non "is None", per verificarlo.
+        "yolo ignores the three sam_* parameters -- a single run, not repeated for every combination"
+    # pandas converts None -> NaN in a numeric column mixed with the
+    # integers from the sam31 rows -- pd.isna(), not "is None", to verify it.
     assert pd.isna(yolo_rows.iloc[0]["sam_chunk_size"]), \
-        "yolo non usa sam_chunk_size -- NaN/None nel CSV, non un valore fuorviante"
+        "yolo doesn't use sam_chunk_size -- NaN/None in the CSV, not a misleading value"
     assert yolo_rows.iloc[0]["run_label"] == "yolo", \
-        "con un solo run (yolo ignora la sweep), run_label == method, senza suffisso"
-    assert len(sam_rows) == 8, "2 chunk_size x 2 overlap x 2 redetect_every = 8 combinazioni per sam31"
+        "with a single run (yolo ignores the sweep), run_label == method, no suffix"
+    assert len(sam_rows) == 8, "2 chunk_size x 2 overlap x 2 redetect_every = 8 combinations for sam31"
     assert set(sam_rows["sam_chunk_size"]) == {300, 600}
     assert set(sam_rows["sam_overlap"]) == {30, 50}
-    # sam_redetect_every: pandas trasforma la colonna intera (incluso il
-    # None di yolo) in float64 -- None diventa NaN, non confrontabile con
-    # "==" ne' presente in un set nel modo consueto (nan != nan).
+    # sam_redetect_every: pandas turns the integer column (including
+    # yolo's None) into float64 -- None becomes NaN, not comparable with
+    # "==" nor present in a set in the usual way (nan != nan).
     redetect_values = sam_rows["sam_redetect_every"].tolist()
     redetect_non_null = {v for v in redetect_values if pd.notna(v)}
-    assert redetect_non_null == {100}, f"atteso 100 tra i valori non-null, trovato {redetect_non_null}"
+    assert redetect_non_null == {100}, f"expected 100 among the non-null values, found {redetect_non_null}"
     assert any(pd.isna(v) for v in redetect_values), \
-        "atteso anche il caso redetect_every=None (disattivato) nella sweep"
+        "the redetect_every=None (disabled) case should also be present in the sweep"
     assert sam_rows["run_label"].str.contains(r"sam31\[cs=").all(), \
-        "con piu' di una combinazione, run_label deve distinguerle"
+        "with more than one combination, run_label must distinguish them"
     print("PASS part5_sweep_produces_cartesian_product_for_sam_only")
 
 
@@ -152,8 +152,8 @@ def part6_sweep_skips_invalid_chunk_size_overlap_combo():
         )
     finally:
         bb.build_tracker = original_build_tracker
-    # chunk_size=50 <= overlap=100 -- combinazione non valida, saltata; resta solo chunk_size=300
-    assert len(df) == 1, "la combinazione non valida (50<=100) va saltata, non deve crashare"
+    # chunk_size=50 <= overlap=100 -- invalid combination, skipped; only chunk_size=300 remains
+    assert len(df) == 1, "the invalid combination (50<=100) must be skipped, must not crash"
     assert df.iloc[0]["sam_chunk_size"] == 300
     print("PASS part6_sweep_skips_invalid_chunk_size_overlap_combo")
 
@@ -161,11 +161,11 @@ def part6_sweep_skips_invalid_chunk_size_overlap_combo():
 def part7_parse_int_list_handles_commas_and_none():
     assert bb._parse_int_list("600") == [600]
     assert bb._parse_int_list("300,600") == [300, 600]
-    assert bb._parse_int_list("300, 600 ") == [300, 600], "spazi attorno alla virgola tollerati"
+    assert bb._parse_int_list("300, 600 ") == [300, 600], "spaces around the comma are tolerated"
     assert bb._parse_int_list("", allow_none=True) == [None], \
-        "stringa vuota con allow_none -- default 'disattivato', un solo run"
+        "empty string with allow_none -- default 'disabled', a single run"
     assert bb._parse_int_list("100,", allow_none=True) == [100, None], \
-        "elemento vuoto tra le virgole -- include anche il caso 'disattivato' nella sweep"
+        "empty element between commas -- also includes the 'disabled' case in the sweep"
     print("PASS part7_parse_int_list_handles_commas_and_none")
 
 
@@ -177,7 +177,7 @@ def main():
     part5_sweep_produces_cartesian_product_for_sam_only()
     part6_sweep_skips_invalid_chunk_size_overlap_combo()
     part7_parse_int_list_handles_commas_and_none()
-    print("\nTutti i test di benchmark_backends.py sono passati.")
+    print("\nAll benchmark_backends.py tests passed.")
 
 
 if __name__ == "__main__":

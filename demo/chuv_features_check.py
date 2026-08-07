@@ -1,12 +1,12 @@
 """
 chuv_features_check.py
 =======================
-Verifica di `chuv_features.py` (replica in tempo reale del feature
-engineering del repository CHUV) SENZA camera/YOLO: scheletri sintetici con
-angoli noti + una sequenza di frame con spostamento noto per verificare
-velocita'/accelerazione.
+Verifies `chuv_features.py` (real-time replica of the CHUV repository's
+feature engineering) WITHOUT a camera/YOLO: synthetic skeletons with
+known angles + a sequence of frames with a known displacement to verify
+velocity/acceleration.
 
-Esegui con: python chuv_features_check.py
+Run with: python chuv_features_check.py
 """
 
 from __future__ import annotations
@@ -28,9 +28,9 @@ N_JOINTS = 17
 
 
 def _blank_kxy() -> np.ndarray:
-    # scheletro placeholder: tutti i punti distanti tra loro cosi' nessun
-    # angolo/distanza risulta accidentalmente degenere nei test che non li
-    # toccano esplicitamente.
+    # placeholder skeleton: all points far apart from each other so no
+    # angle/distance ends up accidentally degenerate in tests that don't
+    # explicitly touch them.
     kxy = np.zeros((N_JOINTS, 2))
     for i in range(N_JOINTS):
         kxy[i] = [i * 37.0, i * 53.0]
@@ -47,12 +47,12 @@ def part1_straight_arm_is_180deg():
     _set(kxy, "left_hip", 0, 100)
     _set(kxy, "right_shoulder", 40, 0)
     _set(kxy, "right_hip", 40, 100)
-    _set(kxy, "left_elbow", 0, 50)     # braccio sinistro DISTESO in verticale
+    _set(kxy, "left_elbow", 0, 50)     # left arm EXTENDED vertically
     _set(kxy, "left_wrist", 0, 100)
     norm = normalize_keypoints(kxy)
     feats = compute_derived_features(norm)
     assert abs(feats["l_elbow_angle"] - 180.0) < 1.0, feats["l_elbow_angle"]
-    print(f"Parte 1: braccio disteso -> l_elbow_angle={feats['l_elbow_angle']:.1f} deg (atteso ~180) — OK")
+    print(f"Part 1: extended arm -> l_elbow_angle={feats['l_elbow_angle']:.1f} deg (expected ~180) — OK")
 
 
 def part2_right_angle_arm_is_90deg():
@@ -61,12 +61,12 @@ def part2_right_angle_arm_is_90deg():
     _set(kxy, "left_hip", 0, 100)
     _set(kxy, "right_shoulder", 40, 0)
     _set(kxy, "right_hip", 40, 100)
-    _set(kxy, "left_elbow", 0, 50)     # avambraccio PERPENDICOLARE al braccio
+    _set(kxy, "left_elbow", 0, 50)     # forearm PERPENDICULAR to the upper arm
     _set(kxy, "left_wrist", 50, 50)
     norm = normalize_keypoints(kxy)
     feats = compute_derived_features(norm)
     assert abs(feats["l_elbow_angle"] - 90.0) < 1.0, feats["l_elbow_angle"]
-    print(f"Parte 2: avambraccio a squadra -> l_elbow_angle={feats['l_elbow_angle']:.1f} deg (atteso ~90) — OK")
+    print(f"Part 2: right-angle forearm -> l_elbow_angle={feats['l_elbow_angle']:.1f} deg (expected ~90) — OK")
 
 
 def part3_mid_hip_is_always_origin_and_com_is_half_neck():
@@ -77,52 +77,52 @@ def part3_mid_hip_is_always_origin_and_com_is_half_neck():
     feats = compute_derived_features(norm)
     expected_com = norm["neck"] / 2.0
     assert np.allclose([feats["com_x"], feats["com_y"]], expected_com, atol=1e-6), (
-        f"com={feats['com_x'], feats['com_y']} atteso meta' collo={tuple(expected_com)}"
+        f"com={feats['com_x'], feats['com_y']} expected half-neck={tuple(expected_com)}"
     )
-    print("Parte 3: mid_hip normalizzato = origine, com_x/com_y = meta' collo "
-          "(proprieta' del calcolo originale, riprodotta fedelmente) — OK")
+    print("Part 3: normalized mid_hip = origin, com_x/com_y = half-neck "
+          "(property of the original computation, faithfully reproduced) — OK")
 
 
 def part4_velocity_and_acceleration_from_known_displacement():
     tracker = ChuvFeatureTracker()
     fps = 30.0
 
-    # persona ferma: frame 0 -> nessuna storia precedente, tutto NaN
+    # stationary person: frame 0 -> no prior history, everything NaN
     kxy_still = make_skeleton(**PERSON_A, tx=0.0, ty=0.0, jitter=0.0, rng=None)
     feats0 = compute_chuv_features(kxy_still, track_id=1, now=0 / fps, tracker=tracker)
-    assert np.isnan(feats0["com_x_vel"]), "primo frame: velocita' deve essere NaN (nessun frame precedente)"
+    assert np.isnan(feats0["com_x_vel"]), "first frame: velocity must be NaN (no previous frame)"
 
-    # frame 1: la persona si sposta di +30 unita' in x in 1/30s -> velocita' attesa = 900 unita'/s
+    # frame 1: the person moves +30 units in x over 1/30s -> expected velocity = 900 units/s
     kxy_moved = make_skeleton(**PERSON_A, tx=30.0, ty=0.0, jitter=0.0, rng=None)
     feats1 = compute_chuv_features(kxy_moved, track_id=1, now=1 / fps, tracker=tracker)
-    # nota: tx sposta l'intero scheletro, ma le coordinate sono normalizzate
-    # rispetto al proprio mid_hip (che si sposta insieme), quindi com_x
-    # normalizzato NON cambia per una traslazione rigida pura -- verifichiamo
-    # invece neck_x_vel/mid_hip_x_vel, che per costruzione di
-    # normalize_keypoints restano sempre a (0,0): la velocita' "in scena"
-    # (prima della normalizzazione) non e' osservabile da queste feature,
-    # solo la cinematica RELATIVA al proprio bacino (es. oscillazione delle
-    # braccia) lo e'. Verifichiamo quindi con un movimento del polso relativo
-    # al corpo, non una traslazione rigida dell'intera persona.
+    # note: tx shifts the whole skeleton, but coordinates are normalized
+    # relative to their own mid_hip (which moves along with it), so
+    # normalized com_x does NOT change for a pure rigid translation --
+    # instead we verify neck_x_vel/mid_hip_x_vel, which by construction
+    # of normalize_keypoints always stay at (0,0): "in-scene" velocity
+    # (before normalization) is not observable from these features, only
+    # kinematics RELATIVE to one's own pelvis (e.g. arm swing) is. So we
+    # verify with a wrist movement relative to the body, not a rigid
+    # translation of the whole person.
     assert feats1["mid_hip_x_vel"] == 0.0 and feats1["neck_x_vel"] == 0.0, (
-        "una traslazione rigida non deve produrre velocita' nelle feature "
-        "normalizzate rispetto al bacino (mid_hip e' sempre l'origine)"
+        "a rigid translation must not produce velocity in the features "
+        "normalized relative to the pelvis (mid_hip is always the origin)"
     )
-    print("Parte 4a: traslazione rigida dell'intera persona -> velocita' nulla nelle "
-          "feature normalizzate (atteso: solo il movimento RELATIVO al bacino e' "
-          "osservabile, non lo spostamento in scena) — OK")
+    print("Part 4a: rigid translation of the whole person -> zero velocity in the "
+          "normalized features (expected: only movement RELATIVE to the pelvis is "
+          "observable, not the in-scene displacement) — OK")
 
-    # movimento relativo al corpo: il polso destro si alza rispetto al
-    # busto, tra due frame a 1/30s di distanza -> velocita' attesa diversa da zero
+    # movement relative to the body: the right wrist raises relative to
+    # the torso, between two frames 1/30s apart -> expected nonzero velocity
     tracker2 = ChuvFeatureTracker()
     kxy_a = make_skeleton(**PERSON_A, tx=0.0, ty=0.0, jitter=0.0, rng=None)
     compute_chuv_features(kxy_a, track_id=2, now=0 / fps, tracker=tracker2)
     kxy_b = kxy_a.copy()
-    kxy_b[KP["right_wrist"]] += [0.0, -20.0]  # polso destro alzato di 20 unita'
+    kxy_b[KP["right_wrist"]] += [0.0, -20.0]  # right wrist raised by 20 units
     feats_b = compute_chuv_features(kxy_b, track_id=2, now=1 / fps, tracker=tracker2)
-    assert feats_b["r_wrist_y_vel"] < -1.0, f"atteso r_wrist_y_vel negativo (si alza), trovato {feats_b['r_wrist_y_vel']}"
-    print(f"Parte 4b: polso destro sollevato tra due frame -> r_wrist_y_vel="
-          f"{feats_b['r_wrist_y_vel']:.1f} (atteso negativo, coerente col sistema immagine y-in-basso) — OK")
+    assert feats_b["r_wrist_y_vel"] < -1.0, f"expected negative r_wrist_y_vel (rising), found {feats_b['r_wrist_y_vel']}"
+    print(f"Part 4b: right wrist raised between two frames -> r_wrist_y_vel="
+          f"{feats_b['r_wrist_y_vel']:.1f} (expected negative, consistent with the y-down image system) — OK")
 
 
 def part5_forget_resets_state():
@@ -131,9 +131,9 @@ def part5_forget_resets_state():
     compute_chuv_features(kxy, track_id=9, now=0.0, tracker=tracker)
     tracker.forget(9)
     feats = compute_chuv_features(kxy, track_id=9, now=100.0, tracker=tracker)
-    assert np.isnan(feats["com_x_vel"]), "dopo forget(), il prossimo update deve ripartire da NaN"
-    print("Parte 5: forget() ripulisce lo stato -> il track_id ripartirebbe da NaN come "
-          "un id mai visto prima — OK")
+    assert np.isnan(feats["com_x_vel"]), "after forget(), the next update must start over from NaN"
+    print("Part 5: forget() clears the state -> the track_id would start over from NaN as "
+          "if it were an id never seen before — OK")
 
 
 def main():
@@ -142,8 +142,8 @@ def main():
     part3_mid_hip_is_always_origin_and_com_is_half_neck()
     part4_velocity_and_acceleration_from_known_displacement()
     part5_forget_resets_state()
-    print("\nVerifica completata senza errori: angoli, distanze normalizzate, COM "
-          "e derivate temporali di chuv_features.py si comportano come atteso.")
+    print("\nVerification completed with no errors: angles, normalized distances, COM "
+          "and time derivatives of chuv_features.py behave as expected.")
 
 
 if __name__ == "__main__":

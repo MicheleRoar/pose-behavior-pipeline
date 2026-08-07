@@ -1,21 +1,21 @@
 """
 sam_backend_check.py
 =======================
-Verifica `segmentation/sam_backend.py::ChunkedVideoPredictorBackend` con un
-predictor SAM FINTO (nessuna dipendenza da sam3/sam2/GPU CUDA) --
-stessa filosofia di `demo/device_check.py` (iniezione di un doppio finto al
-posto della libreria pesante). Genera un piccolo video sintetico su disco
-(cv2.VideoWriter) cosi' `run()` puo' leggere frame reali via
-cv2.VideoCapture esattamente come farebbe con un video vero.
+Verifies `segmentation/sam_backend.py::ChunkedVideoPredictorBackend` with
+a FAKE SAM predictor (no dependency on sam3/sam2/CUDA GPU) -- same
+philosophy as `demo/device_check.py` (injecting a fake double in place of
+the heavy library). Generates a small synthetic video on disk
+(cv2.VideoWriter) so `run()` can read real frames via cv2.VideoCapture
+exactly as it would with a real video.
 
-Scenario testato: persona A presente fin dal primo frame (rilevata al
-bootstrap del chunk 0), persona B che "entra" a meta' video (rilevata solo
-al chunk 2) -- verifica che: gli id restano continui tra un chunk e il
-successivo per le persone gia' note, una persona nuova rilevata a meta'
-video riceve un id mai usato prima, non ci sono frame duplicati o mancanti
-nell'output finale, e la persistenza su disco scrive un file per chunk.
+Scenario tested: person A present from the first frame (detected at
+chunk 0's bootstrap), person B who "enters" mid-video (detected only at
+chunk 2) -- verifies that: ids remain continuous between one chunk and
+the next for already-known people, a new person detected mid-video gets
+an id never used before, there are no duplicate or missing frames in the
+final output, and disk persistence writes one file per chunk.
 
-Uso:
+Usage:
     python demo/sam_backend_check.py
 """
 
@@ -58,17 +58,17 @@ def _box_to_mask(box: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
 
 
 class _FakePredictor:
-    """Predictor SAM finto: 'ricorda' solo la box con cui e' stato seminato
-    per ogni obj_id (posizione statica, non simula un vero movimento -- non
-    e' il suo scopo, vedi il docstring del modulo) e la restituisce come
-    maschera identica per ogni frame del chunk.
+    """Fake SAM predictor: 'remembers' only the box it was seeded with
+    for each obj_id (static position, doesn't simulate real movement --
+    that's not its purpose, see the module docstring) and returns it as
+    an identical mask for every frame of the chunk.
 
-    `init_state()` riceve un PERCORSO a una cartella (non una lista di
-    frame in memoria) -- stessa interfaccia richiesta dal vero SAM2/SAM
-    (vedi `ChunkedVideoPredictorBackend._init_state()`): qui si limita a
-    contare i file JPEG scritti da `_init_state()`, cosi' il test verifica
-    davvero che quella scrittura sia avvenuta con il numero giusto di
-    frame, non solo che il codice non sollevi un'eccezione."""
+    `init_state()` receives a PATH to a folder (not a list of in-memory
+    frames) -- same interface required by the real SAM2/SAM (see
+    `ChunkedVideoPredictorBackend._init_state()`): here it just counts
+    the JPEG files written by `_init_state()`, so the test really
+    verifies that write happened with the right number of frames, not
+    just that the code doesn't raise an exception."""
 
     def __init__(self, frame_shape: tuple[int, int]):
         self.frame_shape = frame_shape
@@ -90,11 +90,10 @@ class _FakePredictor:
 
 
 class _FakeBackend(ChunkedVideoPredictorBackend):
-    """Sottoclasse di test: `_build_predictor()` restituisce il predictor
-    finto, `_detect_people()` segue uno 'copione' fisso invece di chiamare
-    YOLO (non installato in questo ambiente) -- un elemento dello schedule
-    per ogni chiamata attesa (una per chunk, vedi il docstring del
-    modulo)."""
+    """Test subclass: `_build_predictor()` returns the fake predictor,
+    `_detect_people()` follows a fixed 'script' instead of calling YOLO
+    (not installed in this environment) -- one schedule element per
+    expected call (one per chunk, see the module docstring)."""
 
     def __init__(self, *, detect_schedule: list[list[np.ndarray]], **kwargs):
         super().__init__(**kwargs)
@@ -128,12 +127,12 @@ def part1_ids_stay_continuous_across_chunks():
         results = list(backend.run(video_path))
         frame_indices = [r.frame_index for r in results]
         assert frame_indices == list(range(TOTAL_FRAMES)), \
-            f"attesi tutti i frame 0..{TOTAL_FRAMES - 1} senza salti/duplicati, ottenuto {frame_indices}"
+            f"expected all frames 0..{TOTAL_FRAMES - 1} with no gaps/duplicates, got {frame_indices}"
 
         ids_per_frame = {r.frame_index: {p[0] for p in r.people} for r in results}
-        # persona A: presente fin dal frame 0, sempre lo stesso id in TUTTI i frame
+        # person A: present from frame 0, always the same id in ALL frames
         a_ids = {next(iter(ids)) for f, ids in ids_per_frame.items() if f < 20 and len(ids) == 1}
-        assert len(a_ids) == 1, f"id di A deve restare lo stesso in tutti i frame < 20, trovati {a_ids}"
+        assert len(a_ids) == 1, f"A's id must stay the same in all frames < 20, found {a_ids}"
         print("PASS part1_ids_stay_continuous_across_chunks")
     finally:
         shutil.rmtree(tmp_dir)
@@ -149,22 +148,23 @@ def part2_new_person_mid_video_gets_fresh_id_with_expected_lag():
         results = list(backend.run(video_path))
         ids_per_frame = {r.frame_index: {p[0] for p in r.people} for r in results}
 
-        # B viene rilevata durante il chunk 2 (che parte al frame originale
-        # 20), ma quel frame di ancoraggio e' gia' stato emesso dal chunk 1
-        # (che non conosceva B) -- quindi B compare per la prima volta solo
-        # dal primo frame REALMENTE emesso dal chunk 2, cioe' 20 + overlap.
+        # B is detected during chunk 2 (which starts at original frame
+        # 20), but that anchor frame has already been emitted by chunk 1
+        # (which didn't know about B) -- so B appears for the first time
+        # only from the first frame REALLY emitted by chunk 2, i.e.
+        # 20 + overlap.
         first_seen = min(f for f, ids in ids_per_frame.items() if len(ids) == 2)
-        assert first_seen == 20 + OVERLAP, f"atteso {20 + OVERLAP}, ottenuto {first_seen}"
+        assert first_seen == 20 + OVERLAP, f"expected {20 + OVERLAP}, got {first_seen}"
         assert all(len(ids_per_frame[f]) == 1 for f in range(0, first_seen)), \
-            "prima di questo, deve esserci solo A"
+            "before this, only A should be present"
         assert all(len(ids_per_frame[f]) == 2 for f in range(first_seen, TOTAL_FRAMES)), \
-            "da qui in poi, sia A che B devono essere presenti"
+            "from here on, both A and B should be present"
 
         all_ids = set()
         for ids in ids_per_frame.values():
             all_ids |= ids
-        assert len(all_ids) == 2, f"attesi esattamente 2 id globali distinti in tutta la sessione, trovati {all_ids}"
-        print(f"PASS part2_new_person_mid_video_gets_fresh_id_with_expected_lag (B vista da frame {first_seen})")
+        assert len(all_ids) == 2, f"expected exactly 2 distinct global ids across the whole session, found {all_ids}"
+        print(f"PASS part2_new_person_mid_video_gets_fresh_id_with_expected_lag (B seen from frame {first_seen})")
     finally:
         shutil.rmtree(tmp_dir)
 
@@ -177,13 +177,13 @@ def part3_chunk_persistence_writes_one_file_per_chunk():
         _make_synthetic_video(video_path)
         backend = _run_backend(chunk_store_dir=store_dir)
 
-        list(backend.run(video_path))  # consuma il generatore
+        list(backend.run(video_path))  # consumes the generator
 
         files = sorted(os.listdir(store_dir))
-        assert len(files) == 4, f"attesi 4 chunk (40 frame / 15 chunk_size / 5 overlap), trovati {files}"
-        # il primo chunk contiene le righe di A su 15 frame
+        assert len(files) == 4, f"expected 4 chunks (40 frames / 15 chunk_size / 5 overlap), found {files}"
+        # the first chunk contains A's rows over 15 frames
         records = load_chunk(os.path.join(store_dir, files[0]))
-        assert len(records) == CHUNK_SIZE, f"il primo chunk deve avere una riga per frame (solo A), trovate {len(records)}"
+        assert len(records) == CHUNK_SIZE, f"the first chunk must have one row per frame (A only), found {len(records)}"
         print("PASS part3_chunk_persistence_writes_one_file_per_chunk")
     finally:
         shutil.rmtree(tmp_dir)
@@ -192,64 +192,64 @@ def part3_chunk_persistence_writes_one_file_per_chunk():
 def part4_non_cuda_device_rejected_immediately():
     try:
         _FakeBackend(device="mps", detect_schedule=[])
-        raise AssertionError("atteso ValueError per device diverso da 'cuda'")
+        raise AssertionError("expected ValueError for a device other than 'cuda'")
     except ValueError:
         pass
     print("PASS part4_non_cuda_device_rejected_immediately")
 
 
 def part4c_overlap_zero_rejected_immediately():
-    # overlap=0: prev_anchor_polys sarebbe sempre vuoto (nessun frame in
-    # comune tra chunk consecutivi, vedi il docstring di __init__) -- ogni
-    # chunk assegnerebbe id globali tutti nuovi, perdendo la continuita'
-    # d'identita' in silenzio. Va rifiutato subito, non lasciato produrre
-    # un risultato silenziosamente sbagliato.
+    # overlap=0: prev_anchor_polys would always be empty (no shared frame
+    # between consecutive chunks, see __init__'s docstring) -- every
+    # chunk would assign all-new global ids, silently losing identity
+    # continuity. Must be rejected immediately, not left to silently
+    # produce a wrong result.
     try:
         _FakeBackend(device="cuda", detect_schedule=[], overlap=0)
-        raise AssertionError("atteso ValueError per overlap=0")
+        raise AssertionError("expected ValueError for overlap=0")
     except ValueError:
         pass
     print("PASS part4c_overlap_zero_rejected_immediately")
 
 
 def part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash():
-    # Errore reale osservato su una macchina CUDA (col fork SAMURAI, stesso
-    # sam2_video_predictor di SAM2 vanilla):
+    # Real error observed on a CUDA machine (with the SAMURAI fork, same
+    # sam2_video_predictor as vanilla SAM2):
     # "RuntimeError: No points are provided; please add points first",
-    # sollevato da propagate_in_video() quando nessun prompt e' mai stato
-    # registrato -- capita se YOLO non trova nessuno nel frame di
-    # ancoraggio del primo chunk (es. video che si apre su una stanza
-    # vuota). Qui si verifica che il nostro codice lo gestisca PRIMA di
-    # arrivare a chiamare propagate_in_video, restituendo frame vuoti
-    # invece di propagare l'eccezione.
+    # raised by propagate_in_video() when no prompt was ever registered
+    # -- happens if YOLO finds no one in the first chunk's anchor frame
+    # (e.g. a video that opens on an empty room). Here we verify our code
+    # handles it BEFORE reaching a call to propagate_in_video, returning
+    # empty frames instead of propagating the exception.
     tmp_dir = tempfile.mkdtemp()
     try:
         video_path = os.path.join(tmp_dir, "synthetic.mp4")
         _make_synthetic_video(video_path)
-        # tutti i chunk restituiscono lista vuota da _detect_people(): mai
-        # nessuna persona rilevata in tutto il video
+        # all chunks return an empty list from _detect_people(): never
+        # any person detected in the whole video
         backend = _FakeBackend(
             device="cuda", chunk_size=CHUNK_SIZE, overlap=OVERLAP,
             detect_schedule=[[], [], [], []],
         )
 
-        results = list(backend.run(video_path))  # non deve sollevare nulla
+        results = list(backend.run(video_path))  # must not raise anything
 
         frame_indices = [r.frame_index for r in results]
         assert frame_indices == list(range(TOTAL_FRAMES)), \
-            f"anche senza nessuna persona rilevata, la copertura frame deve restare completa, ottenuto {frame_indices}"
-        assert all(r.people == [] for r in results), "nessuna persona rilevata -> tutti i frame devono avere people=[]"
+            f"even with no person detected, frame coverage must stay complete, got {frame_indices}"
+        assert all(r.people == [] for r in results), "no person detected -> every frame must have people=[]"
         print("PASS part4b_no_detection_in_bootstrap_chunk_yields_empty_frames_no_crash")
     finally:
         shutil.rmtree(tmp_dir)
 
 
 def part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk():
-    # Verifica il fix del 2026-08 (confermato su una macchina CUDA reale col
-    # fork SAMURAI: "Only MP4 video and JPEG folder are supported", il predictor
-    # non accetta una lista di frame in memoria) -- _init_state() deve
-    # scrivere ogni chunk come cartella JPEG temporanea E ripulirla subito
-    # dopo, non lasciarne in giro una per chunk su un video con molti chunk.
+    # Verifies the 2026-08 fix (confirmed on a real CUDA machine with the
+    # SAMURAI fork: "Only MP4 video and JPEG folder are supported", the
+    # predictor doesn't accept a list of in-memory frames) -- _init_state()
+    # must write each chunk as a temporary JPEG folder AND clean it up
+    # right after, not leave one lying around per chunk on a video with
+    # many chunks.
     import tempfile as tempfile_mod
 
     tmp_dir = tempfile.mkdtemp()
@@ -267,22 +267,22 @@ def part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk():
         _make_synthetic_video(video_path)
         backend = _run_backend(chunk_store_dir=None)
 
-        list(backend.run(video_path))  # consuma il generatore, un _init_state() per chunk
+        list(backend.run(video_path))  # consumes the generator, one _init_state() per chunk
 
-        assert len(created_dirs) == 4, f"attesa una cartella temporanea per chunk (4), trovate {len(created_dirs)}"
+        assert len(created_dirs) == 4, f"expected one temporary folder per chunk (4), found {len(created_dirs)}"
         for d in created_dirs:
-            assert not os.path.exists(d), f"{d} avrebbe dovuto essere ripulita dopo il suo chunk, esiste ancora"
+            assert not os.path.exists(d), f"{d} should have been cleaned up after its chunk, still exists"
         print(f"PASS part5_chunks_are_written_as_jpeg_and_cleaned_up_after_each_chunk "
-              f"({len(created_dirs)} cartelle create e ripulite, una per chunk)")
+              f"({len(created_dirs)} folders created and cleaned up, one per chunk)")
     finally:
         tempfile_mod.mkdtemp = original_mkdtemp
         shutil.rmtree(tmp_dir)
 
 
 class _FakeTorchTensor:
-    """Duck-type minimo di un torch.Tensor: solo i tre metodi usati da
-    `_to_boolean_mask()` (detach/cpu/numpy) -- verifica quel percorso senza
-    dipendere da torch (non installato in questo ambiente)."""
+    """Minimal duck-type of a torch.Tensor: only the three methods used
+    by `_to_boolean_mask()` (detach/cpu/numpy) -- verifies that path
+    without depending on torch (not installed in this environment)."""
 
     def __init__(self, array):
         self._array = array
@@ -298,18 +298,18 @@ class _FakeTorchTensor:
 
 
 def part6b_reseed_new_people_false_never_adds_the_late_entrant():
-    # Confronto "SAM puro" vs "SAM + reseeding" (vedi discussione sulla
-    # baseline falsata): con reseed_new_people=False, YOLO viene chiamato
-    # SOLO al bootstrap del chunk 0 -- la persona B (che nello scenario di
-    # part2 entra a meta' video) non deve MAI comparire, perche' nessuno la
-    # scopre piu' dopo il chunk 0.
+    # "Pure SAM" vs "SAM + reseeding" comparison (see the discussion on
+    # the biased baseline): with reseed_new_people=False, YOLO is called
+    # ONLY at chunk 0's bootstrap -- person B (who in part2's scenario
+    # enters mid-video) must NEVER appear, since no one discovers them
+    # again after chunk 0.
     tmp_dir = tempfile.mkdtemp()
     try:
         video_path = os.path.join(tmp_dir, "synthetic.mp4")
         _make_synthetic_video(video_path)
         backend = _FakeBackend(
             device="cuda", chunk_size=CHUNK_SIZE, overlap=OVERLAP,
-            detect_schedule=[[BOX_A], [], [BOX_B], []],  # B verrebbe "vista" al chunk 2 se reseed fosse attivo
+            detect_schedule=[[BOX_A], [], [BOX_B], []],  # B would be "seen" at chunk 2 if reseed were active
             reseed_new_people=False,
         )
 
@@ -319,64 +319,65 @@ def part6b_reseed_new_people_false_never_adds_the_late_entrant():
         all_ids = set()
         for ids in ids_per_frame.values():
             all_ids |= ids
-        assert len(all_ids) == 1, f"con reseed disattivato B non deve mai comparire, id trovati: {all_ids}"
+        assert len(all_ids) == 1, f"with reseed disabled B must never appear, ids found: {all_ids}"
         assert all(len(ids) == 1 for ids in ids_per_frame.values()), \
-            "ogni frame deve avere solo A, mai B, per tutta la sessione"
+            "every frame must have only A, never B, for the whole session"
         print("PASS part6b_reseed_new_people_false_never_adds_the_late_entrant")
     finally:
         shutil.rmtree(tmp_dir)
 
 
 def part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input():
-    # Fix del 2026-08: sintomo reale osservato su una macchina CUDA
-    # ("il video parte ma non appaiono le maschere") -- causato da
-    # propagate_in_video() che restituisce logit (non gia' booleani),
-    # spesso in tensori con una dimensione canale in piu' -- vedi il
-    # docstring di _to_boolean_mask() per il perche' di ogni caso qui sotto.
+    # 2026-08 fix: real symptom observed on a CUDA machine ("the video
+    # starts but no masks appear") -- caused by propagate_in_video()
+    # returning logits (not already booleans), often in tensors with one
+    # extra channel dimension -- see _to_boolean_mask()'s docstring for
+    # why each case below.
     already_bool = np.array([[True, False], [False, True]])
     assert np.array_equal(_to_boolean_mask(already_bool), already_bool)
 
     logits_2d = np.array([[-2.0, 3.0], [0.5, -0.1]])
     result = _to_boolean_mask(logits_2d)
     assert result.dtype == bool
-    assert result.tolist() == [[False, True], [True, False]], "soglia a 0.0: >0 = foreground"
+    assert result.tolist() == [[False, True], [True, False]], "threshold at 0.0: >0 = foreground"
 
-    logits_3d = logits_2d.reshape(1, 2, 2)  # forma (1,H,W), tipica di SAM2
+    logits_3d = logits_2d.reshape(1, 2, 2)  # shape (1,H,W), typical of SAM2
     result_3d = _to_boolean_mask(logits_3d)
-    assert result_3d.shape == (2, 2), "il canale extra va rimosso, non lasciato nella forma"
+    assert result_3d.shape == (2, 2), "the extra channel must be removed, not left in the shape"
     assert result_3d.tolist() == [[False, True], [True, False]]
 
     tensor_like = _FakeTorchTensor(logits_2d)
     result_tensor = _to_boolean_mask(tensor_like)
     assert result_tensor.tolist() == [[False, True], [True, False]], \
-        "un oggetto con .detach()/.cpu()/.numpy() (duck-typing torch.Tensor) va convertito allo stesso modo"
+        "an object with .detach()/.cpu()/.numpy() (torch.Tensor duck-typing) must be converted the same way"
 
     print("PASS part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input")
 
 
 def part7_redetect_every_finds_new_person_mid_chunk_not_just_at_boundary():
-    # Il problema segnalato da Michele confrontando YOLO+ByteTrack (rileva
-    # su OGNI frame) con Sam2Tracker (rilevava solo al frame di ancoraggio
-    # del chunk, una volta ogni chunk_size frame): una persona che entra a
-    # META' chunk restava invisibile fino al chunk SUCCESSIVO (o per
-    # sempre, se il video finiva prima). Qui: un solo chunk di 20 frame,
-    # redetect_every=5 -> A rilevata al bootstrap (frame 0), B rilevata
-    # dalla ri-detection al frame 10 (a meta' del chunk, non al suo
-    # confine) -- verifica che B compaia esattamente da li' in poi, non
-    # solo al prossimo chunk (che qui non esiste nemmeno: e' un solo chunk).
+    # The problem reported by Michele comparing YOLO+ByteTrack (detects
+    # on EVERY frame) with Sam2Tracker (used to detect only at the
+    # chunk's anchor frame, once every chunk_size frames): a person
+    # entering MID-chunk stayed invisible until the NEXT chunk (or
+    # forever, if the video ended before that). Here: a single 20-frame
+    # chunk, redetect_every=5 -> A detected at bootstrap (frame 0), B
+    # detected by the re-detection at frame 10 (mid-chunk, not at its
+    # boundary) -- verifies that B appears exactly from there on, not
+    # only at the next chunk (which doesn't even exist here: it's a
+    # single chunk).
     tmp_dir = tempfile.mkdtemp()
     try:
         video_path = os.path.join(tmp_dir, "synthetic.mp4")
         _make_synthetic_video(video_path)
         backend = _FakeBackend(
-            # overlap=1 (non 0): un solo chunk qui (chunk_size=TOTAL_FRAMES,
-            # nessun secondo chunk, quindi la riconciliazione tra chunk non
-            # entra mai in gioco) -- ma overlap=0 e' ora rifiutato a monte
-            # da ChunkedVideoPredictorBackend.__init__ (vedi part4c), quindi
-            # va comunque >= 1 anche qui per costruire l'oggetto.
+            # overlap=1 (not 0): a single chunk here (chunk_size=TOTAL_FRAMES,
+            # no second chunk, so cross-chunk reconciliation never comes
+            # into play) -- but overlap=0 is now rejected upstream by
+            # ChunkedVideoPredictorBackend.__init__ (see part4c), so it
+            # still needs to be >= 1 here too to build the object.
             device="cuda", chunk_size=TOTAL_FRAMES, overlap=1, redetect_every=5,
-            # chiamate a _detect_people: bootstrap (frame 0) + una ogni
-            # finestra da 5 frame (a 5, 10, 15) -- 4 in tutto
+            # calls to _detect_people: bootstrap (frame 0) + one every
+            # 5-frame window (at 5, 10, 15) -- 4 total
             detect_schedule=[[BOX_A], [], [BOX_B], []],
         )
 
@@ -384,39 +385,39 @@ def part7_redetect_every_finds_new_person_mid_chunk_not_just_at_boundary():
         ids_per_frame = {r.frame_index: {p[0] for p in r.people} for r in results}
 
         assert all(len(ids_per_frame[f]) == 1 for f in range(0, 10)), \
-            "prima della ri-detection al frame 10, deve esserci solo A"
+            "before the re-detection at frame 10, only A should be present"
         assert all(len(ids_per_frame[f]) == 2 for f in range(10, TOTAL_FRAMES)), \
-            "dal frame 10 in poi (ri-detection MID-CHUNK, non a un confine di chunk), deve comparire anche B"
+            "from frame 10 onward (MID-CHUNK re-detection, not at a chunk boundary), B should also appear"
         print("PASS part7_redetect_every_finds_new_person_mid_chunk_not_just_at_boundary")
     finally:
         shutil.rmtree(tmp_dir)
 
 
 def part7b_redetect_every_ignored_when_reseed_new_people_false():
-    # La ri-detection periodica e' comunque un modo di scoprire persone
-    # NUOVE via YOLO -- deve rispettare reseed_new_people=False (condizione
-    # "SAM puro") esattamente come il reseeding al confine di chunk: con
-    # reseed_new_people=False, redetect_every non deve MAI chiamare
-    # _detect_people() dentro il chunk (solo il bootstrap del chunk 0).
+    # Periodic re-detection is still a way of discovering NEW people via
+    # YOLO -- it must respect reseed_new_people=False (the "pure SAM"
+    # condition) exactly like reseeding at the chunk boundary: with
+    # reseed_new_people=False, redetect_every must NEVER call
+    # _detect_people() inside the chunk (only chunk 0's bootstrap).
     tmp_dir = tempfile.mkdtemp()
     try:
         video_path = os.path.join(tmp_dir, "synthetic.mp4")
         _make_synthetic_video(video_path)
         backend = _FakeBackend(
-            # overlap=1 (non 0): un solo chunk qui (chunk_size=TOTAL_FRAMES,
-            # nessun secondo chunk, quindi la riconciliazione tra chunk non
-            # entra mai in gioco) -- ma overlap=0 e' ora rifiutato a monte
-            # da ChunkedVideoPredictorBackend.__init__ (vedi part4c), quindi
-            # va comunque >= 1 anche qui per costruire l'oggetto.
+            # overlap=1 (not 0): a single chunk here (chunk_size=TOTAL_FRAMES,
+            # no second chunk, so cross-chunk reconciliation never comes
+            # into play) -- but overlap=0 is now rejected upstream by
+            # ChunkedVideoPredictorBackend.__init__ (see part4c), so it
+            # still needs to be >= 1 here too to build the object.
             device="cuda", chunk_size=TOTAL_FRAMES, overlap=1, redetect_every=5,
             reseed_new_people=False,
-            detect_schedule=[[BOX_A]],  # un solo elemento: se venisse chiamato di piu', IndexError
+            detect_schedule=[[BOX_A]],  # a single element: if called more, IndexError
         )
 
         results = list(backend.run(video_path))
         ids_per_frame = {r.frame_index: {p[0] for p in r.people} for r in results}
         assert all(len(ids) == 1 for ids in ids_per_frame.values()), \
-            "con reseed_new_people=False nessuna ri-detection deve aggiungere B, anche con redetect_every impostato"
+            "with reseed_new_people=False no re-detection should ever add B, even with redetect_every set"
         print("PASS part7b_redetect_every_ignored_when_reseed_new_people_false")
     finally:
         shutil.rmtree(tmp_dir)
@@ -434,7 +435,7 @@ def main():
     part6_to_boolean_mask_handles_bool_logits_3d_and_tensor_like_input()
     part7_redetect_every_finds_new_person_mid_chunk_not_just_at_boundary()
     part7b_redetect_every_ignored_when_reseed_new_people_false()
-    print("\nTutti i test di sam_backend.py (con predictor finto) sono passati.")
+    print("\nAll sam_backend.py tests (with a fake predictor) passed.")
 
 
 if __name__ == "__main__":

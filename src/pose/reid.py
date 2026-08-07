@@ -1,174 +1,177 @@
 """
 reid.py
 =======
-Re-identificazione in tempo reale basata su firma antropometrica, per
-recuperare l'identita' di una persona quando ByteTrack le assegna un nuovo
-track_id dopo che e' uscita completamente dall'inquadratura (o quando
-l'aspetto cambia, es. vestiti diversi, tra un'uscita e un rientro nella
-stessa sessione).
+Real-time re-identification based on an anthropometric signature, to
+recover a person's identity when ByteTrack assigns them a new track_id
+after they've fully left the frame (or when their appearance changes,
+e.g. different clothes, between an exit and a re-entry in the same
+session).
 
-Stessa idea di `reid_signature.py` nel repository CHUV (Video-Annotation-
-System, vedi quel modulo per il contesto completo), qui riadattata su due
-assi:
-  - schema COCO-17 (questa pipeline) invece di BODY-25 (psifx/OpenPose);
-  - funzionamento IN TEMPO REALE invece che batch: li' si confrontano
-    tracce gia' concluse leggendo un CSV completo; qui dobbiamo decidere
-    "e' una persona mai vista o una gia' vista?" nell'istante in cui un
-    nuovo track_id compare, contro una memoria di persone scomparse di
-    recente dall'inquadratura.
+Same idea as `reid_signature.py` in the CHUV repository
+(Video-Annotation-System, see that module for the full context), here
+readapted along two axes:
+  - COCO-17 schema (this pipeline) instead of BODY-25 (psifx/OpenPose);
+  - REAL-TIME operation instead of batch: there, already-finished
+    tracks are compared by reading a complete CSV; here we need to
+    decide "is this a never-seen person or an already-seen one?" at the
+    instant a new track_id appears, against a memory of people who
+    recently disappeared from the frame.
 
-Perche' prototiparla qui e non nel repository CHUV: quella pipeline
-richiede SAM3 su GPU CUDA, non eseguibile su un Mac M1 -- e questo e' un
-limite hardware, non della strategia. La firma antropometrica come segnale
-di re-identificazione e' indipendente dal tracker sottostante (ByteTrack
-qui, SAM3 la')); ha senso validarla dove si puo' iterare velocemente, su
-dati non protetti, prima di riproporla per il repository CHUV.
+Why prototype it here and not in the CHUV repository: that pipeline
+requires SAM3 on a CUDA GPU, not runnable on an M1 Mac -- and that's a
+hardware limitation, not one of the strategy. The anthropometric
+signature as a re-identification signal is independent of the
+underlying tracker (ByteTrack here, SAM3 there); it makes sense to
+validate it where iteration is fast, on unprotected data, before
+proposing it again for the CHUV repository.
 
-Design (in breve)
+Design (in brief)
 ------------------
-- Ogni volta che ByteTrack presenta un track_id MAI visto prima, gli viene
-  assegnato subito un `person_id` provvisorio (nessun ritardo percepibile
-  nell'overlay live).
-- In parallelo, si accumula un piccolo buffer (finestra scorrevole) di
-  proporzioni corporee per quel track_id. Una volta raccolti abbastanza
-  frame validi, si calcola una firma mediana e la si confronta con le
-  persone recentemente scomparse dall'inquadratura (`lost`, con scadenza
-  dopo `max_lost_seconds`). Se non c'e' match, il tentativo NON si ferma
-  subito: ad ogni frame successivo la finestra si aggiorna (i frame piu'
-  vecchi escono, quelli nuovi entrano) e si ritenta -- un rientro con i
-  primi frame rumorosi (persona ancora ai bordi dell'inquadratura) non e'
-  quindi perso per sempre, solo ritardato finche' i dati non sono
-  abbastanza puliti. Due guardrail evitano pero' che il retry diventi
-  pericoloso: (1) un track non viene mai confrontato con una persona
-  "persa" DOPO che il track stesso era gia' apparso -- i due erano visibili
-  insieme (sotto raw_id diversi), quindi non possono essere la stessa
-  persona (altrimenti chi e' presente fin dall'inizio della sessione
-  rischierebbe di essere agganciato per coincidenza a un'identita' persa
-  molto piu' tardi); (2) il retry si arrende comunque dopo
-  `_PENDING_RETRY_SECONDS` dall'apparizione del track, per non ricontrollarlo
-  per sempre.
-- Se c'e' un match sotto soglia, TUTTI i frame SUCCESSIVI a quel punto
-  vengono attribuiti al `person_id` precedente invece che al nuovo -- i
-  frame gia' emessi (CSV/overlay) con il person_id provvisorio NON vengono
-  riscritti. L'evento di merge viene loggato esplicitamente
-  (`self.merge_log`) per trasparenza/audit, cosi' un'analisi a posteriori
-  puo' ricollegare i due pezzi se necessario -- stessa filosofia
-  "proponi/rendi tracciabile, non decidere in silenzio" di reid_signature.py,
-  adattata al fatto che qui non c'e' un umano nel loop in tempo reale.
+- Every time ByteTrack presents a track_id NEVER seen before, it's
+  immediately assigned a provisional `person_id` (no perceptible delay
+  in the live overlay).
+- In parallel, a small buffer (sliding window) of body proportions
+  accumulates for that track_id. Once enough valid frames are
+  collected, a median signature is computed and compared against
+  recently disappeared people (`lost`, expiring after
+  `max_lost_seconds`). If there's no match, the attempt does NOT stop
+  immediately: at every subsequent frame the window updates (older
+  frames drop out, new ones come in) and it retries -- a re-entry with
+  the first frames noisy (person still at the edges of the frame) is
+  thus not lost forever, only delayed until the data is clean enough.
+  Two guardrails, however, keep the retry from becoming dangerous: (1)
+  a track is never compared against a "lost" person AFTER the track
+  itself had already appeared -- the two were visible together (under
+  different raw_ids), so they can't be the same person (otherwise
+  whoever is present from the very start of the session would risk
+  being coincidentally linked to an identity lost much later); (2) the
+  retry gives up anyway after `_PENDING_RETRY_SECONDS` from the track's
+  appearance, so as not to keep re-checking it forever.
+- If there's a match under threshold, ALL frames AFTER that point are
+  attributed to the previous `person_id` instead of the new one -- the
+  frames already emitted (CSV/overlay) with the provisional person_id
+  are NOT rewritten. The merge event is explicitly logged
+  (`self.merge_log`) for transparency/audit, so a later analysis can
+  reconnect the two pieces if needed -- same "propose/make traceable,
+  don't decide silently" philosophy as reid_signature.py, adapted to
+  the fact that there's no human in the loop here in real time.
 
-Segnale opzionale: colore maglia/pantaloni/capelli
+Optional signal: shirt/pants/hair color
 ----------------------------------------------------
-La sola firma antropometrica, in pratica, puo' essere troppo debole quando
-i keypoint sono rumorosi (occlusioni parziali, persona ai bordi
-dell'inquadratura durante l'uscita/rientro): due proporzioni corporee
-leggermente sballate possono far mancare un match vero. Se viene passato il
-frame video a `resolve()`, viene calcolato ANCHE un colore medio (tonalita'
-+ saturazione, non luminosita' -- piu' robusto a cambi di esposizione) su
-tre regioni: torso (maglia), coscia (pantaloni) -- campionate dai pixel
-dentro il poligono definito dai keypoint di spalle/anche/ginocchia -- e una
-zona sopra le orecchie (proxy del colore dei capelli, stimata estendendo
-verso l'alto la larghezza orecchio-orecchio della distanza collo-naso).
-Il colore capelli e' indipendente dai vestiti: aiuta proprio nel caso in
-cui una persona rientra con abiti diversi (es. senza maglietta).
+The anthropometric signature alone, in practice, can be too weak when
+keypoints are noisy (partial occlusions, person at the edges of the
+frame during exit/re-entry): two slightly-off body proportions can
+cause a real match to be missed. If the video frame is passed to
+`resolve()`, an average color (hue + saturation, not brightness -- more
+robust to exposure changes) is ALSO computed over three regions: torso
+(shirt), thigh (pants) -- sampled from the pixels inside the polygon
+defined by the shoulder/hip/knee keypoints -- and a region above the
+ears (hair color proxy, estimated by extending the ear-to-ear width
+upward by the neck-to-nose distance). Hair color is independent of
+clothing: it specifically helps in the case where a person re-enters in
+different clothes (e.g. without a shirt).
 
-Il colore NON sostituisce le proporzioni ne' alza mai la soglia di
-rifiuto: se il colore e' molto diverso (es. cambio vestiti tra uscita e
-rientro) il match si decide esattamente come prima, solo sulle proporzioni.
-Se invece il colore e' simile (il caso piu' comune: stessi vestiti durante
-la sessione), la distanza tra le proporzioni viene "scontata" -- rendendo
-piu' facile recuperare un match vero anche con proporzioni un po' rumorose,
-senza mai peggiorare la robusta invarianza al vestiario che era l'obiettivo
-originale del prototipo.
+Color does NOT replace the proportions nor ever raise the rejection
+threshold: if the color is very different (e.g. clothes changed between
+exit and re-entry) the match is decided exactly as before, based on
+proportions alone. If instead the color is similar (the most common
+case: same clothes during the session), the distance between
+proportions is "discounted" -- making it easier to recover a real match
+even with somewhat noisy proportions, without ever worsening the robust
+clothing-invariance that was the prototype's original goal.
 
-Segnale opzionale: posizione
+Optional signal: position
 ------------------------------
-Pensato per il caso concreto di un cambio vestiti "in scena" (es. mettere
-una giacca/grembiule a un bambino durante un'attivita', tipicamente una
-decina di secondi): il bambino non esce mai dall'inquadratura, ma
-l'occlusione parziale da parte di chi lo veste puo' far perdere il track e
-generarne uno nuovo al distacco. In questo caso il bambino non si e' quasi
-spostato, quindi l'ultima posizione nota (centro-bacino) prima della
-perdita e la prima posizione del nuovo track sono molto vicine -- stesso
-principio anche per un'uscita/rientro dalla stessa porta. Ogni frame si
-memorizza posizione e scala (lunghezza busto) della persona corrente; alla
-perdita, quella posizione viene congelata insieme alla firma. Un nuovo
-track viene confrontato su vicinanza spaziale (in lunghezze di busto,
-`MAX_POSITION_DIST_TORSOS`) E vicinanza temporale (`MAX_POSITION_GAP_SECONDS`)
--- entrambe devono valere qualcosa, non basta una sola.
+Designed for the concrete case of an "in-scene" clothing change (e.g.
+putting a jacket/apron on a child during an activity, typically about
+ten seconds): the child never leaves the frame, but the partial
+occlusion by whoever is dressing them can lose the track and generate a
+new one at separation. In this case the child has barely moved, so the
+last known position (hip center) before the loss and the new track's
+first position are very close -- the same principle also applies to
+exiting/re-entering through the same door. Every frame, the current
+person's position and scale (torso length) are stored; on loss, that
+position is frozen alongside the signature. A new track is compared on
+spatial proximity (in torso lengths, `MAX_POSITION_DIST_TORSOS`) AND
+temporal proximity (`MAX_POSITION_GAP_SECONDS`) -- both must count for
+something, one alone isn't enough.
 
-Stesso principio del colore: la posizione puo' solo scontare la distanza,
-MAI bloccare un match ne' sostituirsi alla firma. Colore e posizione non si
-sommano tra loro -- si prende il PIU' FORTE dei due sconti disponibili,
-non la somma, per evitare che due segnali solo mediocri si accumulino a una
-fiducia che nessuno dei due giustificherebbe da solo.
+Same principle as color: position can only discount the distance,
+NEVER block a match nor substitute for the signature. Color and
+position don't add up -- the STRONGEST of the two available discounts
+is taken, not the sum, to avoid two only-mediocre signals accumulating
+into a confidence neither would justify alone.
 
-Segnale opzionale: embedding di aspetto (OSNet)
+Optional signal: appearance embedding (OSNet)
 --------------------------------------------------
-Terzo sconto possibile, stesso principio "il piu' forte vince, mai la
-somma" di colore/posizione qui sopra -- vedi `pose/appearance_embedding.py`
-per il modulo e il perche' e' un embedding vero (OSNet) e non solo un'altra
-euristica. A differenza di colore/posizione (calcolati una volta sola dal
-buffer mediano al momento del match), l'embedding di una persona ATTIVA
-viene aggiornato ad ogni frame con una media mobile esponenziale
-(`self.embedding_ema`, vedi `appearance_embedding.ema_update`) -- l'idea di
-StrongSORT citata li': piu' a lungo una persona resta visibile, piu' la sua
-firma di aspetto memorizzata si stabilizza, cosi' un rientro successivo puo'
-confrontarsi con una stima consolidata invece che con un singolo frame
-(spesso rumoroso: motion blur, posa, occlusione parziale). Richiede un
-`embedder` (istanza di `OSNetEmbedder`) passato al costruttore -- se
-`None` (default), il segnale e' semplicemente assente, nessun comportamento
-diverso dal resto del modulo.
+A third possible discount, same "the strongest wins, never the sum"
+principle as color/position above -- see `pose/appearance_embedding.py`
+for the module and why it's a real embedding (OSNet) and not just
+another heuristic. Unlike color/position (computed once from the median
+buffer at match time), an ACTIVE person's embedding is updated every
+frame with an exponential moving average (`self.embedding_ema`, see
+`appearance_embedding.ema_update`) -- the StrongSORT idea cited there:
+the longer a person stays visible, the more their stored appearance
+signature stabilizes, so a later re-entry can be compared against a
+consolidated estimate instead of a single (often noisy: motion blur,
+pose, partial occlusion) frame. Requires an `embedder` (an
+`OSNetEmbedder` instance) passed to the constructor -- if `None`
+(default), the signal is simply absent, no different behavior from the
+rest of the module.
 
-Segnale opzionale: numero massimo di persone (sessione chiusa)
+Optional signal: maximum number of people (closed session)
 ------------------------------------------------------------------
-Quando si conosce a priori quante persone possono comparire nella sessione
-(es. 2 per un 1v1 bambino-caregiver, fino a una decina per una sessione di
-gruppo), quel numero diventa un vincolo forte, non solo un altro "sconto":
-se sono gia' state confermate `max_people` identita' distinte e un nuovo
-track non trova match con le soglie normali, NON puo' comunque trattarsi di
-un'undicesima persona -- deve per forza essere una delle persone gia' note
-che al momento risulta "persa". In questo caso, e solo in questo caso, si
-FORZA il merge con la persona persa piu' vicina per firma (anche sopra
-`max_signature_dist`), invece di rinunciare e coniare un nuovo person_id.
+When the number of people who can appear in the session is known ahead
+of time (e.g. 2 for a 1v1 child-caregiver session, up to about a dozen
+for a group session), that number becomes a hard constraint, not just
+another "discount": if `max_people` distinct identities have already
+been confirmed and a new track finds no match with the normal
+thresholds, it CANNOT still be an eleventh person -- it must
+necessarily be one of the already-known people who is currently
+"lost". In this case, and only this case, the merge is FORCED with the
+lost person closest by signature (even above `max_signature_dist`),
+instead of giving up and minting a new person_id.
 
-Due paletti tengono la forzatura sicura: (1) vale la stessa regola di
-causalita' delle altre corrispondenze -- non si puo' forzare un match con
-qualcuno che era gia' visibile insieme a questo track sotto un altro id;
-(2) si forza SOLO contro persone attualmente "perse" (fuori inquadratura),
-mai contro persone attive in quel momento -- due persone visibili
-contemporaneamente restano sempre due identita' distinte, il tetto massimo
-non le fonde mai. Se il tetto e' raggiunto ma non c'e' nessuno "perso" da
-recuperare, si rinuncia comunque a forzare (nessun candidato sensato) e si
-conia un nuovo person_id stampando un avviso -- segnale che il conteggio
-configurato potrebbe essere sbagliato o che una detection spuria ha
-superato il filtro `max_people` di `pose_estimation.py`.
+Two guardrails keep the forcing safe: (1) the same causality rule as
+the other matches applies -- a match can't be forced with someone who
+was already visible together with this track under a different id; (2)
+it forces ONLY against people currently "lost" (out of frame), never
+against people active at that moment -- two people visible at the same
+time always remain two distinct identities, the cap never merges them.
+If the cap is reached but there's no one "lost" to recover, forcing is
+still abandoned (no sensible candidate) and a new person_id is minted
+while printing a warning -- a signal that the configured count might be
+wrong or that a spurious detection got past `pose_estimation.py`'s
+`max_people` filter.
 
-Limiti onesti
--------------
-  - La firma ha bisogno di un numero minimo di frame con confidenza
-    sufficiente sui giunti chiave; un passaggio molto breve nell'inquadratura
-    non produrra' mai una firma affidabile e restera' un person_id a se'.
-  - Due persone di corporatura simile possono generare un falso positivo di
-    merge -- la soglia di default e' prudente ma va calibrata sui vostri
-    dati reali, non e' un valore validato.
-  - Il colore aiuta quando i vestiti restano gli stessi, ma per lo stesso
-    motivo puo' aumentare il rischio di falso positivo se due persone
-    diverse indossano vestiti di colore simile E hanno proporzioni corporee
-    vicine -- e' un compromesso esplicito, non un problema nascosto.
-  - La posizione e' un'arma a doppio taglio in scene con due persone
-    vicine (es. bambino+caregiver): SOLO lo sconto (mai la forzatura) tiene
-    a bada il rischio, ma se le proporzioni di due persone sono gia'
-    ambigue di per se', la vicinanza spaziale puo' spingere un confronto
-    borderline oltre soglia nella direzione sbagliata -- scelta deliberata,
-    non un problema nascosto.
-  - Il merge, una volta deciso, e' applicato automaticamente (non c'e' modo
-    di chiedere conferma a un umano in tempo reale) -- per questo l'evento
-    resta sempre nel log, invece di sparire silenziosamente.
-  - `max_people` e' una forzatura vera (unica eccezione a "mai forzare" nel
-    modulo): se il numero configurato e' sbagliato (es. un adulto in piu'
-    entra brevemente in scena, fuori dal conteggio previsto) il merge
-    forzato puo' attribuire i suoi frame alla persona persa sbagliata --
-    va usato solo quando il numero di partecipanti e' davvero fisso e noto.
+Honest limitations
+-------------------
+  - The signature needs a minimum number of frames with sufficient
+    confidence on the key joints; a very brief appearance in the frame
+    will never produce a reliable signature and will remain its own
+    person_id.
+  - Two people of similar build can generate a false-positive merge --
+    the default threshold is conservative but needs to be calibrated on
+    your real data, it's not a validated value.
+  - Color helps when clothes stay the same, but for the same reason it
+    can increase the false-positive risk if two different people wear
+    similarly-colored clothes AND have close body proportions -- this
+    is an explicit trade-off, not a hidden problem.
+  - Position is a double-edged sword in scenes with two people close
+    together (e.g. child+caregiver): ONLY the discount (never the
+    forcing) keeps the risk in check, but if two people's proportions
+    are already ambiguous on their own, spatial proximity can push a
+    borderline comparison past threshold in the wrong direction --
+    a deliberate choice, not a hidden problem.
+  - Once decided, the merge is applied automatically (there's no way to
+    ask a human for confirmation in real time) -- that's why the event
+    always stays in the log, instead of silently disappearing.
+  - `max_people` is a real forcing (the sole exception to "never force"
+    in the module): if the configured number is wrong (e.g. an extra
+    adult briefly enters the scene, outside the expected count) the
+    forced merge can attribute their frames to the wrong lost person --
+    it should only be used when the number of participants is truly
+    fixed and known.
 """
 
 from __future__ import annotations
@@ -188,7 +191,7 @@ from pose.identity_manager import (
 from pose.appearance_embedding import OSNetEmbedder, embedding_similarity, ema_update
 
 # ---------------------------------------------------------------------------
-# Firma antropometrica (adattata da reid_signature.py, schema COCO-17)
+# Anthropometric signature (adapted from reid_signature.py, COCO-17 schema)
 # ---------------------------------------------------------------------------
 
 SIGNATURE_SEGMENTS: dict[str, tuple[str, str]] = {
@@ -202,9 +205,9 @@ SIGNATURE_SEGMENTS: dict[str, tuple[str, str]] = {
     "thigh_r": ("right_hip", "right_knee"),
     "shin_l": ("left_knee", "left_ankle"),
     "shin_r": ("right_knee", "right_ankle"),
-    # geometria della testa: indipendente dai vestiti quanto le proporzioni
-    # del corpo, stesso trattamento paritario degli altri segmenti (nessun
-    # peso speciale) -- aggiunge segnale quando corpo/braccia sono rumorosi.
+    # head geometry: as independent of clothing as body proportions,
+    # same equal treatment as the other segments (no special weight) --
+    # adds signal when body/arms are noisy.
     "eye_to_eye": ("left_eye", "right_eye"),
     "ear_to_ear": ("left_ear", "right_ear"),
 }
@@ -219,11 +222,11 @@ def _segment_length(kxy: np.ndarray, a_name: str, b_name: str) -> float:
 
 
 def compute_signature_frame(kxy: np.ndarray) -> np.ndarray:
-    """Proporzioni corporee normalizzate sul busto per un singolo frame
-    (array nell'ordine di `SIGNATURE_COLS`, NaN dove non calcolabile).
-    Riusa `features.torso_length` (gia' usata per self-touch/escursione
-    verticale) come unita' di scala, cosi' la firma e' invariante alla
-    distanza dalla camera.
+    """Body proportions normalized by torso for a single frame (array in
+    the order of `SIGNATURE_COLS`, NaN where not computable). Reuses
+    `features.torso_length` (already used for self-touch/vertical
+    excursion) as the scale unit, so the signature is invariant to
+    distance from the camera.
     """
     torso = torso_length(kxy)
     out = np.full(len(SIGNATURE_COLS), np.nan)
@@ -236,8 +239,8 @@ def compute_signature_frame(kxy: np.ndarray) -> np.ndarray:
 
 
 def signature_distance(a: np.ndarray, b: np.ndarray) -> float | None:
-    """Distanza RMS tra due firme, solo sulle dimensioni valide in
-    entrambe. `None` se restano troppe poche dimensioni per fidarsi."""
+    """RMS distance between two signatures, only on the dimensions valid
+    in both. `None` if too few dimensions remain to be trusted."""
     valid = ~(np.isnan(a) | np.isnan(b))
     if valid.sum() < 3:
         return None
@@ -245,8 +248,8 @@ def signature_distance(a: np.ndarray, b: np.ndarray) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Colore maglia/pantaloni (segnale opzionale, complementare alla firma
-# antropometrica -- vedi "Segnale opzionale" nel docstring del modulo)
+# Shirt/pants color (optional signal, complementary to the anthropometric
+# signature -- see "Optional signal" in the module docstring)
 # ---------------------------------------------------------------------------
 
 COLOR_SEGMENTS: dict[str, tuple[str, str, str, str]] = {
@@ -254,14 +257,15 @@ COLOR_SEGMENTS: dict[str, tuple[str, str, str, str]] = {
     "pants": ("left_hip", "right_hip", "right_knee", "left_knee"),
 }
 COLOR_COLS = ["shirt_h", "shirt_s", "pants_h", "pants_s", "hair_h", "hair_s"]
-_HUE_IDX = [0, 2, 4]   # indici circolari (0..1) in COLOR_COLS
-_SAT_IDX = [1, 3, 5]   # indici lineari (0..1) in COLOR_COLS
+_HUE_IDX = [0, 2, 4]   # circular indices (0..1) in COLOR_COLS
+_SAT_IDX = [1, 3, 5]   # linear indices (0..1) in COLOR_COLS
 
 
 def _region_mean_hs(frame: np.ndarray, pts: np.ndarray) -> tuple[float, float]:
-    """Tonalita'/saturazione medie (OpenCV HSV, poi normalizzate 0-1) dei
-    pixel dentro il poligono definito dai 4 punti (x, y) indicati. (nan, nan)
-    se un punto manca (NaN) o il poligono e' degenere/troppo piccolo."""
+    """Average hue/saturation (OpenCV HSV, then normalized 0-1) of the
+    pixels inside the polygon defined by the 4 given (x, y) points.
+    (nan, nan) if a point is missing (NaN) or the polygon is
+    degenerate/too small."""
     if np.isnan(pts).any():
         return np.nan, np.nan
     h, w = frame.shape[:2]
@@ -270,7 +274,7 @@ def _region_mean_hs(frame: np.ndarray, pts: np.ndarray) -> tuple[float, float]:
     poly[:, 1] = np.clip(poly[:, 1], 0, h - 1)
     mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask, [poly], 255)
-    if cv2.countNonZero(mask) < 9:  # poligono troppo piccolo per fidarsi
+    if cv2.countNonZero(mask) < 9:  # polygon too small to be trusted
         return np.nan, np.nan
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mean_h, mean_s = cv2.mean(hsv, mask=mask)[:2]
@@ -278,12 +282,12 @@ def _region_mean_hs(frame: np.ndarray, pts: np.ndarray) -> tuple[float, float]:
 
 
 def hair_corners(kxy: np.ndarray) -> np.ndarray:
-    """Quattro angoli approssimati della regione sopra le orecchie (proxy
-    del colore dei capelli, indipendente dai vestiti): larghezza
-    orecchio-orecchio, estesa verso l'alto della distanza collo-naso
-    (proporzionale alla dimensione della testa, invariante alla distanza
-    dalla camera). NaN se un keypoint sorgente manca -- stesso trattamento
-    delle altre regioni di colore, mai un fallback inventato."""
+    """Four approximate corners of the region above the ears (hair color
+    proxy, independent of clothing): ear-to-ear width, extended upward
+    by the neck-to-nose distance (proportional to head size, invariant
+    to distance from the camera). NaN if a source keypoint is missing --
+    same treatment as the other color regions, never a made-up
+    fallback."""
     neck = (kxy[KP["left_shoulder"]] + kxy[KP["right_shoulder"]]) / 2.0
     nose, l_ear, r_ear = kxy[KP["nose"]], kxy[KP["left_ear"]], kxy[KP["right_ear"]]
     if np.isnan(np.array([neck, nose, l_ear, r_ear])).any():
@@ -293,10 +297,10 @@ def hair_corners(kxy: np.ndarray) -> np.ndarray:
 
 
 def compute_color_signature(frame: np.ndarray, kxy: np.ndarray) -> np.ndarray:
-    """Colore medio (tonalita', saturazione) di maglia, pantaloni e capelli
-    per un singolo frame, nell'ordine di `COLOR_COLS`, NaN dove non
-    campionabile. Solo Hue/Saturation (non Value/luminosita'): piu' robusto
-    a cambi di esposizione/illuminazione tra un'uscita e un rientro."""
+    """Average color (hue, saturation) of shirt, pants and hair for a
+    single frame, in the order of `COLOR_COLS`, NaN where not
+    samplable. Hue/Saturation only (not Value/brightness): more robust
+    to exposure/lighting changes between an exit and a re-entry."""
     out = np.full(len(COLOR_COLS), np.nan)
     for i, corner_names in enumerate(COLOR_SEGMENTS.values()):
         pts = kxy[[KP[name] for name in corner_names]]
@@ -306,10 +310,10 @@ def compute_color_signature(frame: np.ndarray, kxy: np.ndarray) -> np.ndarray:
 
 
 def color_similarity(a: np.ndarray, b: np.ndarray) -> float | None:
-    """Similarita' 0..1 (1 = colore identico) tra due firme di colore,
-    sulle dimensioni valide in entrambe. Distanza di tonalita' circolare
-    (la scala Hue "avvolge" a 1.0). `None` se restano troppe poche
-    dimensioni valide."""
+    """0..1 similarity (1 = identical color) between two color
+    signatures, on the dimensions valid in both. Circular hue distance
+    (the Hue scale "wraps around" at 1.0). `None` if too few valid
+    dimensions remain."""
     valid = ~(np.isnan(a) | np.isnan(b))
     if valid.sum() < 2:
         return None
@@ -321,31 +325,30 @@ def color_similarity(a: np.ndarray, b: np.ndarray) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Posizione (segnale opzionale, complementare alla firma antropometrica --
-# vedi "Segnale opzionale: posizione" nel docstring del modulo)
+# Position (optional signal, complementary to the anthropometric signature
+# -- see "Optional signal: position" in the module docstring)
 # ---------------------------------------------------------------------------
 
-# Raggio spaziale (in lunghezze di busto, quindi invariante alla distanza
-# dalla camera) oltre il quale la posizione non conta piu' come "stesso
-# punto". 4 lunghezze di busto copre sia un rientro dalla stessa porta
-# (piccolo spostamento) sia un bambino fermo mentre gli mettono una giacca
-# (spostamento quasi nullo).
+# Spatial radius (in torso lengths, so invariant to distance from the
+# camera) beyond which position no longer counts as "the same spot". 4
+# torso lengths covers both a re-entry through the same door (small
+# displacement) and a child standing still while being put in a jacket
+# (near-zero displacement).
 MAX_POSITION_DIST_TORSOS = 4.0
 
-# Tempo oltre il quale il segnale posizionale si azzera. Un cambio di
-# giacca dura tipicamente una decina di secondi: a 20s il peso e' zero, a
-# 10s e' ancora a meta' -- non ai margini della validita'.
+# Time beyond which the positional signal drops to zero. A jacket
+# change typically lasts about ten seconds: at 20s the weight is zero,
+# at 10s it's still at half -- not at the edge of validity.
 MAX_POSITION_GAP_SECONDS = 20.0
 
 
 def position_similarity(pos_a: np.ndarray, pos_b: np.ndarray, torso_scale: float,
                          gap_seconds: float) -> float | None:
-    """Similarita' posizionale 0..1 (1 = stesso punto, appena successo) tra
-    due posizioni (centro-bacino), combinando vicinanza spaziale (in
-    lunghezze di busto, decadimento lineare fino a `MAX_POSITION_DIST_TORSOS`)
-    e vicinanza temporale (decadimento lineare fino a
-    `MAX_POSITION_GAP_SECONDS`). `None` se una posizione manca o la scala
-    non e' valida."""
+    """0..1 positional similarity (1 = same spot, just happened) between
+    two positions (hip center), combining spatial proximity (in torso
+    lengths, linear decay up to `MAX_POSITION_DIST_TORSOS`) and temporal
+    proximity (linear decay up to `MAX_POSITION_GAP_SECONDS`). `None` if
+    a position is missing or the scale isn't valid."""
     if np.isnan(pos_a).any() or np.isnan(pos_b).any():
         return None
     if torso_scale < 1e-6 or np.isnan(torso_scale):
@@ -357,25 +360,25 @@ def position_similarity(pos_a: np.ndarray, pos_b: np.ndarray, torso_scale: float
 
 
 # ---------------------------------------------------------------------------
-# Embedding di aspetto (segnale opzionale, vedi "Segnale opzionale: embedding
-# di aspetto (OSNet)" nel docstring del modulo)
+# Appearance embedding (optional signal, see "Optional signal: appearance
+# embedding (OSNet)" in the module docstring)
 # ---------------------------------------------------------------------------
 
-# Frazione di allargamento del bbox derivato dai keypoint: lo scheletro
-# COCO-17 copre giunti, non il contorno dei vestiti (una maglia larga sporge
-# oltre le spalle) -- senza questo margine il crop passato a OSNet
-# taglierebbe sistematicamente ai bordi il capo di vestiario, proprio il
-# segnale che deve catturare.
+# Fraction by which the keypoint-derived bbox is expanded: the COCO-17
+# skeleton covers joints, not the outline of clothing (a loose shirt
+# extends past the shoulders) -- without this margin, the crop passed
+# to OSNet would systematically cut off the garment at the edges,
+# exactly the signal it's meant to capture.
 _EMBED_BBOX_PAD_FRAC = 0.25
 _EMBED_MIN_VALID_JOINTS = 4
 
 
 def _bbox_from_keypoints(kxy: np.ndarray, pad_frac: float = _EMBED_BBOX_PAD_FRAC) -> np.ndarray | None:
-    """Bbox (x1, y1, x2, y2) che racchiude i keypoint validi, allargato di
-    `pad_frac` per lato -- usato solo per ritagliare la persona da passare a
-    `OSNetEmbedder.embed()`, non per nessun altro scopo (nessuna detection
-    box "vera" e' disponibile in questa pipeline, solo keypoint). `None` se
-    restano troppo pochi keypoint validi per un bbox affidabile."""
+    """Bbox (x1, y1, x2, y2) enclosing the valid keypoints, expanded by
+    `pad_frac` per side -- used only to crop the person to pass to
+    `OSNetEmbedder.embed()`, for no other purpose (no "real" detection
+    box is available in this pipeline, only keypoints). `None` if too
+    few valid keypoints remain for a reliable bbox."""
     valid = ~np.isnan(kxy).any(axis=1)
     if valid.sum() < _EMBED_MIN_VALID_JOINTS:
         return None
@@ -389,7 +392,7 @@ def _bbox_from_keypoints(kxy: np.ndarray, pad_frac: float = _EMBED_BBOX_PAD_FRAC
 
 
 # ---------------------------------------------------------------------------
-# Stato per persona/traccia
+# Per-person/track state
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -397,9 +400,9 @@ class _LostPerson:
     signature: np.ndarray
     lost_time: float
     color: np.ndarray | None = None
-    position: np.ndarray | None = None    # ultimo centro-bacino noto
-    last_torso: float | None = None       # scala per normalizzare la posizione
-    embedding: np.ndarray | None = None   # OSNet, congelato alla perdita (media EMA fino a quel momento)
+    position: np.ndarray | None = None    # last known hip center
+    last_torso: float | None = None       # scale to normalize position
+    embedding: np.ndarray | None = None   # OSNet, frozen at loss time (EMA average up to that point)
 
 
 @dataclass
@@ -412,19 +415,19 @@ class _MergeEvent:
     color_used: bool = False
     position_used: bool = False
     embedding_used: bool = False
-    forced: bool = False  # match forzato da max_people (vedi docstring del modulo)
+    forced: bool = False  # match forced by max_people (see module docstring)
 
 
 @dataclass
 class _UncertainEvent:
-    """Candidato in "zona grigia" (vedi identity_manager.resolve_batch):
-    l'algoritmo ungherese lo ha proposto come miglior accoppiamento
-    disponibile, ma la distanza supera `max_signature_dist` pur restando
-    sotto `uncertain_signature_dist` -- NON fuso automaticamente, solo
-    segnalato (policy "meglio frammentare un'identita' che scambiarne due in
-    silenzio"). `raw_track_id` continua a essere ritentato ai frame
-    successivi come qualunque provvisorio in `pending_check`, finche' non
-    scade il retry o trova un match confermato."""
+    """Candidate in a "gray zone" (see identity_manager.resolve_batch):
+    the Hungarian algorithm proposed it as the best available pairing,
+    but the distance exceeds `max_signature_dist` while still staying
+    below `uncertain_signature_dist` -- NOT merged automatically, only
+    flagged (policy "better to fragment an identity than to silently
+    swap two"). `raw_track_id` keeps being retried on subsequent frames
+    like any provisional in `pending_check`, until the retry expires or
+    it finds a confirmed match."""
     raw_track_id: int
     provisional_person_id: int
     candidate_person_id: int
@@ -433,27 +436,27 @@ class _UncertainEvent:
 
 
 class ReIdentifier:
-    """Mantiene la corrispondenza track_id (ByteTrack) -> person_id
-    (identita' stabile), ri-associando le persone che rientrano
-    nell'inquadratura in base alla firma antropometrica.
+    """Maintains the track_id (ByteTrack) -> person_id (stable
+    identity) correspondence, re-associating people who re-enter the
+    frame based on their anthropometric signature.
 
-    Uso in `live_demo.py` (un solo punto di wiring):
+    Usage in `live_demo.py` (a single wiring point):
 
         reidentifier = ReIdentifier()
         ...
         for frame_result in tracker.run(...):
             people = reidentifier.resolve(frame_result.people, now=time.time(),
-                                           frame=frame_result.frame)  # frame opzionale
-            # 'people' ha la stessa forma di frame_result.people
-            # [(id, kxy, kconf), ...], ma id e' ora un person_id stabile
+                                           frame=frame_result.frame)  # frame optional
+            # 'people' has the same shape as frame_result.people
+            # [(id, kxy, kconf), ...], but id is now a stable person_id
     """
 
-    # Tempo massimo (dall'apparizione di un track MAI visto prima) durante
-    # cui si ritenta il match contro le persone "perse": oltre questa
-    # soglia si rinuncia e si accetta il track come identita' nuova per
-    # sempre, invece di ricontrollarlo a ogni frame per il resto della
-    # sessione (vedi nota nel docstring del modulo su perche' e' necessario
-    # un limite, non solo "ritenta finche' non trovi qualcosa").
+    # Maximum time (from the appearance of a never-before-seen track)
+    # during which the match against "lost" people is retried: beyond
+    # this threshold, the track is accepted as a new identity forever
+    # instead of being re-checked every frame for the rest of the
+    # session (see the note in the module docstring on why a limit is
+    # needed, not just "retry until you find something").
     _PENDING_RETRY_SECONDS = 2.0
 
     def __init__(self, max_lost_seconds: float = 180.0,
@@ -468,31 +471,32 @@ class ReIdentifier:
                  embedder: OSNetEmbedder | None = None,
                  embedding_bonus_weight: float = 0.7,
                  embedding_ema_alpha: float = 0.9):
-        """`session_mode` (nuovo): SINGLE forza `max_people=1` (vedi
-        `identity_manager.suggested_max_people_policy` -- una sola persona
-        attesa, ogni rientro e' per costruzione quella persona, il recupero
-        puo' essere il piu' permissivo possibile), sovrascrivendo
-        `max_people` se in conflitto. MULTIPLE (default) rispetta
-        `max_people` cosi' com'e' passato (puo' restare `None`).
+        """`session_mode` (new): SINGLE forces `max_people=1` (see
+        `identity_manager.suggested_max_people_policy` -- only one
+        person expected, every re-entry is by construction that person,
+        recovery can be as permissive as possible), overriding
+        `max_people` if in conflict. MULTIPLE (default) respects
+        `max_people` as passed (can remain `None`).
 
-        `flag_uncertain` / `uncertain_signature_dist` (nuovi): con
-        `flag_uncertain=True` (default), un candidato con distanza tra
-        `max_signature_dist` e `uncertain_signature_dist` (default: 1.6x
-        `max_signature_dist` se non specificato) non viene fuso ma
-        registrato in `self.uncertain_log`/`self.last_uncertain` -- vedi
-        `_UncertainEvent`. Con `flag_uncertain=False` il comportamento torna
-        binario come prima di questo modulo (match/non-match a
+        `flag_uncertain` / `uncertain_signature_dist` (new): with
+        `flag_uncertain=True` (default), a candidate with distance
+        between `max_signature_dist` and `uncertain_signature_dist`
+        (default: 1.6x `max_signature_dist` if unspecified) is not
+        merged but recorded in `self.uncertain_log`/`self.last_uncertain`
+        -- see `_UncertainEvent`. With `flag_uncertain=False` behavior
+        reverts to binary as before this module (match/no-match at
         `max_signature_dist`).
 
-        `embedder` (nuovo, opzionale): istanza di `OSNetEmbedder` (vedi
-        `pose/appearance_embedding.py`) -- se passata, ogni frame calcola
-        anche un embedding di aspetto per la persona attiva, mantenuto con
-        una media mobile esponenziale (`embedding_ema_alpha`, l'idea di
-        StrongSORT citata nel docstring del modulo) e usato come terzo
-        possibile sconto (`embedding_bonus_weight`, tipicamente il piu'
-        affidabile dei tre -- peso di default piu' alto di colore/posizione)
-        nello stesso schema "il piu' forte vince" di `_pair_cost`. Se
-        `None` (default), nessun comportamento diverso da prima."""
+        `embedder` (new, optional): an `OSNetEmbedder` instance (see
+        `pose/appearance_embedding.py`) -- if passed, every frame also
+        computes an appearance embedding for the active person,
+        maintained with an exponential moving average
+        (`embedding_ema_alpha`, the StrongSORT idea cited in the module
+        docstring) and used as a third possible discount
+        (`embedding_bonus_weight`, typically the most reliable of the
+        three -- higher default weight than color/position) in the same
+        "the strongest wins" scheme as `_pair_cost`. If `None`
+        (default), no behavior different from before."""
         self.max_lost_seconds = max_lost_seconds
         self.max_signature_dist = max_signature_dist
         self.min_signature_frames = min_signature_frames
@@ -512,43 +516,44 @@ class ReIdentifier:
         self.raw_to_person: dict[int, int] = {}
         self.buffers: dict[int, deque] = {}
         self.color_buffers: dict[int, deque] = {}
-        self.pending_check: set[int] = set()  # raw_track_id ancora da valutare
-        self.pending_since: dict[int, float] = {}  # raw_track_id -> now al primo avvistamento
+        self.pending_check: set[int] = set()  # raw_track_id still to be evaluated
+        self.pending_since: dict[int, float] = {}  # raw_track_id -> now at first sighting
         self.last_position: dict[int, tuple[np.ndarray, float]] = {}  # person_id -> (hip_xy, torso)
-        self.embedding_ema: dict[int, np.ndarray] = {}  # person_id -> embedding OSNet (media EMA)
+        self.embedding_ema: dict[int, np.ndarray] = {}  # person_id -> OSNet embedding (EMA average)
         self.lost: dict[int, _LostPerson] = {}
         self.merge_log: list[_MergeEvent] = []
         self.uncertain_log: list[_UncertainEvent] = []
-        # raw_track_id -> (candidate_person_id, distance) SOLO per il frame
-        # dell'ultima resolve(): un chiamante che vuole aggiungere colonne
-        # tipo "identity_uncertain"/"reid_uncertain_candidate_id" al CSV
-        # puo' leggerlo subito dopo resolve() senza che questo modulo debba
-        # cambiare la forma del valore di ritorno (resta [(person_id, kxy,
-        # kconf), ...], invariata per tutti i chiamanti esistenti).
+        # raw_track_id -> (candidate_person_id, distance) ONLY for the
+        # frame of the last resolve(): a caller who wants to add columns
+        # like "identity_uncertain"/"reid_uncertain_candidate_id" to the
+        # CSV can read it right after resolve() without this module
+        # needing to change the shape of the return value (stays
+        # [(person_id, kxy, kconf), ...], unchanged for all existing
+        # callers).
         self.last_uncertain: dict[int, tuple[int, float]] = {}
         self._next_person_id = 1
 
-    # -- API pubblica ---------------------------------------------------
+    # -- public API ---------------------------------------------------
 
     def resolve(self, people: list[tuple[int, np.ndarray, np.ndarray]],
                 now: float, frame: np.ndarray | None = None) -> list[tuple[int, np.ndarray, np.ndarray]]:
-        """Traduce la lista (raw_track_id, kxy, kconf) di un frame in una
-        lista (person_id, kxy, kconf), ri-associando le identita' quando
-        possibile. Va chiamata una volta per frame, con TUTTE le persone
-        rilevate in quel frame (anche solo per tenere aggiornato lo stato
-        interno di chi e' ancora presente).
+        """Translates a frame's (raw_track_id, kxy, kconf) list into a
+        (person_id, kxy, kconf) list, re-associating identities when
+        possible. Must be called once per frame, with ALL people
+        detected in that frame (even just to keep the internal state of
+        who is still present up to date).
 
-        `frame` e' opzionale: se passato (il frame BGR corrente), viene
-        usato anche il colore di maglia/pantaloni come segnale
-        complementare alla firma antropometrica (vedi docstring del
-        modulo). Se omesso, il comportamento e' identico alla versione
-        basata solo sulle proporzioni corporee.
+        `frame` is optional: if passed (the current BGR frame), the
+        shirt/pants color is also used as a signal complementary to the
+        anthropometric signature (see module docstring). If omitted,
+        behavior is identical to the version based only on body
+        proportions.
         """
         current_raw_ids = set()
         self.last_uncertain = {}
 
-        # -- pass 1: bookkeeping per-traccia (identico a prima) + elenco dei
-        # candidati "pronti" per un tentativo di match in questo frame --
+        # -- pass 1: per-track bookkeeping (identical to before) + list
+        # of candidates "ready" for a match attempt in this frame --
         ready: list[int] = []  # raw_track_id
         for raw_id, kxy, kconf in people:
             current_raw_ids.add(raw_id)
@@ -573,24 +578,24 @@ class ReIdentifier:
             if raw_id in self.pending_check and len(self.buffers[person_id]) >= self.min_signature_frames:
                 ready.append(raw_id)
 
-        # -- pass 2: risoluzione batch (ungherese, vedi identity_manager.py)
-        # di TUTTI i candidati pronti in questo frame contro TUTTE le
-        # identita' perse in un colpo solo -- invece del loop sequenziale
-        # precedente (un candidato alla volta, che accaparrava la propria
-        # identita' persa preferita senza considerare gli altri candidati
-        # pronti nello stesso frame). --
+        # -- pass 2: batch (Hungarian, see identity_manager.py)
+        # resolution of ALL ready candidates in this frame against ALL
+        # lost identities at once -- instead of the previous sequential
+        # loop (one candidate at a time, which would grab its own
+        # preferred lost identity without considering the other ready
+        # candidates in the same frame). --
         if ready:
             self._resolve_ready_batch(ready, now)
 
-        # -- pass 3: costruisce l'output con gli id (person_id gia'
-        # eventualmente aggiornato dal match nel pass 2) --
+        # -- pass 3: builds the output with the ids (person_id possibly
+        # already updated by the match in pass 2) --
         out = [(self.raw_to_person[raw_id], kxy, kconf) for raw_id, kxy, kconf in people]
 
         self._retire_disappeared_tracks(current_raw_ids, now)
         self._expire_old_lost_people(now)
         return out
 
-    # -- interno ----------------------------------------------------------
+    # -- internal ----------------------------------------------------------
 
     def _assign_provisional(self, raw_id: int, now: float) -> None:
         person_id = self._next_person_id
@@ -605,14 +610,14 @@ class ReIdentifier:
                     current_position: tuple[np.ndarray, float] | None,
                     current_embedding: np.ndarray | None,
                     lost: "_LostPerson", now: float) -> tuple[float | None, bool, bool, bool]:
-        """Costo (distanza) di UNA coppia candidato/identita' persa -- stessa
-        logica di sconto di prima (colore, posizione o embedding di aspetto,
-        il PIU' FORTE dei tre, mai sommati; nessuno puo' MAI alzare la
-        distanza, vedi il docstring del modulo), estratta qui per essere
-        richiamabile sia nella costruzione della matrice di costo batch
-        (`_resolve_ready_batch`) sia, se serve, per un confronto singolo.
-        Non applica la regola di causalita' (fatto dal chiamante, che
-        conosce `pending_since`)."""
+        """Cost (distance) of ONE candidate/lost-identity pair -- same
+        discount logic as before (color, position, or appearance
+        embedding, the STRONGEST of the three, never summed; none can
+        EVER raise the distance, see the module docstring), extracted
+        here to be callable both when building the batch cost matrix
+        (`_resolve_ready_batch`) and, if needed, for a single
+        comparison. Doesn't apply the causality rule (done by the
+        caller, which knows `pending_since`)."""
         prop_dist = signature_distance(median_sig, lost.signature)
         if prop_dist is None:
             return None, False, False, False
@@ -647,17 +652,17 @@ class ReIdentifier:
         return prop_dist * (1.0 - position_bonus), False, position_used, False
 
     def _resolve_ready_batch(self, ready: list[int], now: float) -> None:
-        """Costruisce la matrice di costo candidati-pronti x identita'-perse
-        e la risolve in un colpo solo con `identity_manager.resolve_batch`
-        (algoritmo ungherese + soglie accept/reject/zona-grigia). Applica poi
-        gli esiti: `matched` -> fusione (identico a prima, vedi
-        `_apply_merge`); `uncertain` -> segnalato in `uncertain_log`/
-        `last_uncertain`, NESSUNA fusione, il candidato resta in
-        `pending_check` e verra' ritentato al prossimo frame; `new` -> idem,
-        resta in attesa finche' non scade `_PENDING_RETRY_SECONDS`, a quel
-        punto (se `max_people` e' impostato) si tenta l'ultima forzatura
-        (`_force_match_at_capacity`, invariata -- l'unica eccezione a "mai
-        forzare" del modulo)."""
+        """Builds the ready-candidates x lost-identities cost matrix and
+        solves it all at once with `identity_manager.resolve_batch`
+        (Hungarian algorithm + accept/reject/gray-zone thresholds).
+        Then applies the outcomes: `matched` -> merge (identical to
+        before, see `_apply_merge`); `uncertain` -> flagged in
+        `uncertain_log`/`last_uncertain`, NO merge, the candidate stays
+        in `pending_check` and will be retried next frame; `new` ->
+        same, stays pending until `_PENDING_RETRY_SECONDS` expires, at
+        which point (if `max_people` is set) the last-resort forcing is
+        attempted (`_force_match_at_capacity`, unchanged -- the module's
+        only exception to "never force")."""
         lost_ids = list(self.lost.keys())
         cost_matrix = np.full((len(ready), max(len(lost_ids), 1)), np.inf)
         pair_flags: dict[tuple[int, int], tuple[bool, bool, bool]] = {}
@@ -675,7 +680,7 @@ class ReIdentifier:
                 for j, lost_person_id in enumerate(lost_ids):
                     lost = self.lost[lost_person_id]
                     if lost.lost_time > pending_since:
-                        continue  # regola di causalita' -- resta inf
+                        continue  # causality rule -- stays inf
                     cost, color_used, position_used, embedding_used = self._pair_cost(
                         median_sig, median_color, current_position, current_embedding, lost, now)
                     if cost is None:
@@ -709,7 +714,7 @@ class ReIdentifier:
 
         for raw_id in still_pending:
             if now - self.pending_since[raw_id] <= self._PENDING_RETRY_SECONDS:
-                continue  # si ritenta ancora ai prossimi frame, vedi sopra
+                continue  # still retried on subsequent frames, see above
             self.pending_check.discard(raw_id)
             if self.max_people is None:
                 continue
@@ -741,59 +746,58 @@ class ReIdentifier:
         del self.buffers[person_id]
         self.color_buffers.pop(person_id, None)
         self.raw_to_person[raw_id] = matched_person_id
-        # L'embedding EMA continua a evolvere sull'identita' ripristinata:
-        # riparte da quello del provvisorio appena fuso (la stima piu'
-        # recente disponibile), non da quello congelato al momento della
-        # perdita -- coerente con "restare in memoria e affinarsi nel
-        # tempo" (vedi appearance_embedding.ema_update).
+        # The EMA embedding keeps evolving on the restored identity: it
+        # resumes from the just-merged provisional's (the most recent
+        # estimate available), not from the one frozen at the moment of
+        # loss -- consistent with "staying in memory and refining over
+        # time" (see appearance_embedding.ema_update).
         provisional_embedding = self.embedding_ema.pop(person_id, None)
         if provisional_embedding is not None:
             self.embedding_ema[matched_person_id] = provisional_embedding
-        # buffer nuovo per l'identita' ripristinata: quello provvisorio e'
-        # stato appena eliminato, ma serve un buffer per continuare ad
-        # accumulare la firma nel caso questa persona sparisca di nuovo
-        # piu' avanti.
+        # new buffer for the restored identity: the provisional one was
+        # just deleted, but a buffer is needed to keep accumulating the
+        # signature in case this person disappears again later.
         self.buffers[matched_person_id] = deque(maxlen=self.min_signature_frames)
         self.color_buffers[matched_person_id] = deque(maxlen=self.min_signature_frames)
 
     def _force_match_at_capacity(self, buffer: deque, pending_since: float,
                                   pending_person_id: int,
                                   ) -> tuple[int, float, bool, bool, bool] | None:
-        """Ultimo tentativo, solo quando `max_people` e' impostato: se,
-        SENZA CONTARE la persona provvisoria in valutazione, il numero di
-        identita' note (attive + perse) ha gia' raggiunto il tetto, allora
-        questa non puo' essere una persona in piu' -- deve essere una di
-        quelle attualmente "perse". Sceglie la piu' vicina per firma anche
-        sopra `max_signature_dist` (vedi "Segnale opzionale: numero massimo
-        di persone" nel docstring del modulo). Non forza mai contro persone
-        attualmente attive, solo contro quelle perse, e rispetta la stessa
-        regola di causalita' dei match normali. Nessun candidato idoneo ->
-        None (si rinuncia, non si forza a vuoto).
+        """Last resort, only when `max_people` is set: if, WITHOUT
+        COUNTING the provisional person being evaluated, the number of
+        known identities (active + lost) has already reached the cap,
+        then this can't be an extra person -- it must be one of those
+        currently "lost". Picks the closest by signature even above
+        `max_signature_dist` (see "Optional signal: maximum number of
+        people" in the module docstring). Never forces against
+        currently active people, only against lost ones, and respects
+        the same causality rule as normal matches. No eligible
+        candidate -> None (gives up, doesn't force emptily).
 
-        Il conteggio esclude deliberatamente `pending_person_id`: se non lo
-        facesse, anche la prima apparizione in assoluto di una persona
-        genuinamente nuova (es. la seconda di una sessione 1v1, mai persa
-        da nessuno) scatterebbe come "al tetto" appena il suo stesso
-        retry scade, rischiando un merge forzato sbagliato con chiunque
-        risulti perso in quel momento -- il tetto deve riferirsi a QUANTE
-        ALTRE identita' esistono gia', non contare se stessa.
+        The count deliberately excludes `pending_person_id`: if it
+        didn't, even the very first appearance ever of a genuinely new
+        person (e.g. the second person of a 1v1 session, never lost by
+        anyone) would trigger as "at the cap" as soon as its own retry
+        expires, risking a wrong forced merge with whoever happens to be
+        lost at that moment -- the cap must refer to HOW MANY OTHER
+        identities already exist, not count itself.
         """
         roster_size = len((set(self.raw_to_person.values()) | set(self.lost.keys()))
                            - {pending_person_id})
         if roster_size < self.max_people:
             return None
         if not self.lost:
-            print(f"[reid] warning: max_people={self.max_people} raggiunto ma nessuna "
-                  f"persona 'persa' da recuperare -- conio comunque un nuovo person_id "
-                  f"(controlla il numero configurato, o una detection spuria ha superato "
-                  f"il filtro max_people di pose_estimation.py)")
+            print(f"[reid] warning: max_people={self.max_people} reached but no "
+                  f"'lost' person to recover -- minting a new person_id anyway "
+                  f"(check the configured number, or a spurious detection got past "
+                  f"pose_estimation.py's max_people filter)")
             return None
 
         median_sig = np.nanmedian(np.array(buffer), axis=0)
         best_person_id, best_dist = None, None
         for person_id, lost in self.lost.items():
             if lost.lost_time > pending_since:
-                continue  # stessa regola di causalita' dei match normali
+                continue  # same causality rule as normal matches
             prop_dist = signature_distance(median_sig, lost.signature)
             if prop_dist is None:
                 continue
@@ -801,9 +805,9 @@ class ReIdentifier:
                 best_person_id, best_dist = person_id, prop_dist
 
         if best_person_id is None:
-            print(f"[reid] warning: max_people={self.max_people} raggiunto ma nessun "
-                  f"candidato idoneo (regola di causalita') -- conio comunque un nuovo "
-                  f"person_id")
+            print(f"[reid] warning: max_people={self.max_people} reached but no "
+                  f"eligible candidate (causality rule) -- minting a new "
+                  f"person_id anyway")
             return None
         return (best_person_id, best_dist, False, False, True)
 
@@ -816,10 +820,11 @@ class ReIdentifier:
             buffer = self.buffers.pop(person_id, None)
             color_buffer = self.color_buffers.pop(person_id, None)
             last_pos = self.last_position.pop(person_id, None)
-            # L'embedding EMA accumulato mentre la persona era attiva viene
-            # "congelato" in _LostPerson.embedding esattamente come
-            # firma/colore/posizione -- rimosso da self.embedding_ema (non
-            # e' piu' una persona attiva da aggiornare frame per frame).
+            # The EMA embedding accumulated while the person was active
+            # is "frozen" into _LostPerson.embedding exactly like
+            # signature/color/position -- removed from
+            # self.embedding_ema (no longer an active person to update
+            # frame by frame).
             last_embedding = self.embedding_ema.pop(person_id, None)
             if buffer and len(buffer) > 0:
                 median_sig = np.nanmedian(np.array(buffer), axis=0)

@@ -1,16 +1,15 @@
 """
 webui_api_check.py
 ====================
-Verifica della logica PURA di `webui/api.py` -- niente pywebview, niente
-finestra vera, niente video/tracker reale (stesso spirito di
-video_player_check.py per gui/video_player.py). Copre le quattro funzioni/
-classi isolate apposta per essere testabili senza una finestra:
-`build_player_kwargs`, `encode_frame_jpeg_b64`, `_LatencyTracker`,
-`build_status`. Non tocca la classe `Api` stessa (quella richiede
-pywebview/una finestra vera -- verificata a mano sul Mac, come le altre
-feature della GUI).
+Verifies the PURE logic of `webui/api.py` -- no pywebview, no real
+window, no real video/tracker (same spirit as video_player_check.py for
+gui/video_player.py). Covers the four functions/classes deliberately
+isolated to be testable without a window: `build_player_kwargs`,
+`encode_frame_jpeg_b64`, `_LatencyTracker`, `build_status`. Doesn't touch
+the `Api` class itself (that requires pywebview/a real window -- verified
+by hand on the Mac, like the GUI's other features).
 
-Esegui con: python webui_api_check.py
+Run with: python webui_api_check.py
 """
 
 from __future__ import annotations
@@ -37,42 +36,42 @@ def part1_build_player_kwargs_mirrors_app_py_defaults():
     assert kwargs["mode"] == "pose"
     assert kwargs["source"] == "video.mp4"
     assert kwargs["fps"] == 15.0
-    # device non specificato -> None, NON "mps": la risoluzione automatica
-    # (cuda/mps/cpu) avviene in Api.build_player(), non qui, cosi' questa
-    # funzione resta pura/testabile senza richiedere torch installato --
-    # vedi anche part1b sotto per il passthrough di un device esplicito.
+    # device not specified -> None, NOT "mps": automatic resolution
+    # (cuda/mps/cpu) happens in Api.build_player(), not here, so this
+    # function stays pure/testable without requiring torch installed --
+    # see also part1b below for the passthrough of an explicit device.
     assert kwargs["device"] is None
-    assert kwargs["pose_model"] == "yolo26s-pose.pt"  # scale default "s"
+    assert kwargs["pose_model"] == "yolo26s-pose.pt"  # default "s" scale
     assert kwargs["seg_model"] == "yolo26s-seg.pt"
     assert kwargs["with_hands"] is True
     assert kwargs["with_eyes"] is True
     assert kwargs["with_mouth"] is False
     assert kwargs["max_people"] is None
-    # identity_mode default "tracking_reid": il pose-reid (ReIdentifier)
-    # funziona bene SENZA max_people (matching per firma/colore/posizione,
-    # semplicemente niente "forza il match perche' il tetto e' raggiunto")
-    # -- vedi il commento in build_player_kwargs sull'asimmetria con
-    # SegReIdentifier, che invece max_people lo richiede per davvero.
+    # default identity_mode "tracking_reid": pose-reid (ReIdentifier)
+    # works fine WITHOUT max_people (signature/color/position matching,
+    # simply no "force the match because the cap is reached") -- see the
+    # comment in build_player_kwargs about the asymmetry with
+    # SegReIdentifier, which instead genuinely requires max_people.
     assert kwargs["with_reid"] is True
-    print("Parte 1: build_player_kwargs applica i default giusti e passa i flag richiesti — OK")
+    print("Part 1: build_player_kwargs applies the right defaults and passes the requested flags — OK")
 
 
 def part1b_explicit_device_passes_through_unchanged():
-    """Se JS manda esplicitamente un device (es. l'utente vuole forzare
-    "cpu" per debug), build_player_kwargs deve limitarsi a passarlo cosi'
-    com'e' -- l'auto-rilevamento in Api.build_player() scatta SOLO quando
-    il campo e' assente/vuoto, non deve mai scavalcare una scelta esplicita."""
+    """If JS explicitly sends a device (e.g. the user wants to force
+    "cpu" for debugging), build_player_kwargs must simply pass it through
+    as-is -- auto-detection in Api.build_player() only kicks in when the
+    field is absent/empty, it must never override an explicit choice."""
     kwargs = build_player_kwargs({
         "mode": "segmentation", "source": "v.mp4", "fps": 15, "device": "cuda",
     })
     assert kwargs["device"] == "cuda"
-    print("Parte 1b: un device esplicito nei parametri passa invariato, senza auto-rilevamento — OK")
+    print("Part 1b: an explicit device in the parameters passes through unchanged, with no auto-detection — OK")
 
 
 def part2_hands_face_ignored_outside_pose_and_both():
-    # Stessa regola di app.py::_on_mode_change: mani/viso valgono solo in
-    # Pose/Both, in Segmentation vengono azzerati anche se il chiamante li
-    # manda a True per errore.
+    # Same rule as app.py::_on_mode_change: hands/face only apply in
+    # Pose/Both, in Segmentation they're zeroed out even if the caller
+    # sends them as True by mistake.
     kwargs = build_player_kwargs({
         "mode": "segmentation", "source": "v.mp4", "fps": 15,
         "with_hands": True, "with_eyes": True, "with_mouth": True,
@@ -80,18 +79,18 @@ def part2_hands_face_ignored_outside_pose_and_both():
     assert kwargs["with_hands"] is False
     assert kwargs["with_eyes"] is False
     assert kwargs["with_mouth"] is False
-    print("Parte 2: mani/viso vengono ignorati fuori da Pose/Both — OK")
+    print("Part 2: hands/face are ignored outside Pose/Both — OK")
 
 
 def part3_mediapipe_pose_only_in_segmentation():
-    # Segmentazione/pose indipendenti (vedi gui/pipeline_runner.py): non
-    # esiste piu' un flag "with_mediapipe_pose" separato mandato da JS --
-    # e' derivato dalla scelta "Pose model" (pose_backend) fatta nella
-    # sezione Pose della sidebar. In modalita' Segmentation,
-    # pose_backend="mediapipe" applica MediaPipe dentro ciascuna maschera
-    # tracciata (con_mediapipe_pose=True); in modalita' Pose da sola,
-    # pose_backend="mediapipe" prende un'altra strada del tutto
-    # (`_iter_pose_mediapipe`, box interni, NON `with_mediapipe_pose`).
+    # Independent segmentation/pose (see gui/pipeline_runner.py): there's
+    # no longer a separate "with_mediapipe_pose" flag sent by JS -- it's
+    # derived from the "Pose model" choice (pose_backend) made in the
+    # sidebar's Pose section. In Segmentation mode,
+    # pose_backend="mediapipe" applies MediaPipe inside each tracked mask
+    # (with_mediapipe_pose=True); in Pose-alone mode,
+    # pose_backend="mediapipe" takes a completely different path
+    # (`_iter_pose_mediapipe`, internal boxes, NOT `with_mediapipe_pose`).
     kwargs_seg = build_player_kwargs({
         "mode": "segmentation", "source": "v.mp4", "fps": 15,
         "pose_backend": "mediapipe",
@@ -103,22 +102,22 @@ def part3_mediapipe_pose_only_in_segmentation():
         "pose_backend": "mediapipe",
     })
     assert kwargs_pose["with_mediapipe_pose"] is False
-    assert kwargs_pose["pose_backend"] == "mediapipe"  # gestito da _iter_pose_mediapipe, non da questo flag
-    print("Parte 3: MediaPipe pose-per-maschera attivabile solo in modalita' segmentation — OK")
+    assert kwargs_pose["pose_backend"] == "mediapipe"  # handled by _iter_pose_mediapipe, not this flag
+    print("Part 3: per-mask MediaPipe pose can only be enabled in segmentation mode — OK")
 
 
 def part4_reid_requires_max_people_and_right_mode():
-    # senza max_people: il pose-reid (ReIdentifier) funziona comunque
-    # (non ha bisogno di un tetto per il matching normale), il seg-reid
-    # (SegReIdentifier) resta spento -- richiede max_people per davvero,
-    # vedi il commento in build_player_kwargs sull'asimmetria tra i due.
+    # without max_people: pose-reid (ReIdentifier) still works (doesn't
+    # need a cap for normal matching), seg-reid (SegReIdentifier) stays
+    # off -- it genuinely requires max_people, see the comment in
+    # build_player_kwargs about the asymmetry between the two.
     kwargs = build_player_kwargs({
         "mode": "both", "source": "v.mp4", "fps": 15,
     })
     assert kwargs["with_reid"] is True
     assert kwargs["with_seg_reid"] is False
 
-    # reid richiesta con max_people, modalita' "both" -> entrambe le reid attive
+    # reid requested with max_people, "both" mode -> both reids active
     kwargs2 = build_player_kwargs({
         "mode": "both", "source": "v.mp4", "fps": 15, "reid": True, "max_people": "3",
     })
@@ -126,28 +125,28 @@ def part4_reid_requires_max_people_and_right_mode():
     assert kwargs2["with_reid"] is True
     assert kwargs2["with_seg_reid"] is True
 
-    # reid richiesta con max_people, modalita' "pose" -> solo pose reid attiva
+    # reid requested with max_people, "pose" mode -> only pose reid active
     kwargs3 = build_player_kwargs({
         "mode": "pose", "source": "v.mp4", "fps": 15, "reid": True, "max_people": 2,
     })
     assert kwargs3["with_reid"] is True
     assert kwargs3["with_seg_reid"] is False
-    print("Parte 4: re-id/seg-reid attive solo con max_people impostato e nella modalita' giusta — OK")
+    print("Part 4: re-id/seg-reid are active only with max_people set and in the right mode — OK")
 
 
 def part5_invalid_mode_and_missing_source_raise():
     try:
         build_player_kwargs({"mode": "bogus", "source": "v.mp4", "fps": 15})
-        raise AssertionError("doveva sollevare ValueError per mode sconosciuto")
+        raise AssertionError("should have raised ValueError for an unknown mode")
     except ValueError:
         pass
     try:
         build_player_kwargs({"mode": "pose", "source": "", "fps": 15})
-        raise AssertionError("doveva sollevare ValueError per source mancante")
+        raise AssertionError("should have raised ValueError for a missing source")
     except ValueError:
         pass
-    print("Parte 5: mode sconosciuto o source mancante sollevano ValueError (build_player le trasforma "
-          "in {'ok': False, 'error': ...} invece di far esplodere la chiamata JS) — OK")
+    print("Part 5: unknown mode or missing source raise ValueError (build_player turns them "
+          "into {'ok': False, 'error': ...} instead of blowing up the JS call) — OK")
 
 
 def part6_encode_frame_jpeg_b64_roundtrip_and_resize():
@@ -160,16 +159,16 @@ def part6_encode_frame_jpeg_b64_roundtrip_and_resize():
     assert data_url.startswith("data:image/jpeg;base64,")
     raw = base64.b64decode(data_url.split(",", 1)[1])
     decoded = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
-    assert decoded.shape == (10, 10, 3)  # nessun resize sotto max_width
+    assert decoded.shape == (10, 10, 3)  # no resize below max_width
 
     wide = np.zeros((100, 3200, 3), dtype=np.uint8)
     data_url2 = encode_frame_jpeg_b64(wide, max_width=1600)
     raw2 = base64.b64decode(data_url2.split(",", 1)[1])
     decoded2 = cv2.imdecode(np.frombuffer(raw2, dtype=np.uint8), cv2.IMREAD_COLOR)
-    assert decoded2.shape[1] == 1600  # ridimensionato verso il basso
-    assert decoded2.shape[0] == 50    # proporzioni mantenute (100 * 1600/3200)
-    print("Parte 6: encode_frame_jpeg_b64 produce un data-URL decodificabile e ridimensiona solo "
-          "verso il basso oltre max_width — OK")
+    assert decoded2.shape[1] == 1600  # resized down
+    assert decoded2.shape[0] == 50    # proportions kept (100 * 1600/3200)
+    print("Part 6: encode_frame_jpeg_b64 produces a decodable data-URL and resizes only "
+          "downward beyond max_width — OK")
 
 
 def part7_latency_tracker_rolling_average():
@@ -182,11 +181,11 @@ def part7_latency_tracker_rolling_average():
     assert abs(tracker.avg_latency_ms - 100.0) < 1e-6
     assert abs(tracker.processing_fps - 10.0) < 1e-6
 
-    # la finestra e' di 3: un quarto valore fa uscire il piu' vecchio
+    # the window is 3: a fourth value pushes out the oldest
     tracker.record(0.100)
-    tracker.record(0.400)  # ora la finestra contiene [0.1, 0.1, 0.4] -> media 0.2
+    tracker.record(0.400)  # now the window contains [0.1, 0.1, 0.4] -> average 0.2
     assert abs(tracker.avg_latency_ms - 200.0) < 1e-6
-    print("Parte 7: _LatencyTracker calcola una media mobile reale, non un valore finto — OK")
+    print("Part 7: _LatencyTracker computes a real rolling average, not a fake value — OK")
 
 
 def part8_build_status_uses_people_count_not_len_rows():
@@ -196,23 +195,23 @@ def part8_build_status_uses_people_count_not_len_rows():
     latency.record(0.050)
     status = build_status(runner_frame=frame, cached_frame_count=7, latency=latency,
                            device="mps", mode="pose", is_finished=False)
-    assert status["people_count"] == 4  # da RunnerFrame.people_count, non da len(rows)=0
+    assert status["people_count"] == 4  # from RunnerFrame.people_count, not from len(rows)=0
     assert status["rows_this_frame"] == 0
     assert status["frame_index"] == 6
     assert status["timecode_s"] == 1.5
     assert status["device"] == "mps"
     assert status["is_finished"] is False
     assert abs(status["avg_latency_ms"] - 50.0) < 1e-6
-    print("Parte 8: build_status legge people_count da RunnerFrame (affidabile anche a rows vuote) — OK")
+    print("Part 8: build_status reads people_count from RunnerFrame (reliable even with empty rows) — OK")
 
 
 def part9_probe_video_metadata_missing_file_returns_none_not_zero():
     meta = probe_video_metadata("/tmp/definitely_not_a_real_video_file_xyz.mp4")
     assert meta == {"frame_count": None, "duration_s": None, "container_fps": None}, (
-        "un file inesistente/illeggibile deve dare 'sconosciuto' (None), non 0 -- "
-        "0 farebbe credere a un video vuoto invece che a una durata non calcolabile"
+        "a nonexistent/unreadable file must give 'unknown' (None), not 0 -- "
+        "0 would suggest an empty video instead of a duration that couldn't be computed"
     )
-    print("Parte 9: probe_video_metadata su un file inesistente ritorna 'sconosciuto' (None), non zero — OK")
+    print("Part 9: probe_video_metadata on a nonexistent file returns 'unknown' (None), not zero — OK")
 
 
 def part10_probe_video_metadata_reads_real_container_metadata():
@@ -228,13 +227,13 @@ def part10_probe_video_metadata_reads_real_container_metadata():
     writer.release()
     try:
         meta = probe_video_metadata(path)
-        assert meta["frame_count"] == 30, f"attesi 30 frame nel container, trovato {meta['frame_count']}"
+        assert meta["frame_count"] == 30, f"expected 30 frames in the container, found {meta['frame_count']}"
         assert abs(meta["container_fps"] - 10.0) < 1e-6
-        assert abs(meta["duration_s"] - 3.0) < 1e-6  # 30 frame / 10 fps = 3s
+        assert abs(meta["duration_s"] - 3.0) < 1e-6  # 30 frames / 10 fps = 3s
     finally:
         os.remove(path)
-    print("Parte 10: probe_video_metadata legge SOLO i metadati del container (frame count/fps/durata) "
-          "da un file video vero, senza decodificare i frame uno per uno — OK")
+    print("Part 10: probe_video_metadata reads ONLY the container metadata (frame count/fps/duration) "
+          "from a real video file, without decoding frames one by one — OK")
 
 
 def part11_build_status_carries_totals_and_max_people_for_the_timeline():
@@ -245,11 +244,11 @@ def part11_build_status_carries_totals_and_max_people_for_the_timeline():
                            device="mps", mode="segmentation", is_finished=False,
                            max_people=20, total_frame_count=1087, total_duration_s=72.8)
     assert status["frame_index"] == 208
-    assert status["total_frame_count"] == 1087  # per il timecode/metrica "corrente / totale"
+    assert status["total_frame_count"] == 1087  # for the "current / total" timecode/metric
     assert status["total_duration_s"] == 72.8
-    assert status["max_people"] == 20  # per la metrica "tracce attive: 2 / 20"
-    print("Parte 11: build_status porta anche i totali (frame/durata) e max_people, per il timecode "
-          "'corrente / totale' e la metrica 'tracce attive: N / max' del nuovo layout — OK")
+    assert status["max_people"] == 20  # for the "active tracks: 2 / 20" metric
+    print("Part 11: build_status also carries the totals (frame/duration) and max_people, for the "
+          "'current / total' timecode and the 'active tracks: N / max' metric of the new layout — OK")
 
 
 def part12_seg_backend_defaults_to_yolo_and_passes_through():
@@ -265,11 +264,11 @@ def part12_seg_backend_defaults_to_yolo_and_passes_through():
         "sam_chunk_store_dir": "/tmp/chunks",
     })
     assert kwargs_sam["seg_backend"] == "sam31"
-    assert kwargs_sam["sam_chunk_size"] == 300  # stringa -> int, come max_people altrove
+    assert kwargs_sam["sam_chunk_size"] == 300  # string -> int, like max_people elsewhere
     assert kwargs_sam["sam_overlap"] == 20
     assert kwargs_sam["sam_chunk_store_dir"] == "/tmp/chunks"
-    print("Parte 12: seg_backend/sam_chunk_size/sam_overlap/sam_chunk_store_dir hanno i default giusti "
-          "('yolo'/600/50/None) e passano attraverso invariati quando specificati — OK")
+    print("Part 12: seg_backend/sam_chunk_size/sam_overlap/sam_chunk_store_dir have the right defaults "
+          "('yolo'/600/50/None) and pass through unchanged when specified — OK")
 
 
 def part13_sam_redetect_every_and_text_prompt_defaults_and_passthrough():
@@ -281,18 +280,18 @@ def part13_sam_redetect_every_and_text_prompt_defaults_and_passthrough():
         "mode": "segmentation", "source": "v.mp4", "fps": "15",
         "seg_backend": "sam31", "sam_redetect_every": "120", "sam_text_prompt": "person",
     })
-    assert kwargs_set["sam_redetect_every"] == 120  # stringa -> int
+    assert kwargs_set["sam_redetect_every"] == 120  # string -> int
     assert kwargs_set["sam_text_prompt"] == "person"
 
-    # stringa vuota == non impostato, come max_people altrove (non "0"/"" letterale)
+    # empty string == not set, like max_people elsewhere (not a literal "0"/"")
     kwargs_empty = build_player_kwargs({
         "mode": "segmentation", "source": "v.mp4", "fps": "15",
         "sam_redetect_every": "", "sam_text_prompt": "",
     })
     assert kwargs_empty["sam_redetect_every"] is None
     assert kwargs_empty["sam_text_prompt"] is None
-    print("Parte 13: sam_redetect_every/sam_text_prompt hanno default None e passano attraverso "
-          "invariati quando specificati (stringa vuota == non impostato) — OK")
+    print("Part 13: sam_redetect_every/sam_text_prompt default to None and pass through "
+          "unchanged when specified (empty string == not set) — OK")
 
 
 if __name__ == "__main__":
@@ -311,6 +310,6 @@ if __name__ == "__main__":
     part13_sam_redetect_every_and_text_prompt_defaults_and_passthrough()
     part11_build_status_carries_totals_and_max_people_for_the_timeline()
     part12_seg_backend_defaults_to_yolo_and_passes_through()
-    print("\nVerifica completata senza errori: la logica pura di webui/api.py (parametri, codifica "
-          "frame, metriche, metadati video) si comporta come atteso, senza bisogno di pywebview o di "
-          "una finestra vera.")
+    print("\nVerification completed with no errors: webui/api.py's pure logic (parameters, frame "
+          "encoding, metrics, video metadata) behaves as expected, without needing pywebview or "
+          "a real window.")

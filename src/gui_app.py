@@ -1,24 +1,24 @@
 """
 gui_app.py
 ===========
-Lancia l'interfaccia grafica locale (Tkinter) per la pipeline pose/
-segmentazione. Va eseguito da dentro `src/`:
+Launches the local (Tkinter) graphical interface for the pose/segmentation
+pipeline. Must be run from inside `src/`:
 
     cd src && python gui_app.py
 
-Sta a livello di `src/` (non dentro `gui/`) per lo stesso motivo di
-`live_demo.py` / `segmentation_demo.py` / `pipeline.py`: quando Python
-esegue uno script direttamente, aggiunge automaticamente la SUA cartella
-(`src/`) in cima a `sys.path`, il che rende risolvibili gli import
-`from pose...`, `from segmentation...`, `from common...` usati da tutta la
-pipeline senza bisogno di manipolare sys.path a mano. Lanciando invece
-`python gui/app.py` direttamente, sys.path[0] sarebbe `src/gui/` invece di
-`src/`, e quegli import fallirebbero.
+Lives at the `src/` level (not inside `gui/`) for the same reason as
+`live_demo.py` / `segmentation_demo.py` / `pipeline.py`: when Python runs a
+script directly, it automatically adds ITS OWN folder (`src/`) to the top
+of `sys.path`, which makes the `from pose...`, `from segmentation...`,
+`from common...` imports used throughout the pipeline resolvable without
+manually touching sys.path. Running `python gui/app.py` directly instead
+would make sys.path[0] `src/gui/` instead of `src/`, and those imports
+would fail.
 
-Richiede una sorgente video reale e un display grafico: non eseguibile
-nell'ambiente sandbox usato per sviluppare il resto della pipeline. La
-logica di cache/seek dietro Play/Avanti/Indietro (in `gui/video_player.py`)
-e' invece verificata separatamente, senza GUI ne' video, in
+Requires a real video source and a graphical display: not runnable in the
+sandbox environment used to develop the rest of the pipeline. The
+cache/seek logic behind Play/Forward/Back (in `gui/video_player.py`) is
+instead verified separately, with no GUI or video, in
 `demo/video_player_check.py`.
 """
 

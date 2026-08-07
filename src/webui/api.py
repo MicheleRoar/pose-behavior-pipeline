@@ -1,40 +1,40 @@
 """
 webui/api.py
 =============
-Ponte tra il frontend web (webui/index.html + app.js, dentro una finestra
-pywebview) e la pipeline esistente. Non duplica NESSUNA logica di
-elaborazione: riusa `VideoPlayer` (gui/video_player.py) e
-`iter_pipeline_frames` (gui/pipeline_runner.py) esattamente come fa
-gui/app.py (la GUI Tkinter, che resta nel repo invariata) -- questo modulo
-si occupa solo di: dialoghi file nativi, un thread di riproduzione in
-background, codifica dei frame in JPEG base64, e calcolo delle metriche
-mostrate nella status bar.
+Bridge between the web frontend (webui/index.html + app.js, inside a
+pywebview window) and the existing pipeline. It does NOT duplicate ANY
+processing logic: it reuses `VideoPlayer` (gui/video_player.py) and
+`iter_pipeline_frames` (gui/pipeline_runner.py) exactly like gui/app.py
+does (the Tkinter GUI, which remains unchanged in the repo) -- this
+module only handles: native file dialogs, a background playback thread,
+JPEG base64 frame encoding, and computing the metrics shown in the
+status bar.
 
-Perche' un thread invece di `root.after()` come in app.py
+Why a thread instead of `root.after()` like in app.py
 -------------------------------------------------------------
-Tkinter impone un unico thread per gli aggiornamenti UI (vedi il docstring
-di app.py); pywebview no: la finestra e' un processo/webview separato che
-riceve aggiornamenti tramite `window.evaluate_js(...)`, quindi si puo' far
-girare la riproduzione su un thread Python dedicato che chiama
-`step_forward()` e spinge ogni frame al DOM, invece di far "pollare" il
-lato JS. La cadenza (attesa "delay dopo la fine dell'elaborazione
-precedente", non un timer a frequenza fissa) replica deliberatamente la
-stessa logica non-garantita di `app.py._tick()` -- vedi li' per il perche'.
+Tkinter requires a single thread for UI updates (see app.py's
+docstring); pywebview doesn't: the window is a separate process/webview
+that receives updates via `window.evaluate_js(...)`, so playback can run
+on a dedicated Python thread that calls `step_forward()` and pushes each
+frame to the DOM, instead of having the JS side poll. The cadence
+(waiting a "delay after the end of the previous processing", not a
+fixed-frequency timer) deliberately replicates the same non-guaranteed
+logic of `app.py._tick()` -- see there for why.
 
-Onesta' delle metriche
+Honesty of the metrics
 ------------------------
-`processing_fps` e `avg_latency_ms` sono calcolati da una media mobile di
-tempi reali attorno a `step_forward()` (vedi `_LatencyTracker`), non
-inventati. `people_count` viene da `RunnerFrame.people_count` (vedi
-pipeline_runner.py: perche' NON da `len(rows)`, che in modalita' "pose" puo'
-restare a zero finche' la finestra scorrevole delle feature non si
-riempie). Il device mostrato e' l'etichetta configurata (es. "mps"), non
-una telemetria di utilizzo GPU reale -- non affidabilmente leggibile da
-puro Python/PyTorch su Apple Silicon, vedi discussione nel README.
+`processing_fps` and `avg_latency_ms` are computed from a moving average
+of real timings around `step_forward()` (see `_LatencyTracker`), not
+made up. `people_count` comes from `RunnerFrame.people_count` (see
+pipeline_runner.py: why NOT from `len(rows)`, which in "pose" mode can
+stay at zero until the feature sliding window fills up). The device
+shown is the configured label (e.g. "mps"), not real GPU usage
+telemetry -- not reliably readable from pure Python/PyTorch on Apple
+Silicon, see the discussion in the README.
 
-Import di `webview` ritardato (dentro i soli metodi che ne hanno bisogno),
-cosi' `build_player_kwargs` / `encode_frame_jpeg_b64` / `build_status` /
-`_LatencyTracker` restano testabili senza pywebview installato -- vedi
+The `webview` import is delayed (only inside the methods that need it),
+so `build_player_kwargs` / `encode_frame_jpeg_b64` / `build_status` /
+`_LatencyTracker` remain testable without pywebview installed -- see
 `demo/webui_api_check.py`.
 """
 
@@ -52,41 +52,40 @@ import pandas as pd
 
 from gui.pipeline_runner import iter_pipeline_frames, RunnerFrame
 from gui.video_player import VideoPlayer
-from common.device import detect_default_device  # solo la funzione: non importa torch
-                                                    # finche' non viene CHIAMATA (vedi sotto)
+from common.device import detect_default_device  # only the function: doesn't import torch
+                                                    # until it's CALLED (see below)
 from pose.identity_manager import IdentityMode, SessionMode, wants_reid_engine
-from pose.appearance_embedding import torchreid_available  # solo il check leggero: non importa torch
+from pose.appearance_embedding import torchreid_available  # only the lightweight check: doesn't import torch
 
 MODE_KEYS = {"segmentation", "pose", "both"}
 POSE_BACKEND_KEYS = {"yolo", "mediapipe"}
 IDENTITY_MODE_KEYS = {"frame_by_frame", "tracking_only", "tracking_reid"}
 SESSION_MODE_KEYS = {"single", "multiple"}
-# SAMURAI (yangchris11/samurai) NON e' un backend valido qui: il suo filtro
-# di Kalman assume un solo oggetto tracciato per sessione e va in crash col
-# multi-persona (vedi requirements.txt) -- resta elencato in UI solo come
-# opzione VISIBILMENTE disattivata con il motivo, mai come scelta che
-# arriverebbe fin qui.
+# SAMURAI (yangchris11/samurai) is NOT a valid backend here: its Kalman
+# filter assumes a single tracked object per session and crashes with
+# multiple people (see requirements.txt) -- it stays listed in the UI
+# only as a VISIBLY disabled option with the reason, never as a choice
+# that would reach this far.
 
 
 def probe_video_metadata(path: str) -> dict:
-    """Legge SOLO i metadati del file (frame count e fps dichiarati dal
-    container) via `cv2.VideoCapture`, SENZA processare/decodificare i frame
-    uno per uno -- non e' in contraddizione con "i tracker sono sequenziali,
-    niente salto arbitrario" (vedi gui/video_player.py): qui non c'e'
-    nessuna inferenza, solo la lettura di un header, cosi' com'e' gia' cosa
-    fanno i player video normali per mostrare la durata prima ancora di
-    aver iniziato a riprodurre. Usato per il timecode "corrente / totale" e
-    per le tacche della timeline sull'intera durata nota -- il prefisso
-    ELABORATO resta comunque l'unico punto in cui si puo' saltare
-    istantaneamente (vedi `VideoPlayer.seek`), la durata totale qui e' solo
-    informativa.
+    """Reads ONLY the file's metadata (frame count and fps declared by
+    the container) via `cv2.VideoCapture`, WITHOUT processing/decoding
+    frames one by one -- this doesn't contradict "trackers are
+    sequential, no arbitrary seeking" (see gui/video_player.py): there's
+    no inference here, just reading a header, exactly what normal video
+    players already do to show the duration before even starting
+    playback. Used for the "current / total" timecode and for the
+    timeline ticks over the entire known duration -- the PROCESSED
+    prefix remains the only point where you can jump instantly (see
+    `VideoPlayer.seek`), the total duration here is purely informational.
 
-    Isolata da `Api` per essere testabile senza pywebview (basta un file
-    video reale o, nei test, viene aggirata passando un percorso che non
-    apre -- vedi `demo/webui_api_check.py`). Ritorna valori `None` se il
-    file non si apre o il container non dichiara questi metadati (capita
-    con alcuni codec/contenitori): il chiamante deve trattarli come "durata
-    sconosciuta", non come zero.
+    Isolated from `Api` to be testable without pywebview (a real video
+    file is enough, or in tests it's bypassed by passing a path that
+    doesn't open -- see `demo/webui_api_check.py`). Returns `None`
+    values if the file doesn't open or the container doesn't declare
+    these metadata (happens with some codecs/containers): the caller
+    must treat them as "unknown duration", not as zero.
     """
     cap = cv2.VideoCapture(path)
     try:
@@ -101,41 +100,41 @@ def probe_video_metadata(path: str) -> dict:
 
 
 def build_player_kwargs(params: dict) -> dict:
-    """Funzione pura: converte il dict di parametri inviato da JS negli
-    argomenti attesi da `iter_pipeline_frames(...)`. Isolata da `Api` per
-    essere testabile senza una finestra vera -- vedi
-    `demo/webui_api_check.py`. Rispecchia ESATTAMENTE la logica di
-    `gui/app.py::App._build_player()` (stessi default, stesso gating
-    condizionale di mani/viso/reid/mediapipe-pose in base alla modalita'),
-    cosi' il comportamento della GUI web non diverge da quella Tkinter.
+    """Pure function: converts the parameter dict sent from JS into the
+    arguments expected by `iter_pipeline_frames(...)`. Isolated from
+    `Api` to be testable without a real window -- see
+    `demo/webui_api_check.py`. Mirrors EXACTLY the logic of
+    `gui/app.py::App._build_player()` (same defaults, same conditional
+    gating of hands/face/reid/mediapipe-pose based on mode), so the web
+    GUI's behavior doesn't diverge from the Tkinter one.
 
-    Richiede in `params`: "mode" ("segmentation"|"pose"|"both"), "source"
-    (percorso video), "fps" (fps sorgente, numero o stringa numerica).
-    Opzionali (default coerenti con app.py): "device" (se assente/None,
-    QUESTA funzione lo lascia None -- e' `Api.build_player()`, non questa
-    funzione pura, a risolverlo con `detect_default_device()`, cosi'
-    `build_player_kwargs` resta testabile senza richiedere torch
-    installato, vedi `demo/webui_api_check.py`), "scale" ("n"|"s"|"m",
-    default "s"), "max_people" (int, stringa, o None/""), "with_hands",
-    "with_eyes", "with_mouth", "with_eyebrows", "with_head_movement",
-    "with_mediapipe_pose" (bool), "reid" (bool, abilita re-id/seg-reid se
-    un max_people e' impostato), "seg_backend" ("yolo"|"sam31"|"sam2",
-    default "yolo" -- gli ultimi due solo in modalita' Segmentation/Both,
-    vedi segmentation/sam_backend.py: la GATING per device=cuda avviene
-    lato JS (vedi `Api.detect_device()`) E qui in `Api.build_player()`
-    come rete di sicurezza, non in questa funzione pura che non conosce
-    ancora il device risolto), "sam_chunk_size", "sam_overlap" (int,
-    solo con seg_backend != "yolo"), "sam_redetect_every" (int o None/"",
-    solo con seg_backend != "yolo" -- ri-detection periodica dentro il
-    chunk, vedi sam_backend.py), "sam_text_prompt" (stringa o None/"",
-    solo con seg_backend == "sam31" -- prompt testuale SAM 3, vedi
-    sam31_estimation.py).
+    Requires in `params`: "mode" ("segmentation"|"pose"|"both"), "source"
+    (video path), "fps" (source fps, number or numeric string).
+    Optional (defaults consistent with app.py): "device" (if
+    absent/None, THIS function leaves it None -- it's `Api.build_player()`,
+    not this pure function, that resolves it with
+    `detect_default_device()`, so `build_player_kwargs` stays testable
+    without requiring torch installed, see `demo/webui_api_check.py`),
+    "scale" ("n"|"s"|"m", default "s"), "max_people" (int, string, or
+    None/""), "with_hands", "with_eyes", "with_mouth", "with_eyebrows",
+    "with_head_movement", "with_mediapipe_pose" (bool), "reid" (bool,
+    enables re-id/seg-reid if a max_people is set), "seg_backend"
+    ("yolo"|"sam31"|"sam2", default "yolo" -- the latter two only in
+    Segmentation/Both mode, see segmentation/sam_backend.py: GATING for
+    device=cuda happens on the JS side (see `Api.detect_device()`) AND
+    here in `Api.build_player()` as a safety net, not in this pure
+    function which doesn't yet know the resolved device), "sam_chunk_size",
+    "sam_overlap" (int, only with seg_backend != "yolo"),
+    "sam_redetect_every" (int or None/"", only with seg_backend != "yolo"
+    -- periodic re-detection within the chunk, see sam_backend.py),
+    "sam_text_prompt" (string or None/"", only with seg_backend == "sam31"
+    -- SAM 3 text prompt, see sam31_estimation.py).
     """
     mode = params.get("mode")
     if mode not in MODE_KEYS:
-        raise ValueError(f"mode sconosciuto: {mode!r} (atteso 'pose'|'segmentation'|'both')")
+        raise ValueError(f"unknown mode: {mode!r} (expected 'pose'|'segmentation'|'both')")
     if not params.get("source"):
-        raise ValueError("source mancante (nessun video caricato)")
+        raise ValueError("missing source (no video loaded)")
     fps = float(params["fps"])
 
     max_people_raw = params.get("max_people")
@@ -146,29 +145,29 @@ def build_player_kwargs(params: dict) -> dict:
 
     scale = str(params.get("scale", "s"))[0]
 
-    # -- Pose: modello INDIPENDENTE dalla segmentazione (vedi
-    # pipeline_runner.py) -- "yolo" (default, full-frame + ByteTrack) o
-    # "mediapipe" (guidato da box/maschera, vedi li' per il wiring esatto
-    # per ciascuna combinazione di Task/backend).
+    # -- Pose: model INDEPENDENT of segmentation (see pipeline_runner.py)
+    # -- "yolo" (default, full-frame + ByteTrack) or "mediapipe" (driven
+    # by box/mask, see there for the exact wiring of each Task/backend
+    # combination).
     pose_backend = str(params.get("pose_backend") or "yolo")
     if pose_backend not in POSE_BACKEND_KEYS:
-        raise ValueError(f"pose_backend sconosciuto: {pose_backend!r} (atteso 'yolo'|'mediapipe')")
+        raise ValueError(f"unknown pose_backend: {pose_backend!r} (expected 'yolo'|'mediapipe')")
 
-    # -- Identity & Re-identification (vedi identity_manager.py) --
+    # -- Identity & Re-identification (see identity_manager.py) --
     identity_mode_raw = str(params.get("identity_mode") or "tracking_reid")
     if identity_mode_raw not in IDENTITY_MODE_KEYS:
-        raise ValueError(f"identity_mode sconosciuto: {identity_mode_raw!r}")
+        raise ValueError(f"unknown identity_mode: {identity_mode_raw!r}")
     identity_mode = IdentityMode(identity_mode_raw)
 
     session_mode_raw = str(params.get("session_mode") or "multiple")
     if session_mode_raw not in SESSION_MODE_KEYS:
-        raise ValueError(f"session_mode sconosciuto: {session_mode_raw!r}")
+        raise ValueError(f"unknown session_mode: {session_mode_raw!r}")
     session_mode = SessionMode(session_mode_raw)
 
     flag_uncertain = bool(params.get("flag_uncertain", True))
-    # Si applica solo al percorso basato su keypoint (ReIdentifier): vedi
-    # pipeline_runner.iter_pipeline_frames per il perche' viene ignorato in
-    # modalita' Segmentation-only (SegReIdentifier non ha scadenza per design).
+    # Applies only to the keypoint-based path (ReIdentifier): see
+    # pipeline_runner.iter_pipeline_frames for why it's ignored in
+    # Segmentation-only mode (SegReIdentifier has no expiry by design).
     reid_max_lost_seconds = float(params.get("lost_identity_memory_s") or 180.0)
 
     pose_capable = mode in ("pose", "both")
@@ -177,68 +176,67 @@ def build_player_kwargs(params: dict) -> dict:
     with_mouth = pose_capable and pose_backend == "yolo" and bool(params.get("with_mouth"))
     with_eyebrows = pose_capable and pose_backend == "yolo" and bool(params.get("with_eyebrows"))
     with_head_movement = pose_capable and pose_backend == "yolo" and bool(params.get("with_head_movement"))
-    # Mani/viso (MediaPipe FaceLandmarker/HandLandmarker aggiuntivi rispetto
-    # allo scheletro) restano cablati SOLO sul percorso pose_backend="yolo"
-    # (vedi live_demo.py): con pose_backend="mediapipe" lo scheletro viene
-    # gia' da MediaPipe Tasks PoseLandmarker, ma mani/viso a livello di
-    # dita/blink non sono ancora collegati su quel percorso (vedi
-    # pipeline_runner._iter_pose_mediapipe per il limite onesto).
+    # Hands/face (additional MediaPipe FaceLandmarker/HandLandmarker on
+    # top of the skeleton) remain wired ONLY on the pose_backend="yolo"
+    # path (see live_demo.py): with pose_backend="mediapipe" the
+    # skeleton already comes from MediaPipe Tasks PoseLandmarker, but
+    # finger/blink-level hands/face aren't yet wired on that path (see
+    # pipeline_runner._iter_pose_mediapipe for the honest limitation).
 
-    # -- Identity & Re-identification: "tracking_reid" e' l'unica modalita'
-    # che istanzia ReIdentifier/SegReIdentifier (vedi
+    # -- Identity & Re-identification: "tracking_reid" is the only mode
+    # that instantiates ReIdentifier/SegReIdentifier (see
     # identity_manager.wants_reid_engine); "frame_by_frame"/"tracking_only"
-    # usano l'id nativo del tracker sottostante senza recupero dopo una
-    # perdita -- vedi il loro docstring in identity_manager.py per il limite
-    # onesto su "frame_by_frame" (oggi si comporta come "tracking_only": una
-    # vera modalita' senza ALCUNA continuita', nemmeno quella nativa del
-    # tracker, richiederebbe sostituire ByteTrack/SAM, fuori scope qui).
-    # ATTENZIONE, asimmetria reale tra i due motori (causa di un bug gia'
-    # visto: "Re-ID active" mostrato in UI ma nessuna riassociazione
-    # avvenuta davvero, vedi la sessione di debug con gli screenshot di ID
-    # instabili sulle maschere):
-    #   - ReIdentifier (pose, keypoint) funziona SENZA max_people: fa
-    #     comunque matching per firma/colore/posizione, semplicemente non ha
-    #     l'ultima risorsa "forza il match perche' il tetto e' raggiunto".
-    #     Non ha senso spegnerlo del tutto solo perche' l'utente non ha
-    #     compilato un campo che non gli serve.
-    #   - SegReIdentifier (segmentazione, maschera) invece RICHIEDE
-    #     max_people nel costruttore (solleva ValueError altrimenti, vedi
-    #     seg_reid.py): senza un tetto non puo' garantire "mai piu' di N
-    #     identita'", quindi qui il campo resta obbligatorio (session_mode
-    #     "single" lo forza comunque a 1, vedi
+    # use the underlying tracker's native id with no recovery after a
+    # loss -- see their docstring in identity_manager.py for the honest
+    # limitation on "frame_by_frame" (today it behaves like
+    # "tracking_only": a true mode with NO continuity at all, not even
+    # the tracker's native one, would require replacing
+    # ByteTrack/SAM, out of scope here). NOTE, a real asymmetry between
+    # the two engines (cause of a bug already seen: "Re-ID active" shown
+    # in the UI but no re-association actually happening, see the
+    # debugging session with the unstable-id screenshots on masks):
+    #   - ReIdentifier (pose, keypoint) works WITHOUT max_people: it
+    #     still does signature/color/position matching, it just doesn't
+    #     have the last resort "force the match because the cap is
+    #     reached". Doesn't make sense to disable it entirely just
+    #     because the user hasn't filled in a field they don't need.
+    #   - SegReIdentifier (segmentation, mask) instead REQUIRES
+    #     max_people in the constructor (raises ValueError otherwise,
+    #     see seg_reid.py): without a cap it can't guarantee "never more
+    #     than N identities", so here the field remains mandatory
+    #     (session_mode "single" forces it to 1 anyway, see
     #     identity_manager.suggested_max_people_policy).
-    # Trattarle allo stesso modo (come prima di questo commento) spegneva
-    # SILENZIOSAMENTE anche il pose-reid quando bastava la sola
-    # segmentazione a richiedere il tetto -- ora sono due condizioni
-    # separate.
+    # Treating them the same way (as before this comment) SILENTLY
+    # disabled pose-reid too whenever only segmentation required the
+    # cap -- now they're two separate conditions.
     reid_mode_selected = wants_reid_engine(identity_mode)
     seg_reid_ready = reid_mode_selected and (max_people is not None or session_mode == SessionMode.SINGLE)
 
-    # `with_reid` serve sia a `_iter_pose` (pose_backend="yolo") sia a
-    # `_iter_pose_mediapipe` (pose_backend="mediapipe") -- vedi
-    # pipeline_runner.iter_pipeline_frames, che inoltra lo STESSO valore a
-    # entrambi i rami "pose"; per mode="both" con pose_backend="mediapipe"
-    # questo valore e' semplicemente ignorato (quel ramo usa solo
-    # `with_seg_reid`, vedi li').
+    # `with_reid` is used both by `_iter_pose` (pose_backend="yolo") and
+    # `_iter_pose_mediapipe` (pose_backend="mediapipe") -- see
+    # pipeline_runner.iter_pipeline_frames, which forwards the SAME
+    # value to both "pose" branches; for mode="both" with
+    # pose_backend="mediapipe" this value is simply ignored (that branch
+    # only uses `with_seg_reid`, see there).
     with_reid = reid_mode_selected and mode in ("pose", "both")
     with_seg_reid = seg_reid_ready and mode in ("segmentation", "both")
-    # NB: se `mode` include la segmentazione e `seg_reid_ready` e' False
-    # (max_people mancante, session_mode "multiple"), la sidebar deve
-    # segnalarlo PRIMA di arrivare qui -- vedi app.js::applyIdentityGating,
-    # che rispecchia questa stessa condizione lato client per la pillola di
-    # stato, cosi' non serve un giro di andata/ritorno col backend solo per
-    # sapere se un campo e' compilato.
+    # NB: if `mode` includes segmentation and `seg_reid_ready` is False
+    # (missing max_people, session_mode "multiple"), the sidebar must
+    # flag it BEFORE reaching here -- see app.js::applyIdentityGating,
+    # which mirrors this same condition client-side for the status
+    # pill, so no round trip to the backend is needed just to know if a
+    # field is filled in.
 
-    # Pose dentro la maschera/box, MediaPipe: attiva quando pose_backend e'
-    # "mediapipe" E la modalita' lo prevede (vedi pipeline_runner.py per il
-    # wiring esatto di ciascuna combinazione).
+    # Pose inside the mask/box, MediaPipe: active when pose_backend is
+    # "mediapipe" AND the mode calls for it (see pipeline_runner.py for
+    # the exact wiring of each combination).
     with_mediapipe_pose = mode == "segmentation" and pose_backend == "mediapipe"
 
-    # Backend di segmentazione (YOLO/SAM 3.1/SAM2): rilevante solo in
-    # Segmentation/Both, "yolo" altrove (ignorato da iter_pipeline_frames se
-    # mode="pose"). Il controllo "serve device=cuda" NON avviene qui (vedi
-    # docstring sopra): questa funzione resta pura, il controllo vive in
-    # Api.build_player().
+    # Segmentation backend (YOLO/SAM 3.1/SAM2): relevant only in
+    # Segmentation/Both, "yolo" elsewhere (ignored by
+    # iter_pipeline_frames if mode="pose"). The "requires device=cuda"
+    # check does NOT happen here (see docstring above): this function
+    # stays pure, the check lives in Api.build_player().
     seg_backend = str(params.get("seg_backend") or "yolo")
     sam_chunk_size = int(params.get("sam_chunk_size") or 600)
     sam_overlap = int(params.get("sam_overlap") or 50)
@@ -247,26 +245,26 @@ def build_player_kwargs(params: dict) -> dict:
     sam_redetect_every = int(sam_redetect_every_raw) if sam_redetect_every_raw else None
     sam_text_prompt = params.get("sam_text_prompt") or None
 
-    # -- Advanced settings (nuovi, sezione collassata in UI): prima erano
-    # sempre lasciati al default di `iter_pipeline_frames` perche' non
-    # esposti da nessun controllo -- ora un valore esplicito dell'utente
-    # sovrascrive quel default, invariato se il campo resta vuoto.
+    # -- Advanced settings (new, collapsed section in the UI): previously
+    # always left at `iter_pipeline_frames`'s default because not
+    # exposed by any control -- now an explicit user value overrides
+    # that default, unchanged if the field stays empty.
     conf_threshold = float(params.get("conf_threshold") or 0.1)
     tracker_config = str(params.get("tracker_config") or "bytetrack.yaml")
 
-    # Embedding di aspetto OSNet (nuovo, opzionale -- vedi
-    # pose/appearance_embedding.py e pipeline_runner.iter_pipeline_frames).
-    # Rilevante solo se un motore di re-id e' effettivamente attivo: se ne'
-    # `with_reid` ne' `with_seg_reid` finiscono True, il flag non cambia
-    # nulla (nessun embedder viene mai costruito, vedi
-    # pipeline_runner._build_embedder), ma lo passiamo comunque cosi'
-    # com'e' -- non e' compito di questa funzione pura ricalcolare quella
-    # condizione due volte.
+    # OSNet appearance embedding (new, optional -- see
+    # pose/appearance_embedding.py and pipeline_runner.iter_pipeline_frames).
+    # Relevant only if a re-id engine is actually active: if neither
+    # `with_reid` nor `with_seg_reid` ends up True, the flag changes
+    # nothing (no embedder is ever built, see
+    # pipeline_runner._build_embedder), but we pass it through as-is
+    # anyway -- it's not this pure function's job to recompute that
+    # condition twice.
     use_appearance_embedding = bool(params.get("use_appearance_embedding"))
 
     return dict(
         mode=mode, source=params["source"], fps=fps,
-        device=params.get("device") or None,  # None = "auto-rileva a valle", vedi sopra
+        device=params.get("device") or None,  # None = "auto-detect downstream", see above
         pose_backend=pose_backend, pose_model=f"yolo26{scale}-pose.pt",
         with_hands=with_hands,
         with_eyes=with_eyes, with_mouth=with_mouth,
@@ -286,12 +284,13 @@ def build_player_kwargs(params: dict) -> dict:
 
 
 def encode_frame_jpeg_b64(frame_bgr, max_width: int = 1600, quality: int = 80) -> str:
-    """ndarray BGR -> data-URL base64 JPEG pronto per un `<img src="...">`.
-    Isolata per essere testabile senza pywebview/camera (vedi
-    `demo/webui_api_check.py`, che le passa un array sintetico). Ridimensiona
-    solo verso il basso (mai verso l'alto) fino a `max_width`, stesso non-
-    obiettivo di `MAX_DISPLAY_WIDTH` in gui/app.py: influenza solo cosa viene
-    mostrato/trasferito, mai la risoluzione sorgente usata per l'inferenza.
+    """BGR ndarray -> base64 JPEG data-URL ready for an `<img src="...">`.
+    Isolated to be testable without pywebview/a camera (see
+    `demo/webui_api_check.py`, which passes it a synthetic array).
+    Resizes only downward (never upward) up to `max_width`, the same
+    non-goal as `MAX_DISPLAY_WIDTH` in gui/app.py: it only affects
+    what's shown/transferred, never the source resolution used for
+    inference.
     """
     h, w = frame_bgr.shape[:2]
     if w > max_width:
@@ -299,16 +298,16 @@ def encode_frame_jpeg_b64(frame_bgr, max_width: int = 1600, quality: int = 80) -
         frame_bgr = cv2.resize(frame_bgr, (max_width, int(h * ratio)))
     ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
-        raise RuntimeError("Codifica JPEG fallita")
+        raise RuntimeError("JPEG encoding failed")
     b64 = base64.b64encode(buf).decode("ascii")
     return f"data:image/jpeg;base64,{b64}"
 
 
 class _LatencyTracker:
-    """Media mobile del tempo di elaborazione per frame, per le metriche
-    'FPS elaborazione' / 'Latenza media' della status bar -- numeri reali
-    calcolati dal tempo di orologio attorno a ogni `step_forward()`, non
-    decorativi. Isolata da `Api` per essere testabile."""
+    """Moving average of per-frame processing time, for the status
+    bar's 'Processing FPS' / 'Average latency' metrics -- real numbers
+    computed from wall-clock time around every `step_forward()`, not
+    decorative. Isolated from `Api` to be testable."""
 
     def __init__(self, window: int = 30):
         self._durations: deque[float] = deque(maxlen=window)
@@ -333,16 +332,17 @@ def build_status(*, runner_frame: RunnerFrame, cached_frame_count: int,
                   is_finished: bool, max_people: int | None = None,
                   total_frame_count: int | None = None,
                   total_duration_s: float | None = None) -> dict:
-    """Dict di stato spedito a JS insieme a ogni frame -- ogni campo e' dato
-    reale (vedi la nota 'Onesta' delle metriche' nel docstring del modulo):
-    indice frame, fps/latenza di elaborazione da `_LatencyTracker`, numero
-    di tracce attive da `RunnerFrame.people_count` (non `len(rows)`, vedi
-    pipeline_runner.py), timecode da `RunnerFrame.now`, ed etichetta del
-    device configurato invece di una finta telemetria GPU. `total_frame_count`
-    / `total_duration_s` vengono da `probe_video_metadata` (metadati letti
-    UNA VOLTA dal file, non ricalcolati qui) e possono essere None se il
-    container non li dichiara -- il frontend deve trattarli come "totale
-    sconosciuto", non zero."""
+    """Status dict sent to JS alongside every frame -- every field is
+    real data (see the 'Honesty of the metrics' note in the module
+    docstring): frame index, processing fps/latency from
+    `_LatencyTracker`, number of active tracks from
+    `RunnerFrame.people_count` (not `len(rows)`, see pipeline_runner.py),
+    timecode from `RunnerFrame.now`, and the configured device label
+    instead of fake GPU telemetry. `total_frame_count` / `total_duration_s`
+    come from `probe_video_metadata` (metadata read ONCE from the file,
+    not recomputed here) and can be None if the container doesn't
+    declare them -- the frontend must treat them as "unknown total", not
+    zero."""
     return {
         "frame_index": cached_frame_count - 1,
         "total_frame_count": total_frame_count,
@@ -360,65 +360,65 @@ def build_status(*, runner_frame: RunnerFrame, cached_frame_count: int,
 
 
 class Api:
-    """Bridge esposto a JS come `window.pywebview.api.<metodo>(...)`
-    (chiamato come promise). Riusa `VideoPlayer`/`iter_pipeline_frames`
-    invariati -- vedi il docstring del modulo."""
+    """Bridge exposed to JS as `window.pywebview.api.<method>(...)`
+    (called as a promise). Reuses `VideoPlayer`/`iter_pipeline_frames`
+    unchanged -- see the module docstring."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()  # protegge player/_playing tra il
-        # thread di riproduzione in background e le chiamate innescate da JS
-        # (pywebview puo' eseguirle su thread diversi dal main)
-        self.window = None  # impostato da set_window() dopo webview.create_window()
+        self._lock = threading.Lock()  # protects player/_playing between
+        # the background playback thread and JS-triggered calls
+        # (pywebview may run them on threads other than the main one)
+        self.window = None  # set by set_window() after webview.create_window()
         self.video_path: str | None = None
         self.player: VideoPlayer | None = None
-        self._device: str | None = None  # risolto in build_player() -- vedi li'
+        self._device: str | None = None  # resolved in build_player() -- see there
         self._mode = "segmentation"
         self._max_people: int | None = None
         self._playback_fps = 15.0
         self._latency = _LatencyTracker()
         self._playing = False
         self._play_thread: threading.Thread | None = None
-        # metadati letti UNA VOLTA da pick_video_file() (vedi
-        # probe_video_metadata): solo informativi, mai usati per decidere
-        # cosa si puo' o non si puo' saltare (quello resta governato dalla
-        # cache reale in VideoPlayer).
+        # metadata read ONCE by pick_video_file() (see
+        # probe_video_metadata): informational only, never used to
+        # decide what can or can't be skipped to (that remains governed
+        # by the real cache in VideoPlayer).
         self._total_frame_count: int | None = None
         self._total_duration_s: float | None = None
 
     def detect_device(self) -> dict:
-        """Espone `detect_default_device()` a JS, chiamato una volta al
-        caricamento della pagina (vedi app.js): usato SOLO per abilitare o
-        disabilitare le opzioni SAM 3.1/SAM2 nel selettore backend
-        (richiedono device='cuda', vedi segmentation/sam_backend.py) --
-        `Api.build_player()` fa comunque il controllo definitivo lato
-        server, questo e' solo per non far apparire nella UI un'opzione
-        che fallirebbe subito.
+        """Exposes `detect_default_device()` to JS, called once on page
+        load (see app.js): used ONLY to enable or disable the SAM
+        3.1/SAM2 options in the backend selector (they require
+        device='cuda', see segmentation/sam_backend.py) --
+        `Api.build_player()` still does the definitive check server-side,
+        this is only to avoid showing an option in the UI that would
+        immediately fail.
 
-        `torchreid_available` (nuovo): stesso schema, ma per il toggle
-        "Appearance embedding (OSNet)" in Advanced settings (vedi
-        pose/appearance_embedding.py) -- 'torch'+'torchreid' sono una
-        dipendenza pesante opzionale, NON garantita installata. Un check
-        leggero (solo un tentativo di import, nessun modello caricato), non
-        il controllo definitivo: se l'utente forza comunque il toggle
-        (impossibile da UI, ma la funzione pura `build_player_kwargs` non lo
-        impedisce), `pipeline_runner._build_embedder` solleva comunque un
-        `ImportError` chiaro dentro il thread di riproduzione."""
+        `torchreid_available` (new): same scheme, but for the
+        "Appearance embedding (OSNet)" toggle in Advanced settings (see
+        pose/appearance_embedding.py) -- 'torch'+'torchreid' are an
+        optional heavy dependency, NOT guaranteed installed. A
+        lightweight check (just an import attempt, no model loaded),
+        not the definitive check: if the user forces the toggle anyway
+        (impossible from the UI, but the pure function
+        `build_player_kwargs` doesn't prevent it), `pipeline_runner._build_embedder`
+        still raises a clear `ImportError` inside the playback thread."""
         return {"device": detect_default_device(), "torchreid_available": torchreid_available()}
 
     def set_window(self, window) -> None:
-        """Chiamato dal launcher (webui_app.py) subito dopo
-        `webview.create_window(..., js_api=api)`: serve un riferimento alla
-        finestra per i dialoghi file e per `evaluate_js`."""
+        """Called by the launcher (webui_app.py) right after
+        `webview.create_window(..., js_api=api)`: needs a window
+        reference for file dialogs and for `evaluate_js`."""
         self.window = window
 
-    # ------------------------------------------------------------ dialoghi
+    # ------------------------------------------------------------ dialogs
     def pick_video_file(self) -> dict | None:
-        """Apre il dialogo nativo e, se un file viene scelto, ne legge anche
-        SUBITO i metadati (durata/numero di frame totali dichiarati dal
-        container, vedi `probe_video_metadata`) -- cosi' JS puo' mostrare
-        "corrente / totale" nel timecode e disegnare le tacche della
-        timeline sull'intera durata fin da subito, senza aspettare che
-        l'elaborazione arrivi in fondo al video."""
+        """Opens the native dialog and, if a file is chosen, IMMEDIATELY
+        reads its metadata too (duration/total frame count declared by
+        the container, see `probe_video_metadata`) -- so JS can show
+        "current / total" in the timecode and draw the timeline ticks
+        over the entire duration right away, without waiting for
+        processing to reach the end of the video."""
         import webview
         if self.window is None:
             return None
@@ -444,17 +444,17 @@ class Api:
         )
         if not result:
             return None
-        # a seconda della piattaforma/versione pywebview SAVE_DIALOG puo'
-        # restituire una stringa o una tupla di un elemento
+        # depending on the platform/pywebview version SAVE_DIALOG can
+        # return a string or a one-element tuple
         return result if isinstance(result, str) else result[0]
 
-    # -------------------------------------------------------- ciclo di vita
+    # -------------------------------------------------------- lifecycle
     def build_player(self, params: dict) -> dict:
-        """Costruisce (o ricostruisce) il `VideoPlayer` da un dict di
-        parametri mandato da JS -- vedi `build_player_kwargs`. Da chiamare
-        ogni volta che l'utente cambia modello/feature/max-people, esattamente
-        come "Restart" in app.py: un tracker gia' avviato non si puo'
-        riconfigurare a meta' strada."""
+        """Builds (or rebuilds) the `VideoPlayer` from a parameter dict
+        sent by JS -- see `build_player_kwargs`. Meant to be called
+        every time the user changes model/feature/max-people, exactly
+        like "Restart" in app.py: an already-started tracker can't be
+        reconfigured midway."""
         if self.video_path is None:
             return {"ok": False, "error": "No video loaded."}
         params = dict(params or {})
@@ -464,22 +464,23 @@ class Api:
         except (KeyError, ValueError, TypeError) as exc:
             return {"ok": False, "error": str(exc)}
         if kwargs["device"] is None:
-            # build_player_kwargs() lascia "device" a None quando JS non ne
-            # specifica uno esplicito -- lo risolviamo QUI (non li', vedi il
-            # suo docstring) cosi' quella resta una funzione pura testabile
-            # senza torch installato. cuda se c'e' una GPU NVIDIA, altrimenti
-            # mps su Apple Silicon, altrimenti cpu -- prima era fisso a
-            # "mps", il che rompeva silenziosamente su una macchina CUDA.
+            # build_player_kwargs() leaves "device" as None when JS
+            # doesn't specify one explicitly -- we resolve it HERE (not
+            # there, see its docstring) so that function stays a pure,
+            # testable function without torch installed. cuda if there's
+            # an NVIDIA GPU, otherwise mps on Apple Silicon, otherwise
+            # cpu -- it used to be fixed to "mps", which silently broke
+            # on a CUDA machine.
             kwargs["device"] = detect_default_device()
         if kwargs["seg_backend"] != "yolo" and kwargs["device"] != "cuda":
-            # rete di sicurezza server-side: il frontend gia' disabilita la
-            # scelta SAM 3.1/SAM2 quando detect_device() non e' "cuda"
-            # (vedi app.js), ma qui rifiutiamo comunque esplicitamente
-            # invece di lasciare che Sam31Tracker/Sam2Tracker sollevino
-            # un ValueError meno chiaro dentro il thread di riproduzione.
+            # server-side safety net: the frontend already disables the
+            # SAM 3.1/SAM2 choice when detect_device() isn't "cuda" (see
+            # app.js), but here we still explicitly reject instead of
+            # letting Sam31Tracker/Sam2Tracker raise a less clear
+            # ValueError inside the playback thread.
             return {"ok": False, "error": (
-                f"Il backend '{kwargs['seg_backend']}' richiede una GPU CUDA "
-                f"(device rilevato: '{kwargs['device']}')."
+                f"Backend '{kwargs['seg_backend']}' requires a CUDA GPU "
+                f"(detected device: '{kwargs['device']}')."
             )}
         with self._lock:
             self._playing = False
@@ -520,14 +521,13 @@ class Api:
         return self._advance(back=True)
 
     def seek(self, index: int) -> dict:
-        """Salto istantaneo dentro il prefisso gia' elaborato (vedi
-        `VideoPlayer.seek`) -- usato dallo scrubber della timeline. Fuori
-        dalla cache non fa nulla (nessuna elaborazione di recupero
-        automatica da qui: il frontend, se l'utente clicca oltre il
-        prefisso cache, deve invece richiamare step_forward()/play()
-        ripetutamente, cosi' l'utente vede il recupero avanzare invece di
-        restare bloccato in attesa di un salto che non puo' essere
-        istantaneo)."""
+        """Instant jump within the already-processed prefix (see
+        `VideoPlayer.seek`) -- used by the timeline scrubber. Does
+        nothing outside the cache (no automatic catch-up processing
+        from here: the frontend, if the user clicks past the cache
+        prefix, must instead repeatedly call step_forward()/play(), so
+        the user sees the catch-up progress instead of being stuck
+        waiting for a jump that can't be instant)."""
         if self.player is None:
             return {"ok": False, "error": "No player built yet."}
         with self._lock:
@@ -544,7 +544,7 @@ class Api:
         df.to_csv(path, index=False)
         return {"ok": True, "rows": len(df)}
 
-    # ------------------------------------------------------------ interni
+    # ------------------------------------------------------------ internal
     def _advance(self, *, back: bool) -> dict:
         if self.player is None:
             return {"ok": False, "error": "No player built yet."}
@@ -552,12 +552,13 @@ class Api:
         try:
             frame = self.player.step_back() if back else self.player.step_forward()
         except Exception as exc:
-            # Un'eccezione qui e' quasi sempre un bug reale nel backend di
-            # segmentazione/pose (es. un modello mancante, un formato dati
-            # inatteso) -- la trasformiamo in un {"ok": False, "error": ...}
-            # come le altre chiamate di questo modulo, invece di lasciarla
-            # propagare come rifiuto di promise JS non gestito. Il
-            # traceback completo resta comunque sul terminale per il debug.
+            # An exception here is almost always a real bug in the
+            # segmentation/pose backend (e.g. a missing model, an
+            # unexpected data format) -- we turn it into a
+            # {"ok": False, "error": ...} like this module's other
+            # calls, instead of letting it propagate as an unhandled JS
+            # promise rejection. The full traceback still goes to the
+            # terminal for debugging.
             traceback.print_exc()
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         if not back:
@@ -578,12 +579,13 @@ class Api:
         return {"ok": True, "frame": encode_frame_jpeg_b64(frame.frame), "status": status}
 
     def _play_loop(self) -> None:
-        """Gira su un thread in background (NON quello delle chiamate JS):
-        replica la cadenza di `app.py::App._tick()` (prossimo step
-        `delay_ms` dopo la fine dell'elaborazione precedente, non un timer a
-        frequenza fissa -- stessa non-garanzia, vedi li'), ma spinge ogni
-        frame al DOM da solo via `evaluate_js`, invece di restituirlo a chi
-        chiama, perche' qui non c'e' nessuno che stia facendo polling."""
+        """Runs on a background thread (NOT the one handling JS calls):
+        replicates the cadence of `app.py::App._tick()` (next step
+        `delay_ms` after the end of the previous processing, not a
+        fixed-frequency timer -- same non-guarantee, see there), but
+        pushes each frame to the DOM on its own via `evaluate_js`,
+        instead of returning it to a caller, because there's no one
+        polling here."""
         while True:
             with self._lock:
                 if not self._playing or self.player is None:
@@ -593,16 +595,16 @@ class Api:
             try:
                 frame = self.player.step_forward()
             except Exception as exc:
-                # PRIMA questa eccezione uccideva il thread daemon in
-                # silenzio: nessun errore in GUI, solo un traceback nel
-                # terminale (facile da non notare mentre si guarda la
-                # finestra, vedi la sessione di debug con SAMURAI che ha
-                # scoperto questo, poi rimosso -- vedi sam2_estimation.py).
-                # Ora si ferma la riproduzione e si manda
-                # l'errore a JS -- onPipelineFrame() in app.js gia' sa
-                # mostrare un {"ok": false, "error": ...} nella status pill,
-                # non serve cambiare nulla lato frontend. Il traceback
-                # completo resta comunque stampato sul terminale.
+                # BEFORE, this exception silently killed the daemon
+                # thread: no error in the GUI, just a traceback in the
+                # terminal (easy to miss while watching the window, see
+                # the SAMURAI debugging session that uncovered this,
+                # later removed -- see sam2_estimation.py). Now playback
+                # stops and the error is sent to JS -- app.js's
+                # onPipelineFrame() already knows how to show a
+                # {"ok": false, "error": ...} in the status pill, no
+                # frontend change needed. The full traceback is still
+                # printed to the terminal.
                 traceback.print_exc()
                 with self._lock:
                     self._playing = False
@@ -637,16 +639,16 @@ class Api:
                                  "status": {"is_finished": True, "mode": self._mode}})
 
     def _evaluate_js_safe(self, payload: dict) -> None:
-        # `window.onPipelineFrame` e' definito in webui/app.js: riceve lo
-        # stesso payload {"ok", "frame", "status"} restituito dalle chiamate
-        # dirette (step_forward/step_back), cosi' il rendering lato JS ha un
-        # solo punto d'ingresso indipendentemente dalla fonte del frame.
+        # `window.onPipelineFrame` is defined in webui/app.js: it
+        # receives the same {"ok", "frame", "status"} payload returned
+        # by direct calls (step_forward/step_back), so JS-side rendering
+        # has a single entry point regardless of the frame's source.
         js = f"window.onPipelineFrame && window.onPipelineFrame({json.dumps(payload)})"
         try:
             self.window.evaluate_js(js)
         except Exception:
-            # la finestra puo' essere stata chiusa mentre il thread di
-            # riproduzione era ancora attivo: non fatale, il prossimo giro
-            # del loop esce perche' _playing e' gia' False (chiuso -> pausa
-            # innescata da JS) o perche' il player e' esaurito.
+            # the window may have been closed while the playback thread
+            # was still active: not fatal, the next loop iteration exits
+            # because _playing is already False (closed -> pause
+            # triggered by JS) or because the player is exhausted.
             pass

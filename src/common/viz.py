@@ -1,11 +1,11 @@
 """
 viz.py
 ======
-Utility di disegno condivise tra la pipeline live (`live_demo.py`, che legge
-da Canon R8 / webcam / file video) e gli script di verifica eseguibili in
-ambienti senza fotocamera (vedi `demo/live_render_check.py`), così la stessa
-logica di rendering è testata anche dove non è disponibile una sorgente
-video reale.
+Drawing utilities shared between the live pipeline (`live_demo.py`, which
+reads from Canon R8 / webcam / video file) and the verification scripts
+runnable in environments without a camera (see
+`demo/live_render_check.py`), so the same rendering logic is tested even
+where a real video source isn't available.
 """
 
 from __future__ import annotations
@@ -15,37 +15,36 @@ import numpy as np
 
 from pose.keypoints import KP, SKELETON_EDGES
 
-# Palette di colori distinti (BGR, come OpenCV) assegnati ciclicamente per
-# track_id, cosi' ogni persona nell'inquadratura ha un colore diverso e
-# riconoscibile a colpo d'occhio (scheletro, bordo riquadro metriche,
-# etichetta ID) invece del verde fisso usato per tutti prima di questa
-# funzione.
+# Palette of distinct colors (BGR, as OpenCV expects) assigned cyclically
+# per track_id, so each person in the frame has a different, recognizable
+# color at a glance (skeleton, metrics-box border, ID label) instead of
+# the fixed green used for everyone before this function.
 TRACK_COLOR_PALETTE: list[tuple[int, int, int]] = [
-    (0, 220, 0),      # verde
-    (0, 140, 255),    # arancione
+    (0, 220, 0),      # green
+    (0, 140, 255),    # orange
     (255, 0, 255),    # magenta
-    (255, 220, 0),    # ciano
-    (0, 255, 255),    # giallo
-    (255, 0, 0),      # blu
-    (180, 105, 255),  # rosa
-    (0, 128, 128),    # oliva/teal
+    (255, 220, 0),    # cyan
+    (0, 255, 255),    # yellow
+    (255, 0, 0),      # blue
+    (180, 105, 255),  # pink
+    (0, 128, 128),    # olive/teal
 ]
 
 
 def get_track_color(track_id: int) -> tuple[int, int, int]:
-    """Colore stabile e distinto per un dato track_id, ciclico sulla
-    palette. Usato per differenziare visivamente più persone tracciate
-    nella stessa inquadratura (scheletro, riquadro metriche, etichetta)."""
+    """Stable, distinct color for a given track_id, cycling through the
+    palette. Used to visually differentiate multiple tracked people in
+    the same frame (skeleton, metrics box, label)."""
     return TRACK_COLOR_PALETTE[track_id % len(TRACK_COLOR_PALETTE)]
 
 
 def draw_person_label(frame: np.ndarray, position: np.ndarray, track_id: int,
                        color: tuple[int, int, int], is_target: bool = False) -> np.ndarray:
-    """Disegna un'etichetta "ID N" grande e leggibile sopra la testa della
-    persona, con sfondo colorato (stesso colore del suo scheletro) — più
-    prominente del solo testo piccolo nel riquadro metriche. Se `is_target`
-    è True (persona selezionata con --target-track-id), aggiunge un
-    indicatore visivo extra.
+    """Draws a large, readable "ID N" label above the person's head, with
+    a colored background (same color as their skeleton) — more prominent
+    than just small text in the metrics box. If `is_target` is True
+    (person selected with --target-track-id), adds an extra visual
+    indicator.
     """
     text = f"ID {track_id}" + (" ★ TARGET" if is_target else "")
     x, y = int(position[0]), max(int(position[1]) - 20, 20)
@@ -58,7 +57,7 @@ def draw_person_label(frame: np.ndarray, position: np.ndarray, track_id: int,
 
 def draw_skeleton(frame: np.ndarray, kpts: np.ndarray, conf: np.ndarray | None = None,
                    color: tuple[int, int, int] = (0, 220, 0), conf_threshold: float = 0.3) -> np.ndarray:
-    """Disegna keypoint e connessioni scheletriche su un frame (in place)."""
+    """Draws keypoints and skeleton connections on a frame (in place)."""
     def ok(idx: int) -> bool:
         if conf is None:
             return True
@@ -82,10 +81,10 @@ def draw_skeleton(frame: np.ndarray, kpts: np.ndarray, conf: np.ndarray | None =
 
 
 def text_block_size(lines: list[str], font_scale: float = 0.5) -> tuple[int, int]:
-    """Dimensioni (larghezza, altezza) in pixel del riquadro che
-    `draw_text_block` disegnerebbe per queste righe — usato per impilare
-    più riquadri (uno per persona) senza sovrapporli, senza duplicare la
-    logica di dimensionamento."""
+    """Size (width, height) in pixels of the box that `draw_text_block`
+    would draw for these lines -- used to stack multiple boxes (one per
+    person) without overlapping them, without duplicating the sizing
+    logic."""
     line_height = int(22 * font_scale / 0.5)
     box_h = line_height * len(lines) + 10
     box_w = max((len(l) for l in lines), default=0) * int(9 * font_scale / 0.5) + 16
@@ -95,12 +94,12 @@ def text_block_size(lines: list[str], font_scale: float = 0.5) -> tuple[int, int
 def draw_text_block(frame: np.ndarray, lines: list[str], origin: tuple[int, int] = (10, 10),
                      font_scale: float = 0.5, color: tuple[int, int, int] = (255, 255, 255),
                      border_color: tuple[int, int, int] | None = None) -> np.ndarray:
-    """Disegna un blocco di testo multi-riga con sfondo semi-trasparente per
-    leggibilità (usato per mostrare le metriche live di ciascuna persona).
-    Se `border_color` è specificato, disegna anche un bordo di quel colore
-    (tipicamente lo stesso colore dello scheletro della persona, vedi
-    `get_track_color`) per collegare visivamente il riquadro alla persona
-    corrispondente quando ce n'è più di una nell'inquadratura.
+    """Draws a multi-line text block with a semi-transparent background for
+    readability (used to show each person's live metrics). If
+    `border_color` is specified, also draws a border of that color
+    (typically the same color as the person's skeleton, see
+    `get_track_color`) to visually link the box to the corresponding
+    person when there's more than one in the frame.
     """
     x, y = origin
     line_height = int(22 * font_scale / 0.5)
@@ -120,9 +119,9 @@ def draw_text_block(frame: np.ndarray, lines: list[str], origin: tuple[int, int]
 
 
 def draw_hand(frame: np.ndarray, hand_xy: np.ndarray, color: tuple[int, int, int] = (255, 200, 0)) -> np.ndarray:
-    """Disegna i 21 landmark di una mano e le relative connessioni.
-    Import di HAND_CONNECTIONS ritardato per evitare un import pesante di
-    `hands.py` (e quindi di mediapipe) quando non serve.
+    """Draws the 21 landmarks of a hand and their connections.
+    HAND_CONNECTIONS import delayed to avoid a heavy import of
+    `hands.py` (and therefore of mediapipe) when not needed.
     """
     from pose.hands import HAND_CONNECTIONS
 
@@ -146,18 +145,19 @@ def draw_face_signals(frame: np.ndarray, mouth_pts: np.ndarray | None = None,
                        mouth_color: tuple[int, int, int] = (0, 220, 255),
                        eye_color: tuple[int, int, int] = (255, 220, 0),
                        eyebrow_color: tuple[int, int, int] = (0, 140, 255)) -> np.ndarray:
-    """Disegna un piccolo overlay per bocca, occhi e sopracciglia (punti +
-    linee), a partire dai landmark MediaPipe già estratti in `gaze_head.py`
-    (indici MOUTH_TOP/BOTTOM/LEFT/RIGHT, *_EYE_EAR_IDX, *_EYEBROW_IDX).
+    """Draws a small overlay for mouth, eyes, and eyebrows (points +
+    lines), from the MediaPipe landmarks already extracted in
+    `gaze_head.py` (MOUTH_TOP/BOTTOM/LEFT/RIGHT, *_EYE_EAR_IDX,
+    *_EYEBROW_IDX indices).
 
-    `mouth_pts`: array (4, 2) nell'ordine [top, bottom, left, right].
-    `left_eye_pts`/`right_eye_pts`: array (6, 2) nell'ordine EAR
-    [angolo_sx, sup1, sup2, angolo_dx, inf2, inf1].
-    `left_eyebrow_pts`/`right_eyebrow_pts`: array (5, 2), contorno del
-    sopracciglio (polilinea aperta, non chiusa come gli occhi).
-    Senza questo overlay, bocca/occhi/sopracciglia comparivano solo come
-    numero nel riquadro di testo, senza alcun segno disegnato sul volto — a
-    differenza di testa (freccia) e mani (scheletro).
+    `mouth_pts`: array (4, 2) in order [top, bottom, left, right].
+    `left_eye_pts`/`right_eye_pts`: array (6, 2) in EAR order
+    [left_corner, top1, top2, right_corner, bottom2, bottom1].
+    `left_eyebrow_pts`/`right_eyebrow_pts`: array (5, 2), eyebrow outline
+    (open polyline, not closed like the eyes).
+    Without this overlay, mouth/eyes/eyebrows only appeared as a number
+    in the text box, with no mark drawn on the face -- unlike head
+    (arrow) and hands (skeleton).
     """
     if mouth_pts is not None and not np.isnan(mouth_pts).any():
         top, bottom, left, right = mouth_pts

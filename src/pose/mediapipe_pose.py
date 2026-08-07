@@ -1,71 +1,69 @@
 """
 mediapipe_pose.py
 ===================
-Stima della posa (keypoint corporei) con MediaPipe Tasks PoseLandmarker,
-applicata DENTRO il ritaglio (bbox) di una singola persona GIA' tracciata
-dalla pipeline di segmentazione (`segmentation/seg_estimation.py` +
-`segmentation/seg_reid.py`) -- non un rilevatore multi-persona sull'intero
+Pose estimation (body keypoints) with MediaPipe Tasks PoseLandmarker,
+applied INSIDE the crop (bbox) of a single person ALREADY tracked by the
+segmentation pipeline (`segmentation/seg_estimation.py` +
+`segmentation/seg_reid.py`) -- not a multi-person detector on the whole
 frame.
 
-Perche' "dentro il ritaglio" e non sull'intero frame
+Why "inside the crop" and not on the whole frame
 ------------------------------------------------------
-MediaPipe Tasks PoseLandmarker supporta il rilevamento multi-persona
-(`num_poses`), ma NON fornisce alcun tracking temporale: nessun id
-persistente tra un frame e l'altro, a differenza di YOLO+ByteTrack.
-Costruire un tracker equivalente da zero sopra i suoi rilevamenti grezzi
-sarebbe un lavoro consistente per un guadagno incerto (esattamente il tipo
-di instabilita' di tracking per cui questa pipeline e' passata a
-segmentation_demo.py in primo luogo, vedi README).
+MediaPipe Tasks PoseLandmarker supports multi-person detection
+(`num_poses`), but does NOT provide any temporal tracking: no id
+persistent across frames, unlike YOLO+ByteTrack. Building an equivalent
+tracker from scratch on top of its raw detections would be a substantial
+amount of work for uncertain gain (exactly the kind of tracking
+instability this pipeline moved away from by switching to
+segmentation_demo.py in the first place, see README).
 
-La scelta fatta qui e' piu' semplice e riusa quello che gia' funziona: la
-pipeline di segmentazione traccia gia' l'identita' di ciascuna persona in
-modo stabile (silhouette + posizione/colore/forma, vedi seg_reid.py).
-Questo modulo si limita ad applicare MediaPipe in modalita' SINGOLA
-PERSONA (la piu' matura e affidabile della libreria, nessun problema di
-associazione multi-persona da risolvere) dentro il box di ciascuna persona
-GIA' tracciata, frame per frame -- l'identita' viene presa in prestito
-dalla segmentazione, non ricostruita qui. Era gia' il piano descritto nel
-docstring di `seg_estimation.py` ("ricollegare la pose applicata dentro la
-sagoma tracciata").
+The choice made here is simpler and reuses what already works: the
+segmentation pipeline already tracks each person's identity stably
+(silhouette + position/color/shape, see seg_reid.py). This module simply
+applies MediaPipe in SINGLE-PERSON mode (the library's most mature and
+reliable, no multi-person association problem to solve) inside the box
+of each ALREADY-tracked person, frame by frame -- identity is borrowed
+from segmentation, not reconstructed here. This was already the plan
+described in `seg_estimation.py`'s docstring ("reconnect pose applied
+inside the tracked silhouette").
 
-Rimappatura su COCO-17
+Remapping to COCO-17
 ------------------------
-I 33 landmark BlazePose vengono rimappati sui 17 nomi COCO-17 gia' usati in
-tutta la pipeline pose (`pose/keypoints.py`, vedi `BLAZEPOSE_TO_COCO`
-sotto), cosi' le funzioni di feature engineering esistenti
-(`pose/features.py`, `common/viz.draw_skeleton`, ecc.) funzionano
-IDENTICHE indipendentemente dal modello che ha prodotto i keypoint. I 16
-landmark BlazePose senza equivalente COCO diretto (occhi interni/esterni,
-angoli bocca, dita, talloni, punte piedi) vengono scartati: non servono
-alle feature esistenti, tutte scritte per lo schema COCO-17.
+The 33 BlazePose landmarks are remapped to the 17 COCO-17 names already
+used throughout the pose pipeline (`pose/keypoints.py`, see
+`BLAZEPOSE_TO_COCO` below), so the existing feature engineering functions
+(`pose/features.py`, `common/viz.draw_skeleton`, etc.) work IDENTICALLY
+regardless of which model produced the keypoints. The 16 BlazePose
+landmarks with no direct COCO equivalent (inner/outer eyes, mouth
+corners, fingers, heels, foot tips) are discarded: not needed by the
+existing features, all written for the COCO-17 schema.
 
-Limiti onesti
--------------
-  - Nessun tracking/feature con finestra scorrevole (energia di movimento,
-    repetitivita', ecc.) e' ancora collegato qui -- solo angoli articolari
-    calcolabili istantaneamente, frame per frame (vedi wiring in
-    segmentation_demo.py). Collegare il resto di pose/features.py
-    richiederebbe gestire buffer per-persona anche in segmentation_demo.py,
-    non ancora fatto.
-  - Un box di segmentazione stretto sulla sagoma puo' tagliare mani alzate
-    sopra la testa o piedi vicino al bordo: il padding in `estimate()`
-    aiuta ma non elimina il problema.
-  - La confidenza per giunto (`visibility` di MediaPipe) e la confidenza
-    delle detection YOLO (`pose_estimation.py`) non sono necessariamente
-    sulla stessa scala: trattarle come intercambiabili in analisi
-    quantitative va validato.
+Honest limitations
+-------------------
+  - No tracking/sliding-window features (movement energy, repetitiveness,
+    etc.) are wired in here yet -- only joint angles that can be computed
+    instantaneously, frame by frame (see the wiring in
+    segmentation_demo.py). Connecting the rest of pose/features.py would
+    require managing per-person buffers in segmentation_demo.py too, not
+    yet done.
+  - A segmentation box tight on the silhouette can cut off hands raised
+    above the head or feet near the edge: the padding in `estimate()`
+    helps but doesn't eliminate the problem.
+  - Per-joint confidence (MediaPipe's `visibility`) and YOLO detection
+    confidence (`pose_estimation.py`) aren't necessarily on the same
+    scale: treating them as interchangeable in quantitative analysis
+    needs validation.
 
-Setup richiesto:
+Required setup:
 
     pip install mediapipe
 
-Il modello Pose Landmarker ("lite", il piu' veloce -- "full"/"heavy" sono
-piu' precisi ma piu' lenti, sostituire "lite" con "full"/"heavy" in
-`_MODEL_URL` sotto) viene scaricato IN AUTOMATICO alla prima esecuzione
-in una cache fissa dentro il progetto (`<repo>/models/`), non serve piu'
-un `curl` manuale -- vedi `common/mediapipe_models.py` per i dettagli
-(logica condivisa con `pose/hands.py`/`pose/gaze_head.py`, stesso bug,
-stesso fix).
+The Pose Landmarker model ("lite", the fastest -- "full"/"heavy" are more
+accurate but slower, replace "lite" with "full"/"heavy" in `_MODEL_URL`
+below) is downloaded AUTOMATICALLY on first run into a fixed cache inside
+the project (`<repo>/models/`), no more manual `curl` needed -- see
+`common/mediapipe_models.py` for details (logic shared with
+`pose/hands.py`/`pose/gaze_head.py`, same bug, same fix).
 """
 
 from __future__ import annotations
@@ -75,17 +73,17 @@ import numpy as np
 from common.mediapipe_models import resolve_model_path
 from pose.keypoints import KP
 
-# Stessa variante "lite" gia' documentata sopra -- per "full"/"heavy"
-# sostituire "lite" con "full"/"heavy" nell'URL.
+# Same "lite" variant already documented above -- for "full"/"heavy"
+# replace "lite" with "full"/"heavy" in the URL.
 _MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
     "pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
 )
 
-# Indice landmark BlazePose (0-32, schema MediaPipe Pose Landmarker) -> nome
-# COCO-17 (pose/keypoints.py). I landmark BlazePose senza equivalente COCO
-# diretto (occhi interni/esterni, angoli bocca, dita, talloni, punte piedi)
-# non compaiono qui: vengono scartati.
+# BlazePose landmark index (0-32, MediaPipe Pose Landmarker schema) ->
+# COCO-17 name (pose/keypoints.py). BlazePose landmarks with no direct
+# COCO equivalent (inner/outer eyes, mouth corners, fingers, heels, foot
+# tips) don't appear here: they're discarded.
 BLAZEPOSE_TO_COCO: dict[int, str] = {
     0: "nose",
     2: "left_eye", 5: "right_eye",
@@ -100,21 +98,21 @@ BLAZEPOSE_TO_COCO: dict[int, str] = {
 
 
 def _empty_pose() -> tuple[np.ndarray, np.ndarray]:
-    """(kxy, kconf) "vuoti": 17 giunti NaN/confidenza zero, stesso schema
-    di un frame in cui nessuna posa e' stata rilevata."""
+    """"Empty" (kxy, kconf): 17 NaN joints/zero confidence, same schema
+    as a frame in which no pose was detected."""
     return np.full((17, 2), np.nan), np.zeros(17)
 
 
 def blazepose_to_coco(landmarks, frame_offset_xy: tuple[float, float],
                        crop_size_wh: tuple[float, float]) -> tuple[np.ndarray, np.ndarray]:
-    """Converte una lista di 33 landmark BlazePose (in coordinate
-    NORMALIZZATE 0-1 rispetto al ritaglio, come restituiti da MediaPipe) in
-    (kxy, kconf) COCO-17 in coordinate PIXEL DEL FRAME INTERO.
+    """Converts a list of 33 BlazePose landmarks (in NORMALIZED 0-1
+    coordinates relative to the crop, as returned by MediaPipe) into
+    (kxy, kconf) COCO-17 in FULL-FRAME PIXEL coordinates.
 
-    `frame_offset_xy`: angolo in alto a sinistra del ritaglio nel frame
-    intero (x1, y1). `crop_size_wh`: dimensioni del ritaglio in pixel.
-    Isolata dalla classe che chiama MediaPipe per essere testabile senza
-    mediapipe/camera (vedi demo/mediapipe_pose_check.py).
+    `frame_offset_xy`: top-left corner of the crop in the full frame
+    (x1, y1). `crop_size_wh`: crop dimensions in pixels. Isolated from
+    the class that calls MediaPipe so it's testable without
+    mediapipe/camera (see demo/mediapipe_pose_check.py).
     """
     x1, y1 = frame_offset_xy
     crop_w, crop_h = crop_size_wh
@@ -130,11 +128,11 @@ def blazepose_to_coco(landmarks, frame_offset_xy: tuple[float, float],
 
 def padded_crop_box(bbox: np.ndarray, frame_shape: tuple[int, int],
                      padding: float = 0.15) -> tuple[int, int, int, int]:
-    """Box di ritaglio (x1,y1,x2,y2, interi, clampati ai bordi del frame) a
-    partire da un bbox di segmentazione, allargato di `padding` (frazione
-    di larghezza/altezza) per non tagliare le estremita' (mani alzate,
-    piedi) quando il box e' stretto sulla sagoma. Isolata per essere
-    testabile senza mediapipe/camera."""
+    """Crop box (x1,y1,x2,y2, integers, clamped to the frame's edges)
+    starting from a segmentation bbox, expanded by `padding` (fraction of
+    width/height) to avoid cutting off extremities (raised hands, feet)
+    when the box is tight on the silhouette. Isolated so it's testable
+    without mediapipe/camera."""
     h, w = frame_shape
     x1, y1, x2, y2 = bbox
     bw, bh = x2 - x1, y2 - y1
@@ -146,12 +144,12 @@ def padded_crop_box(bbox: np.ndarray, frame_shape: tuple[int, int],
 
 
 class MediaPipeCropPoseEstimator:
-    """Wrapper su MediaPipe Tasks PoseLandmarker in modalita' SINGOLA
-    persona (`num_poses=1`), applicato a un ritaglio del frame -- vedi il
-    docstring del modulo per il perche'. Import di mediapipe ritardato
-    (come `pose_estimation.PoseTracker` / `gaze_head.HeadGazeEstimator`),
-    cosi' il resto della pipeline resta utilizzabile/testabile anche senza
-    mediapipe installato.
+    """Wrapper over MediaPipe Tasks PoseLandmarker in SINGLE-person mode
+    (`num_poses=1`), applied to a crop of the frame -- see the module
+    docstring for why. mediapipe import delayed (like
+    `pose_estimation.PoseTracker` / `gaze_head.HeadGazeEstimator`), so the
+    rest of the pipeline remains usable/testable even without mediapipe
+    installed.
     """
 
     def __init__(self, model_path: str = "pose_landmarker_lite.task",
@@ -168,29 +166,29 @@ class MediaPipeCropPoseEstimator:
         )
         self._mp = mp
         self._landmarker = vision.PoseLandmarker.create_from_options(options)
-        self._last_timestamp_ms: int | None = None  # vedi la clamp in estimate()
+        self._last_timestamp_ms: int | None = None  # see the clamp in estimate()
 
     def estimate(self, frame_bgr: np.ndarray, bbox: np.ndarray, timestamp_ms: int,
                  padding: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
-        """Rileva la posa DENTRO `bbox` (x1,y1,x2,y2, es. dal tracker di
-        segmentazione). Ritorna (kxy, kconf) in coordinate PIXEL DEL FRAME
-        INTERO (non del ritaglio), stesso schema COCO-17 di
-        `pose_estimation.py` -- NaN/0 per i giunti senza equivalente
-        BlazePose o se nessuna posa e' stata rilevata nel ritaglio.
+        """Detects the pose INSIDE `bbox` (x1,y1,x2,y2, e.g. from the
+        segmentation tracker). Returns (kxy, kconf) in FULL-FRAME PIXEL
+        coordinates (not the crop's), same COCO-17 schema as
+        `pose_estimation.py` -- NaN/0 for joints with no BlazePose
+        equivalent or if no pose was detected in the crop.
 
-        ATTENZIONE (vedi anche il docstring di `MediaPipePoseByTrack`):
-        `detect_for_video` (modalita' VIDEO di MediaPipe) richiede
-        timestamp STRETTAMENTE crescenti per la stessa istanza -- chiamare
-        questo metodo con lo stesso timestamp due volte (es. per due
-        persone diverse nello stesso frame, sulla STESSA istanza) solleva
+        WARNING (see also `MediaPipePoseByTrack`'s docstring):
+        `detect_for_video` (MediaPipe's VIDEO mode) requires STRICTLY
+        increasing timestamps for the same instance -- calling this
+        method with the same timestamp twice (e.g. for two different
+        people in the same frame, on the SAME instance) raises
         `ValueError: Input timestamp must be monotonically increasing`.
-        Un'istanza va quindi usata per UNA sola persona nel tempo (vedi
-        `MediaPipePoseByTrack`, che aggancia un'istanza per track_id). Come
-        rete di sicurezza aggiuntiva -- non come sostituto di quel design --
-        qui il timestamp effettivo viene comunque forzato a essere maggiore
-        dell'ultimo usato, cosi' un timestamp duplicato o fuori ordine (es.
-        per arrotondamento a fps molto bassi) non manda in crash ma perde
-        al piu' un millisecondo di precisione."""
+        An instance must therefore be used for ONLY one person over time
+        (see `MediaPipePoseByTrack`, which attaches one instance per
+        track_id). As an additional safety net -- not a substitute for
+        that design -- the actual timestamp is still forced to be
+        greater than the last one used here, so a duplicate or
+        out-of-order timestamp (e.g. from rounding at very low fps)
+        doesn't crash but at most loses a millisecond of precision."""
         import cv2
 
         h, w = frame_bgr.shape[:2]
@@ -210,42 +208,41 @@ class MediaPipeCropPoseEstimator:
         if not result.pose_landmarks:
             return _empty_pose()
 
-        landmarks = result.pose_landmarks[0]  # num_poses=1: al massimo una posa
+        landmarks = result.pose_landmarks[0]  # num_poses=1: at most one pose
         crop_h, crop_w = crop.shape[:2]
         return blazepose_to_coco(landmarks, (x1, y1), (crop_w, crop_h))
 
 
 class MediaPipePoseByTrack:
-    """Pool di un `MediaPipeCropPoseEstimator` INDIPENDENTE per ciascun
-    `track_id`, invece di un'unica istanza condivisa fra tutte le persone
-    del frame.
+    """Pool of an INDEPENDENT `MediaPipeCropPoseEstimator` for each
+    `track_id`, instead of a single instance shared across all people in
+    the frame.
 
-    Perche' non basta un'istanza sola
+    Why a single instance isn't enough
     ------------------------------------
-    `PoseLandmarker.detect_for_video` (modalita' VIDEO) e' pensato per UNO
-    stream continuo per istanza: mantiene stato interno tra una chiamata e
-    l'altra (filtraggio/smussamento temporale dei landmark) e richiede
-    timestamp strettamente crescenti. Il ciclo per-persona di
-    `segmentation_demo.py` chiama pero' `.estimate(...)` UNA VOLTA PER
-    PERSONA nello stesso frame, tutte con lo stesso timestamp (`now` del
-    frame) -- su un'istanza condivisa questo (a) fa scattare
-    `ValueError: Input timestamp must be monotonically increasing` alla
-    seconda persona del frame, e (b) anche aggirando il crash, mescolerebbe
-    lo stato di smussamento temporale di persone diverse come se fossero
-    un'unica persona che si teletrasporta da un corpo all'altro.
+    `PoseLandmarker.detect_for_video` (VIDEO mode) is designed for ONE
+    continuous stream per instance: it keeps internal state between calls
+    (temporal filtering/smoothing of landmarks) and requires strictly
+    increasing timestamps. `segmentation_demo.py`'s per-person loop,
+    however, calls `.estimate(...)` ONCE PER PERSON in the same frame,
+    all with the same timestamp (the frame's `now`) -- on a shared
+    instance this (a) triggers `ValueError: Input timestamp must be
+    monotonically increasing` for the second person in the frame, and (b)
+    even working around the crash, would mix the temporal smoothing state
+    of different people as if they were a single person teleporting from
+    one body to another.
 
-    La soluzione e' che ogni track_id ottenga la propria istanza/il proprio
-    "stream" indipendente -- creata alla prima apparizione del track e
-    riusata per tutta la sua vita, cosi' ciascuna vede una sequenza di
-    timestamp coerente e uno stato di smussamento che appartiene solo a
-    lei."""
+    The solution is for each track_id to get its own independent
+    instance/"stream" -- created on the track's first appearance and
+    reused for its whole lifetime, so each one sees a coherent timestamp
+    sequence and a smoothing state that belongs only to it."""
 
     def __init__(self, model_path: str = "pose_landmarker_lite.task",
                  min_pose_detection_confidence: float = 0.5):
-        # Risolto/scaricato UNA volta qui (non ad ogni nuovo track_id in
-        # estimate()): resolve_model_path() e' economico da richiamare, ma
-        # non ha senso ripetere il controllo/stampare il messaggio di
-        # download per ogni persona che entra in scena.
+        # Resolved/downloaded ONCE here (not on every new track_id in
+        # estimate()): resolve_model_path() is cheap to call, but there's
+        # no point repeating the check/printing the download message for
+        # every person who enters the scene.
         self._model_path = resolve_model_path(model_path, download_url=_MODEL_URL)
         self._min_conf = min_pose_detection_confidence
         self._estimators: dict[int, MediaPipeCropPoseEstimator] = {}
@@ -260,9 +257,10 @@ class MediaPipePoseByTrack:
         return estimator.estimate(frame_bgr, bbox, timestamp_ms=timestamp_ms, padding=padding)
 
     def forget(self, track_id: int) -> None:
-        """Rimuove l'istanza di un track uscito di scena (es. scaduto in
-        seg_reid) -- evita di accumulare landmarker per id ormai morti in
-        sessioni lunghe con molto ricambio. Non obbligatorio (un handful di
-        istanze in piu' non e' un problema pratico), ma economico da
-        chiamare quando si sa gia' che un track e' morto."""
+        """Removes the instance of a track that has left the scene (e.g.
+        expired in seg_reid) -- avoids accumulating landmarkers for
+        long-dead ids in long sessions with a lot of turnover. Not
+        mandatory (a handful of extra instances isn't a practical
+        problem), but cheap to call when a track is already known to be
+        dead."""
         self._estimators.pop(track_id, None)

@@ -1,14 +1,14 @@
 """
 video_player_check.py
 =======================
-Verifica della logica di cache/seek in `gui/video_player.py` SENZA GUI, video
-reale o tracker (niente Tkinter, niente ultralytics): inietta un generatore
-sintetico che produce `RunnerFrame` numerati, cosi' si puo' controllare
-esattamente quale frame viene restituito da ogni Avanti/Indietro e quante
-volte il generatore viene effettivamente avanzato (per dimostrare che
-"Indietro" non fa MAI nuova inferenza).
+Verifies the cache/seek logic in `gui/video_player.py` WITHOUT a GUI, real
+video, or tracker (no Tkinter, no ultralytics): injects a synthetic
+generator that produces numbered `RunnerFrame`s, so we can check exactly
+which frame is returned by each Forward/Back and how many times the
+generator is actually advanced (to prove that "Back" NEVER triggers new
+inference).
 
-Esegui con: python video_player_check.py
+Run with: python video_player_check.py
 """
 
 from __future__ import annotations
@@ -25,13 +25,13 @@ from gui.video_player import VideoPlayer
 
 
 def make_generator_factory(n_frames: int, counter: dict):
-    """Fabbrica di generatori sintetici: ogni frame e' un piccolo array con
-    un solo pixel che codifica il proprio indice, cosi' i test possono
-    verificare "quale frame e' questo" senza un video vero. `counter["calls"]`
-    conta quante volte la fabbrica e' stata invocata (quante volte
-    VideoPlayer e' "ripartito da zero") e `counter["frames_produced"]` quanti
-    frame sono stati effettivamente generati (prova indiretta che la cache
-    evita di rigenerarli)."""
+    """Factory of synthetic generators: each frame is a small array with a
+    single pixel encoding its own index, so tests can check "which frame
+    is this" without a real video. `counter["calls"]` counts how many
+    times the factory was invoked (how many times VideoPlayer "started
+    over from scratch") and `counter["frames_produced"]` counts how many
+    frames were actually generated (indirect proof that the cache avoids
+    regenerating them)."""
     def factory():
         counter["calls"] = counter.get("calls", 0) + 1
         def gen():
@@ -52,17 +52,17 @@ def part1_forward_advances_and_produces_new_frames():
     player = VideoPlayer(generator_factory=make_generator_factory(5, counter))
 
     seen = [frame_index_of(player.step_forward()) for _ in range(5)]
-    assert seen == [0, 1, 2, 3, 4], f"atteso [0..4] in ordine, trovato {seen}"
-    assert counter["frames_produced"] == 5, "atteso esattamente 5 frame generati (uno per step_forward)"
-    # l'esaurimento si scopre solo tentando di andare OLTRE l'ultimo frame
-    # (il generatore stesso non sa di essere all'ultimo elemento finche' non
-    # gli si chiede il successivo) -- prima di questa chiamata is_exhausted
-    # deve quindi essere ancora False.
-    assert not player.is_exhausted, "non deve segnalarsi esaurito prima di aver tentato oltre l'ultimo frame"
-    assert player.step_forward() is None, "oltre la fine deve restituire None, non sollevare o ripartire"
-    assert player.is_exhausted, "dopo il tentativo oltre l'ultimo frame il player deve segnalarsi esaurito"
-    print("Parte 1: 5x step_forward() restituisce i frame 0..4 nell'ordine giusto, "
-          "esattamente 5 frame generati, fine-video rilevata correttamente — OK")
+    assert seen == [0, 1, 2, 3, 4], f"expected [0..4] in order, found {seen}"
+    assert counter["frames_produced"] == 5, "expected exactly 5 frames generated (one per step_forward)"
+    # exhaustion is only discovered by attempting to go PAST the last frame
+    # (the generator itself doesn't know it's at the last element until
+    # asked for the next one) -- before this call is_exhausted must
+    # therefore still be False.
+    assert not player.is_exhausted, "must not report exhausted before attempting past the last frame"
+    assert player.step_forward() is None, "past the end must return None, not raise or restart"
+    assert player.is_exhausted, "after attempting past the last frame the player must report exhausted"
+    print("Part 1: 5x step_forward() returns frames 0..4 in the right order, "
+          "exactly 5 frames generated, end-of-video correctly detected — OK")
 
 
 def part2_back_never_reprocesses():
@@ -70,19 +70,19 @@ def part2_back_never_reprocesses():
     player = VideoPlayer(generator_factory=make_generator_factory(5, counter))
 
     for _ in range(3):
-        player.step_forward()  # cursore a 0,1,2 -> in cache i frame 0,1,2
+        player.step_forward()  # cursor at 0,1,2 -> frames 0,1,2 in cache
     assert counter["frames_produced"] == 3
 
     back1 = frame_index_of(player.step_back())
     back2 = frame_index_of(player.step_back())
-    assert (back1, back2) == (1, 0), f"atteso (1,0) tornando indietro da 2, trovato {(back1, back2)}"
+    assert (back1, back2) == (1, 0), f"expected (1,0) going back from 2, found {(back1, back2)}"
     assert counter["frames_produced"] == 3, (
-        "step_back() non deve MAI generare nuovi frame (deve leggere solo dalla cache): "
-        f"attesi ancora 3 frame prodotti, trovati {counter['frames_produced']}"
+        "step_back() must NEVER generate new frames (must only read from the cache): "
+        f"expected still 3 frames produced, found {counter['frames_produced']}"
     )
-    assert player.step_back() is None, "al frame 0 non si puo' tornare ulteriormente indietro"
-    print("Parte 2: step_back() rilegge dalla cache (0 nuovi frame generati) e si ferma "
-          "correttamente al primo frame — OK")
+    assert player.step_back() is None, "cannot go back further from frame 0"
+    print("Part 2: step_back() reads from the cache (0 new frames generated) and stops "
+          "correctly at the first frame — OK")
 
 
 def part3_forward_after_back_resumes_from_cache_then_live():
@@ -90,21 +90,21 @@ def part3_forward_after_back_resumes_from_cache_then_live():
     player = VideoPlayer(generator_factory=make_generator_factory(5, counter))
 
     for _ in range(4):
-        player.step_forward()  # cache: 0,1,2,3 -- cursore a 3
-    player.step_back()          # cursore a 2 (rilegge dalla cache)
-    player.step_back()          # cursore a 1 (rilegge dalla cache)
+        player.step_forward()  # cache: 0,1,2,3 -- cursor at 3
+    player.step_back()          # cursor at 2 (reads from cache)
+    player.step_back()          # cursor at 1 (reads from cache)
     assert counter["frames_produced"] == 4
 
-    # da qui in poi, "avanti" deve rileggere dalla cache (2, poi 3) PRIMA di
-    # tornare a generare frame nuovi (4) -- non deve rigenerare 2 e 3.
+    # from here on, "forward" must read from the cache (2, then 3) BEFORE
+    # going back to generating new frames (4) -- must not regenerate 2 and 3.
     resumed = [frame_index_of(player.step_forward()) for _ in range(3)]
-    assert resumed == [2, 3, 4], f"atteso [2,3,4] riprendendo da cursore=1, trovato {resumed}"
+    assert resumed == [2, 3, 4], f"expected [2,3,4] resuming from cursor=1, found {resumed}"
     assert counter["frames_produced"] == 5, (
-        "solo il frame 4 (mai visto prima) doveva generare nuova inferenza: "
-        f"attesi 5 frame prodotti in totale, trovati {counter['frames_produced']}"
+        "only frame 4 (never seen before) should have triggered new inference: "
+        f"expected 5 frames produced in total, found {counter['frames_produced']}"
     )
-    print("Parte 3: dopo essere tornato indietro, avanti rilegge prima dalla cache (2,3) "
-          "poi riprende l'elaborazione live solo per il frame davvero nuovo (4) — OK")
+    print("Part 3: after going back, forward reads from the cache first (2,3) "
+          "then resumes live processing only for the truly new frame (4) — OK")
 
 
 def part4_reset_starts_a_fresh_generator():
@@ -115,13 +115,13 @@ def part4_reset_starts_a_fresh_generator():
     assert counter["calls"] == 1
 
     player.reset()
-    assert player.current is None, "dopo reset() non deve esserci alcun frame 'in vista'"
-    assert player.cached_frame_count == 0, "dopo reset() la cache deve essere vuota"
+    assert player.current is None, "after reset() there must be no frame 'in view'"
+    assert player.cached_frame_count == 0, "after reset() the cache must be empty"
 
     first_after_reset = frame_index_of(player.step_forward())
-    assert first_after_reset == 0, "dopo reset() si deve ripartire dal frame 0 di un NUOVO generatore"
-    assert counter["calls"] == 2, "reset() deve invocare di nuovo la generator_factory (nuova sessione)"
-    print("Parte 4: reset() svuota la cache e riparte da un generatore nuovo di zecca — OK")
+    assert first_after_reset == 0, "after reset() must restart from frame 0 of a NEW generator"
+    assert counter["calls"] == 2, "reset() must invoke the generator_factory again (new session)"
+    print("Part 4: reset() empties the cache and starts over from a brand-new generator — OK")
 
 
 def part5_all_rows_matches_cached_frames_in_order():
@@ -132,35 +132,35 @@ def part5_all_rows_matches_cached_frames_in_order():
 
     rows = player.all_rows()
     assert [r["frame_idx"] for r in rows] == [0, 1, 2, 3], (
-        f"atteso una riga per frame nell'ordine 0..3, trovato {[r['frame_idx'] for r in rows]}"
+        f"expected one row per frame in order 0..3, found {[r['frame_idx'] for r in rows]}"
     )
-    print("Parte 5: all_rows() concatena le righe di ogni frame in cache, nell'ordine giusto — OK")
+    print("Part 5: all_rows() concatenates the rows of every cached frame, in the right order — OK")
 
 
 def part6_seek_jumps_within_cache_without_reprocessing():
     counter: dict = {}
     player = VideoPlayer(generator_factory=make_generator_factory(5, counter))
     for _ in range(4):
-        player.step_forward()  # cache: 0,1,2,3 -- cursore a 3
+        player.step_forward()  # cache: 0,1,2,3 -- cursor at 3
     assert counter["frames_produced"] == 4
 
     jumped = frame_index_of(player.seek(1))
-    assert jumped == 1, f"atteso di saltare al frame 1, trovato {jumped}"
+    assert jumped == 1, f"expected to jump to frame 1, found {jumped}"
     assert player.cursor == 1
-    assert counter["frames_produced"] == 4, "seek() dentro la cache non deve generare nuovi frame"
+    assert counter["frames_produced"] == 4, "seek() within the cache must not generate new frames"
 
     back_to_edge = frame_index_of(player.seek(3))
     assert back_to_edge == 3
     assert counter["frames_produced"] == 4
 
-    # fuori dalla cache (frame 4 non ancora elaborato): seek() non deve
-    # spostare il cursore ne' generare nulla -- e' compito del chiamante
-    # usare step_forward() per l'elaborazione di recupero.
+    # outside the cache (frame 4 not yet processed): seek() must not move
+    # the cursor nor generate anything -- it's the caller's job to use
+    # step_forward() for catch-up processing.
     assert player.seek(4) is None
-    assert player.cursor == 3, "un seek() oltre la cache non deve spostare il cursore"
+    assert player.cursor == 3, "a seek() past the cache must not move the cursor"
     assert counter["frames_produced"] == 4
-    print("Parte 6: seek() salta istantaneamente dentro la cache gia' elaborata, senza mai "
-          "generare nuovi frame, e rifiuta un salto oltre il prefisso gia' elaborato — OK")
+    print("Part 6: seek() jumps instantly within the already-processed cache, without ever "
+          "generating new frames, and rejects a jump past the already-processed prefix — OK")
 
 
 def main():
@@ -170,9 +170,9 @@ def main():
     part4_reset_starts_a_fresh_generator()
     part5_all_rows_matches_cached_frames_in_order()
     part6_seek_jumps_within_cache_without_reprocessing()
-    print("\nVerifica completata senza errori: VideoPlayer avanza/generera' nuovi frame solo "
-          "quando serve davvero, non rigenera mai un frame gia' visto tornando indietro, e "
-          "reset() riparte pulito da un nuovo generatore.")
+    print("\nVerification completed with no errors: VideoPlayer advances/generates new frames only "
+          "when truly needed, never regenerates an already-seen frame when going back, and "
+          "reset() starts over cleanly from a new generator.")
 
 
 if __name__ == "__main__":

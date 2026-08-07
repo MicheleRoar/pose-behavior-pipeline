@@ -1,81 +1,80 @@
 """
 benchmark_backends.py
 ========================
-Confronta i backend di tracking disponibili (YOLO26-seg+ByteTrack
-euristico, SAM 3.1, SAM2 -- questi ultimi due con o senza reseeding di
-persone nuove ai confini dei chunk, vedi segmentation/sam_backend.py) sullo
-STESSO video, per capire quale mantiene l'identita' delle persone piu'
-stabile nel tempo. Nato da un problema concreto: durante una sessione di
-gioco terapeutico i bambini entrano ed escono continuamente dall'
-inquadratura, o cambiano vestiti -- l'id di tracking dovrebbe restare lo
-stesso.
+Compares the available tracking backends (YOLO26-seg+heuristic ByteTrack,
+SAM 3.1, SAM2 -- the latter two with or without reseeding of new people
+at chunk boundaries, see segmentation/sam_backend.py) on the SAME video,
+to understand which one keeps people's identity most stable over time.
+Born from a concrete problem: during a therapeutic play session, children
+continuously enter and leave the frame, or change clothes -- the tracking
+id should stay the same.
 
-Perche' SAM2 e non SAMURAI: SAMURAI e' stato rimosso dal confronto, vedi il
-docstring di `segmentation/sam2_estimation.py` -- il suo filtro di Kalman
-assume un solo oggetto tracciato per sessione e va in crash non appena si
-seminano piu' persone insieme (il caso normale qui). SAM2 vanilla supporta
-il multi-oggetto nativamente.
+Why SAM2 and not SAMURAI: SAMURAI was removed from the comparison, see
+the docstring of `segmentation/sam2_estimation.py` -- its Kalman filter
+assumes a single tracked object per session and crashes as soon as
+multiple people are seeded together (the normal case here). Vanilla SAM2
+supports multi-object natively.
 
-Nessuna ground truth richiesta: le metriche qui sono di AUTO-consistenza,
-non IDF1/HOTA veri (che richiederebbero label frame-per-frame dell'
-identita' reale, non disponibili al momento):
+No ground truth required: the metrics here are SELF-consistency ones,
+not true IDF1/HOTA (which would require frame-by-frame labels of the
+real identity, not currently available):
 
-- quante identita' "grezze" (raw track_id di ByteTrack o equivalente SAM)
-  vengono create in tutta la sessione -- se il numero di persone reali e'
-  noto (vedi --max-people) e il conteggio grezzo e' molto piu' alto, e'
-  segno che il metodo perde e "reinventa" identita' quando qualcuno esce/
-  rientra o cambia aspetto;
-- quanto durano in media le tracce (min/mediana/max, in frame) e quante
-  sono "brevi" (sotto SHORT_LIVED_THRESHOLD_FRAMES) -- tante tracce brevi
-  indicano frammentazione: la stessa persona viene spezzata in piu' id nel
-  tempo invece di restarne una sola;
-- tempo di elaborazione / fps -- il costo pratico di ciascun metodo, non
-  solo la sua qualita'.
+- how many "raw" identities (ByteTrack raw track_id or SAM equivalent)
+  are created over the whole session -- if the number of real people is
+  known (see --max-people) and the raw count is much higher, it's a sign
+  the method loses and "reinvents" identities when someone leaves/
+  re-enters or changes appearance;
+- how long tracks last on average (min/median/max, in frames) and how
+  many are "short" (below SHORT_LIVED_THRESHOLD_FRAMES) -- many short
+  tracks indicate fragmentation: the same person gets split into
+  multiple ids over time instead of staying one;
+- processing time / fps -- the practical cost of each method, not just
+  its quality.
 
-Se in futuro emergono annotazioni (anche solo su singoli eventi tipo "il
-bambino X esce al frame N e rientra al frame M"), si puo' estendere il
-confronto aggiungendo una funzione dedicata a quegli eventi specifici,
-senza toccare la struttura qui sotto.
+If annotations emerge in the future (even just on individual events like
+"child X leaves at frame N and returns at frame M"), the comparison can
+be extended by adding a function dedicated to those specific events,
+without touching the structure below.
 
-Non disegna overlay ne' apre finestre (piu' veloce, e le metriche sopra
-non richiedono guardare i frame): usa direttamente `tracker.run()` (il
-protocollo comune `SegmentationBackend`, vedi segmentation/backend.py),
-non `iter_segmentation_frames()` (che disegna l'overlay, qui inutile).
+Doesn't draw an overlay or open windows (faster, and the metrics above
+don't require looking at the frames): uses `tracker.run()` directly (the
+common `SegmentationBackend` protocol, see segmentation/backend.py), not
+`iter_segmentation_frames()` (which draws the overlay, useless here).
 
-Se un metodo non e' eseguibile su questa macchina (device diverso da
-"cuda" per sam31/sam2, o libreria non installata) viene SALTATO con un
-avviso invece di far fallire l'intero confronto -- utile per rilanciare lo
-stesso comando su macchine diverse (Mac senza CUDA: gira solo "yolo";
-macchina CUDA con solo SAM2 installato: le varianti "sam31*" vengono
-saltate).
+If a method can't run on this machine (device other than "cuda" for
+sam31/sam2, or a library not installed) it's SKIPPED with a warning
+instead of failing the whole comparison -- useful for rerunning the same
+command on different machines (Mac without CUDA: only "yolo" runs; a
+CUDA machine with only SAM2 installed: the "sam31*" variants are
+skipped).
 
-Sweep di chunk_size/overlap/redetect_every
+chunk_size/overlap/redetect_every sweep
 -------------------------------------------
-Nato da un problema concreto: quale combinazione di questi tre parametri
-(vedi segmentation/sam_backend.py::ChunkedVideoPredictorBackend) va bene
-per LE TUE registrazioni (durata, frequenza con cui i bambini entrano/
-escono) non si puo' indovinare a tavolino. `--sam-chunk-size`/
-`--sam-overlap`/`--sam-redetect-every` accettano ORA una lista separata
-da virgole invece di un solo valore (es. `--sam-chunk-size 300,600`):
-si esegue automaticamente il prodotto cartesiano di tutte le combinazioni,
-UNA SOLA VOLTA per metodo se non specifichi liste (comportamento
-originale, invariato). La sweep si applica solo ai metodi che usano
-davvero questi parametri (`sam31`/`sam2*`) -- per "yolo" (che li ignora)
-gira una volta sola, non ripetuto per ogni combinazione. Un elemento
-vuoto tra le virgole in `--sam-redetect-every` (es. `100,`) include anche
-il caso "disattivato" nello stesso confronto. Ogni riga del CSV riporta i
-parametri usati (`sam_chunk_size`/`sam_overlap`/`sam_redetect_every`,
-`None` per "yolo" dove non pertinenti) e un `run_label` leggibile, cosi'
-si puo' ordinare/filtrare per `n_raw_ids`/`short_lived_ids_pct` e scegliere
-la combinazione migliore invece di tirare a indovinare.
+Born from a concrete problem: which combination of these three
+parameters (see segmentation/sam_backend.py::ChunkedVideoPredictorBackend)
+works well for YOUR recordings (duration, how often children enter/
+leave) can't be guessed on paper. `--sam-chunk-size`/`--sam-overlap`/
+`--sam-redetect-every` NOW accept a comma-separated list instead of a
+single value (e.g. `--sam-chunk-size 300,600`): the cartesian product of
+all combinations is run automatically, ONLY ONCE per method if you don't
+specify lists (original behavior, unchanged). The sweep only applies to
+methods that actually use these parameters (`sam31`/`sam2*`) -- for
+"yolo" (which ignores them) it runs once, not repeated for every
+combination. An empty element between commas in `--sam-redetect-every`
+(e.g. `100,`) also includes the "disabled" case in the same comparison.
+Every CSV row reports the parameters used (`sam_chunk_size`/
+`sam_overlap`/`sam_redetect_every`, `None` for "yolo" where not
+relevant) and a readable `run_label`, so you can sort/filter by
+`n_raw_ids`/`short_lived_ids_pct` and pick the best combination instead
+of guessing.
 
-Uso:
+Usage:
     python benchmark_backends.py --source video.mp4 --fps 15 \\
         --methods yolo,sam31,sam31-noreseed,sam2,sam2-noreseed \\
         --max-people 3 --out benchmark_results.csv
 
-    # sweep: 2 chunk_size x 2 overlap x 3 redetect_every (incluso "off")
-    # per sam31, in aggiunta a un singolo run yolo -- 12 righe totali
+    # sweep: 2 chunk_size x 2 overlap x 3 redetect_every (including "off")
+    # for sam31, in addition to a single yolo run -- 12 rows total
     python benchmark_backends.py --source video.mp4 --fps 15 \\
         --methods yolo,sam31 --sam-text-prompt person \\
         --sam-chunk-size 300,600 --sam-overlap 30,50 \\
@@ -102,9 +101,9 @@ METHOD_PRESETS = {
     "sam2-noreseed": dict(backend="sam2", reseed=False),
 }
 
-# Stesso riferimento usato altrove nel progetto (reid.py::min_signature_frames,
-# run_segmentation()/track_stability_check.py) -- confrontabile con quelle
-# statistiche gia' familiari, non un numero inventato qui apposta.
+# Same reference used elsewhere in the project (reid.py::min_signature_frames,
+# run_segmentation()/track_stability_check.py) -- comparable with those
+# already-familiar statistics, not a number invented just for here.
 SHORT_LIVED_THRESHOLD_FRAMES = 15
 
 
@@ -115,17 +114,17 @@ def run_one_method(method: str, *, source, fps: float, device: str,
                     sam_chunk_size: int = 600, sam_overlap: int = 50,
                     sam_redetect_every: int | None = None,
                     sam_text_prompt: str | None = None) -> dict | None:
-    """Esegue UN metodo sul video e ritorna un dict di metriche, oppure
-    `None` se il metodo va saltato (device incompatibile o libreria
-    mancante -- vedi il docstring del modulo). Non solleva mai per uno di
-    questi due motivi attesi, solo per un vero bug (es. parametro
-    sconosciuto altrove)."""
+    """Runs ONE method on the video and returns a metrics dict, or `None`
+    if the method must be skipped (incompatible device or missing
+    library -- see the module docstring). Never raises for either of
+    these two expected reasons, only for a real bug (e.g. an unknown
+    parameter elsewhere)."""
     preset = METHOD_PRESETS[method]
     backend = preset["backend"]
     reseed = preset["reseed"]
 
     if backend in ("sam31", "sam2") and device != "cuda":
-        print(f"[{method}] saltato: richiede device='cuda' (rilevato {device!r})")
+        print(f"[{method}] skipped: requires device='cuda' (detected {device!r})")
         return None
 
     try:
@@ -138,7 +137,7 @@ def run_one_method(method: str, *, source, fps: float, device: str,
             sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
         )
     except ImportError as exc:
-        print(f"[{method}] saltato: {exc}")
+        print(f"[{method}] skipped: {exc}")
         return None
 
     raw_id_frame_count: dict[int, int] = defaultdict(int)
@@ -155,9 +154,9 @@ def run_one_method(method: str, *, source, fps: float, device: str,
     short_lived = sum(1 for v in lifespans if v < SHORT_LIVED_THRESHOLD_FRAMES)
     median_frames = lifespans[len(lifespans) // 2] if lifespans else 0
 
-    # Riportati nell'output anche per un run singolo (non solo in sweep):
-    # None per "yolo", che li riceve ma li ignora (SegTracker non li usa)
-    # -- cosi' il CSV non lascia intendere che siano stati applicati.
+    # Reported in the output even for a single run (not just in a sweep):
+    # None for "yolo", which receives them but ignores them (SegTracker
+    # doesn't use them) -- so the CSV doesn't imply they were applied.
     sam_params_relevant = backend != "yolo"
     return {
         "method": method,
@@ -173,9 +172,10 @@ def run_one_method(method: str, *, source, fps: float, device: str,
         "lifespan_median_s": round(median_frames / fps, 2) if fps > 0 else 0.0,
         "lifespan_max_frames": lifespans[-1] if lifespans else 0,
         "short_lived_ids_pct": round(100 * short_lived / n_ids, 1) if n_ids else 0.0,
-        # elapsed_s/processing_fps: TEMPO DI CALCOLO (wall-clock per elaborare
-        # il video), da non confondere con lifespan_median_s (durata media di
-        # una traccia nella TIMELINE del video, basata su --fps sorgente).
+        # elapsed_s/processing_fps: COMPUTATION TIME (wall-clock to
+        # process the video), not to be confused with lifespan_median_s
+        # (a track's average duration on the video's TIMELINE, based on
+        # the source --fps).
         "elapsed_s": round(elapsed_s, 1),
         "processing_fps": round(n_frames / elapsed_s, 2) if elapsed_s > 0 else 0.0,
     }
@@ -185,26 +185,25 @@ def run_benchmark(methods: list[str], *, source, fps: float, device: str | None 
                    sam_chunk_sizes: list[int] = (600,), sam_overlaps: list[int] = (50,),
                    sam_redetect_everys: list[int | None] = (None,),
                    **kwargs) -> pd.DataFrame:
-    """Esegue tutti i `methods` (nell'ordine dato) sullo stesso `source` e
-    ritorna un DataFrame con una riga per combinazione NON saltata. Colonna
-    mancante di un metodo saltato: semplicemente assente dal risultato,
-    non una riga con valori nulli -- il chiamante vede subito quanti/quali
-    metodi hanno davvero girato.
+    """Runs all `methods` (in the given order) on the same `source` and
+    returns a DataFrame with one row per NON-skipped combination. Missing
+    column for a skipped method: simply absent from the result, not a row
+    with null values -- the caller immediately sees how many/which
+    methods actually ran.
 
-    `sam_chunk_sizes`/`sam_overlaps`/`sam_redetect_everys` (liste, default
-    un solo valore ciascuna -- comportamento originale invariato se non
-    specificate): per i metodi che usano davvero questi parametri
-    (`backend` != "yolo") si esegue il prodotto cartesiano di tutte le
-    combinazioni, vedi il docstring del modulo per il perche' (nessun modo
-    di sapere a priori quale combinazione va bene per una registrazione
-    specifica). Per "yolo" (che li ignora) si esegue UN SOLO run, non
-    ripetuto per ogni combinazione -- sprecherebbe tempo per righe
-    identiche."""
+    `sam_chunk_sizes`/`sam_overlaps`/`sam_redetect_everys` (lists,
+    default a single value each -- original behavior unchanged if not
+    specified): for methods that actually use these parameters (`backend`
+    != "yolo") the cartesian product of all combinations is run, see the
+    module docstring for why (no way to know in advance which
+    combination works for a specific recording). For "yolo" (which
+    ignores them) a SINGLE run is executed, not repeated for every
+    combination -- it would waste time on identical rows."""
     device = device or detect_default_device()
     rows = []
     for method in methods:
         if method not in METHOD_PRESETS:
-            raise ValueError(f"metodo sconosciuto: {method!r} (atteso uno tra {sorted(METHOD_PRESETS)})")
+            raise ValueError(f"unknown method: {method!r} (expected one of {sorted(METHOD_PRESETS)})")
         backend = METHOD_PRESETS[method]["backend"]
         sweeping = backend != "yolo"
         combos = (
@@ -214,7 +213,7 @@ def run_benchmark(methods: list[str], *, source, fps: float, device: str | None 
         multi_combo = sweeping and len(combos) > 1
         for chunk_size, overlap, redetect_every in combos:
             if sweeping and chunk_size <= overlap:
-                print(f"[{method}] saltata combinazione non valida: "
+                print(f"[{method}] skipped invalid combination: "
                       f"chunk_size={chunk_size} <= overlap={overlap}")
                 continue
             label = method
@@ -233,12 +232,13 @@ def run_benchmark(methods: list[str], *, source, fps: float, device: str | None 
 
 
 def _parse_int_list(raw: str, *, allow_none: bool = False) -> list[int | None]:
-    """'600,300' -> [600, 300]. Un elemento vuoto tra le virgole (es.
-    '100,') diventa `None` se `allow_none=True` -- serve a includere il
-    caso "disattivato" (redetect_every=None) nella stessa sweep invece di
-    dover lanciare un comando separato. Stringa vuota/tutta vuota ->
-    `[None]` se `allow_none`, altrimenti lista vuota (errore a valle, un
-    parametro senza `allow_none` deve avere almeno un valore)."""
+    """'600,300' -> [600, 300]. An empty element between commas (e.g.
+    '100,') becomes `None` if `allow_none=True` -- used to include the
+    "disabled" case (redetect_every=None) in the same sweep instead of
+    having to launch a separate command. Empty/all-empty string ->
+    `[None]` if `allow_none`, otherwise an empty list (a downstream
+    error, a parameter without `allow_none` must have at least one
+    value)."""
     values: list[int | None] = []
     for part in raw.split(","):
         part = part.strip()
@@ -254,47 +254,47 @@ def _parse_int_list(raw: str, *, allow_none: bool = False) -> list[int | None]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Confronta i backend di tracking (YOLO/SAM 3.1/SAM2, con/senza "
-                     "reseeding di persone nuove) sullo stesso video: quante identita' "
-                     "'grezze' crea ciascuno, quanto durano le tracce, quanto e' veloce. "
-                     "Nessuna ground truth richiesta -- vedi il docstring del modulo.")
-    parser.add_argument("--source", required=True, help="Percorso video")
+        description="Compares tracking backends (YOLO/SAM 3.1/SAM2, with/without "
+                     "reseeding of new people) on the same video: how many 'raw' "
+                     "identities each one creates, how long tracks last, how fast it is. "
+                     "No ground truth required -- see the module docstring.")
+    parser.add_argument("--source", required=True, help="Video path")
     parser.add_argument("--fps", type=float, required=True,
-                         help="Frame rate della sorgente -- usato per convertire la durata "
-                              "mediana delle tracce da frame a secondi (lifespan_median_s)")
+                         help="Source frame rate -- used to convert the median track "
+                              "duration from frames to seconds (lifespan_median_s)")
     parser.add_argument("--methods", default=",".join(METHOD_PRESETS),
-                         help=f"Elenco separato da virgole tra {sorted(METHOD_PRESETS)} "
-                              f"(default: tutti)")
+                         help=f"Comma-separated list among {sorted(METHOD_PRESETS)} "
+                              f"(default: all)")
     parser.add_argument("--device", default=None,
-                         help="Sovrascrive l'auto-rilevamento (cuda/mps/cpu)")
+                         help="Overrides auto-detection (cuda/mps/cpu)")
     parser.add_argument("--scale", default="s", choices=["n", "s", "m"],
-                         help="Taglia del modello YOLO (usato come tracker per 'yolo', "
-                              "e come proposer di prompt per sam31/samurai)")
+                         help="YOLO model size (used as the tracker for 'yolo', "
+                              "and as the prompt proposer for sam31/samurai)")
     parser.add_argument("--conf-threshold", type=float, default=0.1)
     parser.add_argument("--tracker", default="bytetrack.yaml",
-                         help="Config ByteTrack (solo per il metodo 'yolo')")
+                         help="ByteTrack config (only for the 'yolo' method)")
     parser.add_argument("--max-people", type=int, default=None,
-                         help="Numero noto di partecipanti alla sessione, se lo conosci -- "
-                              "usato come tetto per YOLO e per interpretare n_raw_ids "
-                              "(molto maggiore del numero reale = identita' perse/reinventate)")
+                         help="Known number of session participants, if you know it -- "
+                              "used as a cap for YOLO and to interpret n_raw_ids "
+                              "(much higher than the real number = lost/reinvented identities)")
     parser.add_argument("--sam-chunk-size", default="600",
-                         help="Uno o piu' valori separati da virgola (es. '300,600') -- con "
-                              "piu' di un valore si esegue la sweep su tutte le combinazioni "
-                              "con --sam-overlap/--sam-redetect-every (solo sam31/sam2, vedi "
-                              "il docstring del modulo). Default: '600' (un solo run, come prima)")
+                         help="One or more comma-separated values (e.g. '300,600') -- with "
+                              "more than one value, the sweep runs over all combinations "
+                              "with --sam-overlap/--sam-redetect-every (sam31/sam2 only, see "
+                              "the module docstring). Default: '600' (a single run, as before)")
     parser.add_argument("--sam-overlap", default="50",
-                         help="Come --sam-chunk-size, uno o piu' valori separati da virgola. "
+                         help="Like --sam-chunk-size, one or more comma-separated values. "
                               "Default: '50'")
     parser.add_argument("--sam-redetect-every", default="",
-                         help="Uno o piu' valori separati da virgola (es. '100,200'). Un "
-                              "elemento vuoto tra le virgole (es. '100,') include anche il caso "
-                              "'disattivato' nella stessa sweep. Default: '' (disattivato, un "
-                              "solo run, come prima) -- ri-esegue YOLO ogni N frame dentro il "
-                              "chunk invece che solo all'inizio, vedi ChunkedVideoPredictorBackend "
-                              "in segmentation/sam_backend.py")
+                         help="One or more comma-separated values (e.g. '100,200'). An "
+                              "empty element between commas (e.g. '100,') also includes the "
+                              "'disabled' case in the same sweep. Default: '' (disabled, a "
+                              "single run, as before) -- reruns YOLO every N frames inside "
+                              "the chunk instead of only at the start, see "
+                              "ChunkedVideoPredictorBackend in segmentation/sam_backend.py")
     parser.add_argument("--sam-text-prompt", default=None,
-                         help="Prompt testuale per la scoperta persone via SAM 3.1 "
-                              "(es. 'person'), svincolata da YOLO -- ignorato per gli altri metodi")
+                         help="Text prompt for people discovery via SAM 3.1 "
+                              "(e.g. 'person'), independent from YOLO -- ignored for other methods")
     parser.add_argument("--out", default="benchmark_results.csv")
     args = parser.parse_args()
 
@@ -310,10 +310,10 @@ def main():
         sam_redetect_everys=sam_redetect_everys, sam_text_prompt=args.sam_text_prompt,
     )
     if df.empty:
-        print("Nessun metodo eseguito (tutti saltati) -- niente da salvare.")
+        print("No method ran (all skipped) -- nothing to save.")
         return
     df.to_csv(args.out, index=False)
-    print(f"\nSalvato {args.out}:\n")
+    print(f"\nSaved {args.out}:\n")
     print(df.to_string(index=False))
 
 

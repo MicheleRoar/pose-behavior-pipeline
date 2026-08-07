@@ -1,26 +1,26 @@
 """
 features.py
 ============
-Estrazione di feature comportamentali da sequenze temporali di keypoint 2D
-(schema COCO-17), pensate come "mattoncini" riutilizzabili per l'analisi di
-video di interazione bambino-caregiver.
+Extraction of behavioral features from 2D keypoint time series (COCO-17
+schema), designed as reusable "building blocks" for analyzing
+child-caregiver interaction videos.
 
 Design:
-- Nessuna dipendenza da un modello di pose estimation specifico: tutte le
-  funzioni lavorano su array numpy (n_frame, 17, 2/3), quindi funzionano sia
-  con output di Ultralytics YOLO-pose sia con MediaPipe/OpenPose, una volta
-  rimappati sullo schema COCO-17.
-- Le feature sono scelte per riflettere marker discussi in letteratura per
-  lo studio del neurosviluppo infantile via video (vedi README):
-    * angoli articolari e loro variabilità (postura, controllo motorio)
-    * velocità/energia di movimento
-    * indice di simmetria sinistra/destra
-    * "score" di movimento ripetitivo (stereotipie) via autocorrelazione
-    * prossimità e sincronia tra due persone tracciate (bambino/caregiver)
+- No dependency on a specific pose estimation model: all functions
+  operate on numpy arrays (n_frame, 17, 2/3), so they work both with
+  Ultralytics YOLO-pose output and with MediaPipe/OpenPose, once remapped
+  to the COCO-17 schema.
+- Features are chosen to reflect markers discussed in the literature for
+  studying child neurodevelopment via video (see README):
+    * joint angles and their variability (posture, motor control)
+    * movement velocity/energy
+    * left/right symmetry index
+    * repetitive movement "score" (stereotypies) via autocorrelation
+    * proximity and synchrony between two tracked people (child/caregiver)
 
-Nota metodologica: queste feature sono un punto di partenza esplorativo, non
-marker diagnostici validati. Qualunque uso clinico richiede validazione su
-dati annotati e supervisione di personale qualificato.
+Methodological note: these features are an exploratory starting point,
+not validated diagnostic markers. Any clinical use requires validation on
+annotated data and supervision by qualified personnel.
 """
 
 from __future__ import annotations
@@ -35,12 +35,12 @@ from pose.geometry import angle_at as _angle_at
 
 
 def compute_joint_angles(frame_kpts: np.ndarray) -> dict[str, float]:
-    """Calcola gli angoli articolari definiti in JOINT_ANGLE_TRIPLETS per un
-    singolo frame.
+    """Computes the joint angles defined in JOINT_ANGLE_TRIPLETS for a
+    single frame.
 
     Parameters
     ----------
-    frame_kpts : array (17, 2) con le coordinate (x, y) dei keypoint COCO-17.
+    frame_kpts : array (17, 2) with the (x, y) coordinates of the COCO-17 keypoints.
     """
     angles = {}
     for name, (a_name, b_name, c_name) in JOINT_ANGLE_TRIPLETS.items():
@@ -50,50 +50,50 @@ def compute_joint_angles(frame_kpts: np.ndarray) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# Cinematica: velocità ed energia di movimento
+# Kinematics: velocity and movement energy
 # ---------------------------------------------------------------------------
 
 def compute_joint_speed(kpts_sequence: np.ndarray, fps: float) -> pd.DataFrame:
-    """Velocità (unità/secondo) di ciascun keypoint lungo la sequenza.
+    """Velocity (units/second) of each keypoint along the sequence.
 
     Parameters
     ----------
     kpts_sequence : array (n_frame, 17, 2)
-    fps : frame rate del video
+    fps : video frame rate
 
     Returns
     -------
-    DataFrame (n_frame, 17) con la velocità istantanea di ogni keypoint
-    (il primo frame è NaN, non essendoci un frame precedente).
+    DataFrame (n_frame, 17) with the instantaneous velocity of each
+    keypoint (the first frame is NaN, as there's no previous frame).
     """
-    diffs = np.diff(kpts_sequence, axis=0) * fps  # unità/secondo
+    diffs = np.diff(kpts_sequence, axis=0) * fps  # units/second
     speed = np.linalg.norm(diffs, axis=2)  # (n_frame-1, 17)
     speed = np.vstack([np.full((1, speed.shape[1]), np.nan), speed])
     return pd.DataFrame(speed, columns=[k for k in KP])
 
 
 def movement_energy(kpts_sequence: np.ndarray, fps: float) -> np.ndarray:
-    """Proxy dell'energia cinetica complessiva per frame: somma delle
-    velocità al quadrato su tutti i keypoint. Utile come indice sintetico
-    di "quanto si muove" una persona in un dato istante.
+    """Proxy for overall kinetic energy per frame: sum of squared
+    velocities across all keypoints. Useful as a synthetic index of "how
+    much" a person is moving at a given instant.
     """
     speed_df = compute_joint_speed(kpts_sequence, fps)
     return (speed_df ** 2).sum(axis=1).to_numpy()
 
 
 # ---------------------------------------------------------------------------
-# Simmetria sinistra/destra
+# Left/right symmetry
 # ---------------------------------------------------------------------------
 
 def symmetry_index(kpts_sequence: np.ndarray, fps: float) -> pd.Series:
-    """Indice di simmetria per ciascuna coppia sinistra/destra, definito come
+    """Symmetry index for each left/right pair, defined as
 
         SI = |v_left - v_right| / (v_left + v_right)
 
-    calcolato sulla velocità media di ciascun arto lungo la sequenza.
-    SI = 0 -> perfettamente simmetrico, SI -> 1 -> fortemente asimmetrico.
-    Riferimento concettuale: studi su asimmetrie di movimento e midline
-    postural control in ASD (vedi README).
+    computed on the average velocity of each limb along the sequence.
+    SI = 0 -> perfectly symmetric, SI -> 1 -> strongly asymmetric.
+    Conceptual reference: studies on movement asymmetries and midline
+    postural control in ASD (see README).
     """
     speed_df = compute_joint_speed(kpts_sequence, fps)
     out = {}
@@ -108,24 +108,24 @@ def symmetry_index(kpts_sequence: np.ndarray, fps: float) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
-# Movimento ripetitivo / stereotipie
+# Repetitive movement / stereotypies
 # ---------------------------------------------------------------------------
 
 def repetitive_motion_score(signal: np.ndarray, fps: float,
                              min_freq_hz: float = 0.5,
                              max_freq_hz: float = 8.0) -> dict[str, float]:
-    """Quantifica quanto un segnale 1D (es. velocità di un polso) è
-    dominato da un'oscillazione periodica in una banda di frequenza
-    plausibile per movimenti ripetitivi manuali (stereotipie).
+    """Quantifies how much a 1D signal (e.g. a wrist's velocity) is
+    dominated by a periodic oscillation in a frequency band plausible for
+    repetitive manual movements (stereotypies).
 
-    Approccio: densità spettrale di potenza (FFT) + rapporto tra la potenza
-    del picco dominante nella banda [min_freq_hz, max_freq_hz] e la potenza
-    totale del segnale ("peak power ratio"). Un valore alto indica un
-    movimento fortemente periodico in quella banda.
+    Approach: power spectral density (FFT) + ratio between the dominant
+    peak's power in the band [min_freq_hz, max_freq_hz] and the signal's
+    total power ("peak power ratio"). A high value indicates a strongly
+    periodic movement in that band.
 
-    Nota: la banda di default è un punto di partenza ragionevole per
-    movimenti manuali ripetitivi; la banda ottimale va validata su dati
-    reali/annotati per il contesto clinico specifico.
+    Note: the default band is a reasonable starting point for repetitive
+    manual movements; the optimal band should be validated on
+    real/annotated data for the specific clinical context.
     """
     signal = np.nan_to_num(signal - np.nanmean(signal))
     n = len(signal)
@@ -136,7 +136,7 @@ def repetitive_motion_score(signal: np.ndarray, fps: float,
     power = np.abs(np.fft.rfft(signal)) ** 2
 
     band_mask = (freqs >= min_freq_hz) & (freqs <= max_freq_hz)
-    total_power = power[1:].sum()  # esclude componente DC
+    total_power = power[1:].sum()  # excludes the DC component
     if total_power < 1e-12 or not band_mask.any():
         return {"peak_freq_hz": np.nan, "peak_power_ratio": 0.0}
 
@@ -151,18 +151,18 @@ def repetitive_motion_score(signal: np.ndarray, fps: float,
 
 
 # ---------------------------------------------------------------------------
-# Interazione tra due persone (es. bambino-caregiver)
+# Interaction between two people (e.g. child-caregiver)
 # ---------------------------------------------------------------------------
 
 def hip_center(frame_kpts: np.ndarray) -> np.ndarray:
-    """Centro del bacino, usato come proxy della posizione del corpo."""
+    """Pelvis center, used as a proxy for body position."""
     return (frame_kpts[KP["left_hip"]] + frame_kpts[KP["right_hip"]]) / 2.0
 
 
 def proximity_series(seq_a: np.ndarray, seq_b: np.ndarray) -> np.ndarray:
-    """Distanza euclidea tra i centri-bacino di due persone tracciate,
-    frame per frame. Le due sequenze devono avere la stessa lunghezza ed
-    essere allineate temporalmente (stesso indice frame).
+    """Euclidean distance between the hip-centers of two tracked people,
+    frame by frame. The two sequences must have the same length and be
+    temporally aligned (same frame index).
     """
     centers_a = np.array([hip_center(f) for f in seq_a])
     centers_b = np.array([hip_center(f) for f in seq_b])
@@ -171,9 +171,9 @@ def proximity_series(seq_a: np.ndarray, seq_b: np.ndarray) -> np.ndarray:
 
 def windowed_synchrony(signal_a: np.ndarray, signal_b: np.ndarray,
                         window: int, step: int) -> pd.DataFrame:
-    """Correlazione di Pearson tra due segnali di movimento (es. energia
-    cinetica di bambino e caregiver) calcolata su finestre scorrevoli, come
-    proxy semplice di sincronia motoria diadica.
+    """Pearson correlation between two movement signals (e.g. child's and
+    caregiver's kinetic energy) computed over sliding windows, as a
+    simple proxy for dyadic motor synchrony.
     """
     n = min(len(signal_a), len(signal_b))
     rows = []
@@ -189,25 +189,26 @@ def windowed_synchrony(signal_a: np.ndarray, signal_b: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# Postura, attività e auto-contatto
+# Posture, activity, and self-touch
 # ---------------------------------------------------------------------------
 
 def torso_length(frame_kpts: np.ndarray) -> float:
-    """Distanza spalle-bacino in un frame, usata come unità di scala della
-    persona (invariante rispetto alla distanza dalla camera) per normalizzare
-    altre feature (escursione verticale, self-touch)."""
+    """Shoulder-to-hip distance in a frame, used as the person's scale
+    unit (invariant to distance from the camera) to normalize other
+    features (vertical excursion, self-touch)."""
     shoulder_center = (frame_kpts[KP["left_shoulder"]] + frame_kpts[KP["right_shoulder"]]) / 2.0
     return float(np.linalg.norm(shoulder_center - hip_center(frame_kpts)))
 
 
 def vertical_excursion(kpts_sequence: np.ndarray, normalize: bool = True) -> float:
-    """Escursione verticale (max - min) del centro-bacino lungo la sequenza:
-    proxy di transizioni posturali (seduto/in piedi/accovacciato), non una
-    stima di statura (richiederebbe calibrazione della camera).
+    """Vertical excursion (max - min) of the hip-center along the
+    sequence: a proxy for postural transitions (sitting/standing/
+    crouching), not a height estimate (would require camera calibration).
 
-    Se `normalize=True` (default), il risultato è espresso in "lunghezze di
-    busto" (distanza spalle-bacino media), rendendolo confrontabile anche a
-    distanze diverse dalla camera; altrimenti è in pixel.
+    If `normalize=True` (default), the result is expressed in "torso
+    lengths" (average shoulder-to-hip distance), making it comparable
+    even at different distances from the camera; otherwise it's in
+    pixels.
     """
     centers_y = np.array([hip_center(f)[1] for f in kpts_sequence])
     valid = centers_y[~np.isnan(centers_y)]
@@ -225,11 +226,11 @@ def vertical_excursion(kpts_sequence: np.ndarray, normalize: bool = True) -> flo
 
 
 def activity_ratio(energy_series: np.ndarray, threshold: float) -> float:
-    """Frazione di frame con energia di movimento sopra `threshold`: proxy
-    di quanto tempo la persona passa in movimento vs. relativamente ferma.
-    La soglia va calibrata sul contesto (unità = somma dei quadrati delle
-    velocità per keypoint, la stessa di `movement_energy`); non esiste un
-    valore universalmente corretto.
+    """Fraction of frames with movement energy above `threshold`: a proxy
+    for how much time the person spends moving vs. relatively still. The
+    threshold must be calibrated to the context (units = sum of squared
+    velocities per keypoint, same as `movement_energy`); there is no
+    universally correct value.
     """
     valid = energy_series[~np.isnan(energy_series)]
     if len(valid) == 0:
@@ -238,14 +239,15 @@ def activity_ratio(energy_series: np.ndarray, threshold: float) -> float:
 
 
 def self_touch_score(wrist_xy: np.ndarray, head_xy: np.ndarray, scale: float) -> float:
-    """Punteggio 0-1 di quanto un polso è vicino alla testa, come proxy di
-    auto-contatto (mano al volto/capo). Normalizzato sulla scala della
-    persona (`torso_length`, o larghezza spalle) così il punteggio è
-    confrontabile indipendentemente dalla distanza dalla camera.
+    """0-1 score of how close a wrist is to the head, as a proxy for
+    self-contact (hand to face/head). Normalized by the person's scale
+    (`torso_length`, or shoulder width) so the score is comparable
+    regardless of distance from the camera.
 
-    1.0 = polso a contatto con la testa, 0.0 = distanza >= 1 unità di scala.
-    Non distingue il motivo del contatto (autoregolazione, prurito,
-    comportamento autolesivo, ecc.) — è solo un indicatore di frequenza.
+    1.0 = wrist in contact with the head, 0.0 = distance >= 1 scale unit.
+    Doesn't distinguish the reason for the contact (self-regulation,
+    itching, self-injurious behavior, etc.) -- it's only a frequency
+    indicator.
     """
     if scale < 1e-6 or np.isnan(scale):
         return np.nan
@@ -254,12 +256,12 @@ def self_touch_score(wrist_xy: np.ndarray, head_xy: np.ndarray, scale: float) ->
 
 
 # ---------------------------------------------------------------------------
-# Orchestrazione: costruzione della tabella feature per una persona
+# Orchestration: building the feature table for a person
 # ---------------------------------------------------------------------------
 
 @dataclass
 class PersonFeatureTable:
-    """Tabella tidy (una riga per frame) di feature per una persona tracciata."""
+    """Tidy table (one row per frame) of features for a tracked person."""
     track_id: int
     frame_index: np.ndarray
     angles: pd.DataFrame
@@ -275,8 +277,8 @@ class PersonFeatureTable:
 
 
 def build_person_features(kpts_sequence: np.ndarray, track_id: int, fps: float) -> PersonFeatureTable:
-    """Costruisce la tabella di feature per una persona a partire dalla
-    sequenza dei suoi keypoint (n_frame, 17, 2).
+    """Builds the feature table for a person from their keypoint sequence
+    (n_frame, 17, 2).
     """
     angles = pd.DataFrame([compute_joint_angles(f) for f in kpts_sequence])
     speed = compute_joint_speed(kpts_sequence, fps)

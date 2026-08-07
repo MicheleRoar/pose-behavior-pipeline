@@ -16,11 +16,11 @@
 
 * { box-sizing: border-box; }
 
-/* Utility generica per nascondere un elemento via classList (usata da piu'
-   elementi non correlati: video-check, arch-hint, sam-chunk-fields, ...) --
-   prima esisteva solo come regola specifica per-elemento (.check-icon.hidden,
-   #video-frame.hidden), duplicata qui in forma generica per i nuovi campi
-   SAM 3.1/SAM2 invece di aggiungerne una scoped in piu' per ciascuno. */
+/* Generic utility to hide an element via classList (used by several
+   unrelated elements: video-check, arch-hint, sam-chunk-fields, ...) --
+   it used to exist only as an element-specific rule (.check-icon.hidden,
+   #video-frame.hidden), duplicated here in generic form for the new
+   SAM 3.1/SAM2 fields instead of adding yet another scoped one for each. */
 .hidden { display: none; }
 
 html, body {
@@ -274,13 +274,13 @@ html, body {
 }
 
 .video-frame-wrap {
-  /* Niente bordo/cornice intorno al video: su un pannello di dimensioni
-     fisse un riquadro visibile avrebbe reso ancora piu' evidente lo spazio
-     "sprecato" del letterboxing quando l'aspect ratio del video non
-     coincide con quello del pannello -- qui il nero del video si fonde con
-     lo sfondo, cosi' l'occhio percepisce solo il video, non un riquadro
-     piu' grande di lui. object-fit:contain (sotto) resta invariato: il
-     frame va ingrandito al massimo SENZA mai tagliarlo. */
+  /* No border/frame around the video: on a fixed-size panel, a visible
+     box would make the "wasted" letterboxing space even more obvious
+     when the video's aspect ratio doesn't match the panel's -- here the
+     video's black blends with the background, so the eye perceives only
+     the video, not a box bigger than it. object-fit:contain (below)
+     stays unchanged: the frame must be enlarged as much as possible
+     WITHOUT ever cropping it. */
   flex: 1;
   background: #000;
   border-radius: 4px;

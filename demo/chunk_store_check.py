@@ -1,10 +1,10 @@
 """
 chunk_store_check.py
 ======================
-Verifica `segmentation/chunk_store.py` (round-trip save/load su disco) con
-`SegFrameResult` sintetici -- nessuna dipendenza da SAM/GPU.
+Verifies `segmentation/chunk_store.py` (save/load round-trip to disk) with
+synthetic `SegFrameResult` -- no SAM/GPU dependency.
 
-Uso:
+Usage:
     python demo/chunk_store_check.py
 """
 
@@ -30,7 +30,7 @@ def _fake_results() -> list[SegFrameResult]:
         SegFrameResult(frame_index=1, frame=np.zeros((4, 4, 3), dtype=np.uint8), people=[
             (10, np.array([1.0, 1.0, 11.0, 11.0]), np.array([[1, 1], [11, 1], [11, 11]]), 0.85),
         ]),
-        SegFrameResult(frame_index=2, frame=np.zeros((4, 4, 3), dtype=np.uint8), people=[]),  # frame senza nessuno
+        SegFrameResult(frame_index=2, frame=np.zeros((4, 4, 3), dtype=np.uint8), people=[]),  # frame with nobody
     ]
 
 
@@ -43,7 +43,7 @@ def part1_round_trip_preserves_all_fields():
         assert os.path.exists(path)
 
         records = load_chunk(path)
-        assert len(records) == 3, "2 persone nel frame 0 + 1 nel frame 1 + 0 nel frame 2 = 3 righe"
+        assert len(records) == 3, "2 people in frame 0 + 1 in frame 1 + 0 in frame 2 = 3 rows"
 
         by_track = {(r.frame_index, r.track_id): r for r in records}
         assert (0, 10) in by_track and (0, 20) in by_track and (1, 10) in by_track
@@ -63,7 +63,7 @@ def part2_empty_chunk_produces_valid_empty_file():
         empty_results = [SegFrameResult(frame_index=0, frame=np.zeros((2, 2, 3), dtype=np.uint8), people=[])]
         path = save_chunk(empty_results, tmp_dir, chunk_index=0)
         records = load_chunk(path)
-        assert records == [], "chunk senza nessuna persona deve dare lista vuota, non un errore"
+        assert records == [], "a chunk with nobody in it must yield an empty list, not an error"
         print("PASS part2_empty_chunk_produces_valid_empty_file")
     finally:
         shutil.rmtree(tmp_dir)
@@ -85,7 +85,7 @@ def main():
     part1_round_trip_preserves_all_fields()
     part2_empty_chunk_produces_valid_empty_file()
     part3_multiple_chunks_get_distinct_sortable_filenames()
-    print("\nTutti i test di chunk_store.py sono passati.")
+    print("\nAll chunk_store.py tests passed.")
 
 
 if __name__ == "__main__":

@@ -1,21 +1,21 @@
 """
 mediapipe_models_check.py
 ============================
-Verifica `common/mediapipe_models.py::resolve_model_path()` -- la logica
-condivisa di risoluzione/download automatico dei modelli MediaPipe Tasks
-usata da `pose/mediapipe_pose.py`, `pose/hands.py` e `pose/gaze_head.py`
-(estratta da li' per non triplicarla) -- SENZA importare `mediapipe` ne'
-fare download di rete veri (`_download` sostituita da un finto che crea
-solo un file vuoto).
+Verifies `common/mediapipe_models.py::resolve_model_path()` -- the shared
+resolution/auto-download logic for MediaPipe Tasks models used by
+`pose/mediapipe_pose.py`, `pose/hands.py` and `pose/gaze_head.py`
+(extracted from there to avoid tripling it) -- WITHOUT importing
+`mediapipe` or making real network downloads (`_download` replaced by a
+fake that only creates an empty file).
 
-Nato da un bug reale osservato da Michele su due modelli diversi
-(pose_landmarker_lite.task, poi hand_landmarker.task/face_landmarker.task
-con lo stesso identico problema): lanciando la pipeline da una cwd
-diversa da quella in cui aveva scaricato il file a mano, MediaPipe
-falliva con "unable to find <nome modello>" -- causa: il default era il
-nome nudo del file, risolto da MediaPipe come path RELATIVO ALLA CWD.
+Born from a real bug observed by Michele on two different models
+(pose_landmarker_lite.task, then hand_landmarker.task/face_landmarker.task
+with the exact same issue): launching the pipeline from a cwd different
+from the one where the file had been downloaded by hand, MediaPipe would
+fail with "unable to find <model name>" -- cause: the default was the
+bare file name, resolved by MediaPipe as a path RELATIVE TO THE CWD.
 
-Uso:
+Usage:
     python demo/mediapipe_models_check.py
 """
 
@@ -34,26 +34,26 @@ _FAKE_BASENAME = "fake_landmarker.task"
 
 
 def part1_existing_explicit_path_used_as_is():
-    # Un path che l'utente ha passato ESPLICITAMENTE e che esiste gia' --
-    # nessuna risoluzione/download, usato cosi' com'e' anche se il nome
-    # non ha nulla a che vedere con quello di default.
+    # A path the user passed EXPLICITLY and that already exists -- no
+    # resolution/download, used as-is even if the name has nothing to do
+    # with the default one.
     tmp_dir = tempfile.mkdtemp()
     try:
-        custom_path = os.path.join(tmp_dir, "un_nome_qualsiasi.task")
+        custom_path = os.path.join(tmp_dir, "some_arbitrary_name.task")
         Path(custom_path).write_bytes(b"fake model bytes")
         result = mm.resolve_model_path(custom_path, download_url=_FAKE_URL)
-        assert result == custom_path, f"un path esistente va restituito invariato, ottenuto {result}"
+        assert result == custom_path, f"an existing path must be returned unchanged, got {result}"
         print("PASS part1_existing_explicit_path_used_as_is")
     finally:
         shutil.rmtree(tmp_dir)
 
 
 def part2_custom_missing_path_not_touched():
-    # Path custom (nome diverso dal default nudo) che NON esiste: nessun
-    # tentativo di indovinare/scaricare -- restituito invariato, cosi' il
-    # chiamante (MediaPipe) fallisce con l'errore originale, piu' chiaro
-    # di un download silenzioso nel posto sbagliato.
-    missing = "/percorso/inesistente/un_nome_qualsiasi.task"
+    # Custom path (name different from the bare default) that does NOT
+    # exist: no attempt to guess/download -- returned unchanged, so the
+    # caller (MediaPipe) fails with the original error, clearer than a
+    # silent download in the wrong place.
+    missing = "/nonexistent/path/some_arbitrary_name.task"
     result = mm.resolve_model_path(missing, download_url=_FAKE_URL)
     assert result == missing
     print("PASS part2_custom_missing_path_not_touched")
@@ -64,9 +64,9 @@ def part3_bare_default_name_reuses_existing_cache_file():
     original_cache_dir = mm.MODELS_CACHE_DIR
     original_download = mm._download
     original_cwd = os.getcwd()
-    # resolve_model_path() controlla PRIMA se il nome nudo esiste gia'
-    # nella cwd corrente -- ci si sposta in una cartella pulita per non
-    # dipendere da eventuali file lasciati da run precedenti.
+    # resolve_model_path() FIRST checks whether the bare name already
+    # exists in the current cwd -- we move to a clean folder so as not to
+    # depend on any files left over from previous runs.
     os.chdir(tmp_dir)
     download_calls = []
     mm._download = lambda url, dest: download_calls.append((url, dest))
@@ -79,7 +79,7 @@ def part3_bare_default_name_reuses_existing_cache_file():
 
         result = mm.resolve_model_path(_FAKE_BASENAME, download_url=_FAKE_URL)
         assert result == str(cache_path)
-        assert download_calls == [], "il file e' gia' nella cache -- nessun download da rifare"
+        assert download_calls == [], "the file is already in the cache -- no download needed again"
         print("PASS part3_bare_default_name_reuses_existing_cache_file")
     finally:
         mm.MODELS_CACHE_DIR = original_cache_dir
@@ -104,11 +104,11 @@ def part4_bare_default_name_triggers_download_when_missing():
         cache_dir = Path(tmp_dir) / "cache"
         cache_path = cache_dir / _FAKE_BASENAME
         mm.MODELS_CACHE_DIR = cache_dir
-        assert not cache_path.exists(), "precondizione: il file non deve esistere ancora"
+        assert not cache_path.exists(), "precondition: the file must not exist yet"
 
         result = mm.resolve_model_path(_FAKE_BASENAME, download_url=_FAKE_URL)
         assert result == str(cache_path)
-        assert cache_path.exists(), "il download finto avrebbe dovuto creare il file"
+        assert cache_path.exists(), "the fake download should have created the file"
         print("PASS part4_bare_default_name_triggers_download_when_missing")
     finally:
         mm.MODELS_CACHE_DIR = original_cache_dir
@@ -118,21 +118,21 @@ def part4_bare_default_name_triggers_download_when_missing():
 
 
 def part5_default_basename_derived_from_url_not_hardcoded():
-    # Il nome "di default" non e' una costante fissa: e' derivato
-    # dall'ultimo pezzo di download_url -- cosi' lo stesso helper serve
-    # per pose_landmarker_lite.task, hand_landmarker.task E
-    # face_landmarker.task senza bisogno di parametrizzare il nome a parte.
-    other_url = "https://example.invalid/models/altro/float16/1/altro_landmarker.task"
-    missing_altro = "altro_landmarker.task"  # nudo, ma per un URL diverso da _FAKE_URL
-    result = mm.resolve_model_path(missing_altro, download_url=_FAKE_URL)
-    # il basename di missing_altro ("altro_landmarker.task") NON combacia col
-    # basename di _FAKE_URL ("fake_landmarker.task") -- trattato come path
-    # custom mancante, non risolto in cache.
-    assert result == missing_altro, (
-        "un nome nudo che non combacia col basename di download_url va trattato come path "
-        "custom (non risolto/scaricato), non solo perche' 'sembra' un modello MediaPipe"
+    # The "default" name isn't a fixed constant: it's derived from the
+    # last piece of download_url -- so the same helper serves
+    # pose_landmarker_lite.task, hand_landmarker.task AND
+    # face_landmarker.task without needing to parametrize the name separately.
+    other_url = "https://example.invalid/models/other/float16/1/other_landmarker.task"
+    missing_other = "other_landmarker.task"  # bare, but for a URL different from _FAKE_URL
+    result = mm.resolve_model_path(missing_other, download_url=_FAKE_URL)
+    # missing_other's basename ("other_landmarker.task") does NOT match
+    # _FAKE_URL's basename ("fake_landmarker.task") -- treated as a
+    # missing custom path, not resolved to the cache.
+    assert result == missing_other, (
+        "a bare name that doesn't match download_url's basename must be treated as a "
+        "custom path (not resolved/downloaded), not just because it 'looks like' a MediaPipe model"
     )
-    del other_url  # solo per chiarezza del commento sopra, non usato oltre
+    del other_url  # only for clarity of the comment above, not used otherwise
     print("PASS part5_default_basename_derived_from_url_not_hardcoded")
 
 
@@ -142,8 +142,8 @@ def main():
     part3_bare_default_name_reuses_existing_cache_file()
     part4_bare_default_name_triggers_download_when_missing()
     part5_default_basename_derived_from_url_not_hardcoded()
-    print("\nTutti i test di common/mediapipe_models.py (resolve_model_path, senza mediapipe/rete) "
-          "sono passati.")
+    print("\nAll common/mediapipe_models.py tests (resolve_model_path, without mediapipe/network) "
+          "passed.")
 
 
 if __name__ == "__main__":

@@ -1,27 +1,27 @@
 """
 segmentation_demo.py
 =====================
-Pipeline principale ATTUALE (temporanea, vedi seg_estimation.py e README):
-tracking di sagome via YOLO26-seg + ByteTrack, overlay live con contorno
-maschera + etichetta ID, CSV con una riga per (frame, persona). Nessuna
-feature comportamentale a finestra scorrevole per ora (energia di
-movimento, repetitivita', gaze, mani -- vedi pipeline pose, on hold).
+CURRENT main pipeline (temporary, see seg_estimation.py and README):
+silhouette tracking via YOLO26-seg + ByteTrack, live overlay with mask
+outline + ID label, CSV with one row per (frame, person). No
+sliding-window behavioral features for now (movement energy,
+repetitiveness, gaze, hands -- see the pose pipeline, on hold).
 
-Opzionale, con `--with-mediapipe-pose`: applica MediaPipe Pose Landmarker
-in modalita' SINGOLA persona DENTRO il ritaglio di ciascuna sagoma gia'
-tracciata (non un rilevatore multi-persona sull'intero frame -- vedi
-`pose/mediapipe_pose.py` per il perche' di questa scelta), disegna lo
-scheletro sopra la maschera e aggiunge gli angoli articolari istantanei
-(non a finestra scorrevole) al CSV.
+Optional, with `--with-mediapipe-pose`: applies MediaPipe Pose Landmarker
+in SINGLE-person mode INSIDE the crop of each already-tracked silhouette
+(not a multi-person detector on the whole frame -- see
+`pose/mediapipe_pose.py` for why this choice was made), draws the
+skeleton over the mask and adds the instantaneous (not sliding-window)
+joint angles to the CSV.
 
-Uso, su un video gia' registrato:
+Usage, on an already-recorded video:
 
     python segmentation_demo.py --source video.mp4 --fps 15 \\
         --model yolo26s-seg.pt --tracker configs/bytetrack_permissive.yaml \\
         --conf-threshold 0.1 --max-people 2 --out session_seg.csv
 
-Con --no-window elabora senza aprire una finestra (piu' veloce, utile per
-un batch senza bisogno di guardare l'overlay in diretta).
+With --no-window, processes without opening a window (faster, useful for
+a batch run with no need to watch the overlay live).
 """
 
 from __future__ import annotations
@@ -50,34 +50,34 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
                     sam_reseed_new_people: bool = True,
                     sam_redetect_every: int | None = None,
                     sam_text_prompt: str | None = None):
-    """Istanzia il tracker giusto in base a `backend` -- unico punto in cui
-    la scelta YOLO/SAM 3.1/SAM2 si traduce in una classe concreta.
-    Tutti e tre rispettano lo stesso protocollo `SegmentationBackend`
-    (vedi segmentation/backend.py), quindi il resto di questa funzione
-    (sotto) non ha bisogno di sapere quale sia stato scelto. Non piu'
-    "privata" (senza underscore): riusata anche da `benchmark_backends.py`
-    per costruire lo stesso tracker senza passare da `iter_segmentation_
-    frames()` (che disegna un overlay qui inutile).
+    """Instantiates the right tracker based on `backend` -- the single
+    place where the YOLO/SAM 3.1/SAM2 choice translates into a concrete
+    class. All three follow the same `SegmentationBackend` protocol (see
+    segmentation/backend.py), so the rest of this function (below)
+    doesn't need to know which one was chosen. No longer "private" (no
+    underscore): also reused by `benchmark_backends.py` to build the same
+    tracker without going through `iter_segmentation_frames()` (which
+    draws an overlay, useless here).
 
-    `sam_reseed_new_people` (solo sam31/sam2, ignorato con "yolo"):
-    False da' la condizione "SAM puro" per il confronto tra metodi (vedi
-    benchmark_backends.py) -- YOLO propone i box SOLO al primo frame del
-    video, mai per scoprire persone nuove ai confini dei chunk successivi.
-    Default True (comportamento gia' in uso finora, invariato).
+    `sam_reseed_new_people` (sam31/sam2 only, ignored with "yolo"):
+    False gives the "pure SAM" condition for comparing methods (see
+    benchmark_backends.py) -- YOLO proposes boxes ONLY on the video's
+    first frame, never to discover new people at subsequent chunk
+    boundaries. Default True (behavior already in use so far, unchanged).
 
-    `sam_redetect_every` (solo sam31/sam2): richiama YOLO ogni N frame
-    DENTRO il chunk, non solo al suo confine -- risolve il problema
-    "sam2 produce molte meno maschere di yolo+bytetrack sullo stesso
-    video" (YOLO+ByteTrack rileva su ogni frame, altrimenti SAM lo fa una
-    volta ogni `sam_chunk_size` frame), vedi sam_backend.py. `None`
-    (default) = comportamento originale, una sola detection per chunk.
+    `sam_redetect_every` (sam31/sam2 only): reruns YOLO every N frames
+    INSIDE the chunk, not just at its boundary -- solves the "sam2
+    produces far fewer masks than yolo+bytetrack on the same video"
+    problem (YOLO+ByteTrack detects on every frame, whereas SAM otherwise
+    does so once every `sam_chunk_size` frames), see sam_backend.py.
+    `None` (default) = original behavior, a single detection per chunk.
 
-    `sam_text_prompt` (SOLO sam31, ignorato altrove -- SAM2 non ha prompt
-    testuale): se impostato (es. "person"), SAM 3.1 scopre le persone DA
-    SOLO nel chunk invece di affidarsi a YOLO come proposer -- stessa
-    tecnica della pipeline di produzione CHUV (`psifx video tracking sam3
-    inference --text_prompt`), vedi sam31_estimation.py per i dettagli e i
-    limiti di certezza sull'API reale."""
+    `sam_text_prompt` (sam31 ONLY, ignored elsewhere -- SAM2 has no text
+    prompt): if set (e.g. "person"), SAM 3.1 discovers people ON ITS OWN
+    in the chunk instead of relying on YOLO as a proposer -- same
+    technique as the CHUV production pipeline (`psifx video tracking sam3
+    inference --text_prompt`), see sam31_estimation.py for details and
+    the certainty limits about the real API."""
     if backend == "yolo":
         return SegTracker(model_name=model_name, device=device,
                            conf_threshold=conf_threshold, tracker=tracker_config,
@@ -96,7 +96,7 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
                             chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
                             reseed_new_people=sam_reseed_new_people,
                             redetect_every=sam_redetect_every)
-    raise ValueError(f"backend sconosciuto: {backend!r} (atteso 'yolo'|'sam31'|'sam2')")
+    raise ValueError(f"unknown backend: {backend!r} (expected 'yolo'|'sam31'|'sam2')")
 
 
 def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.pt",
@@ -111,36 +111,35 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
                               sam_reseed_new_people: bool = True,
                               sam_redetect_every: int | None = None,
                               sam_text_prompt: str | None = None):
-    """Generatore che contiene TUTTA la logica per-frame della pipeline di
-    segmentazione (tracking, re-id opzionale, pose opzionale per maschera,
-    disegno overlay), condiviso da `run_segmentation()` (CLI, sotto) e da
-    `pipeline_runner.py` (GUI) -- stessa scelta di `iter_live_frames()` in
-    live_demo.py, vedi il suo docstring per il perche'. `seg_reidentifier`
-    e `mediapipe_pose_estimator` vanno costruiti dal chiamante (istanze
-    persistenti per tutta la sessione, non ricreabili qui frame per frame);
-    passare `None` per disattivarli. `mediapipe_pose_estimator` e' un
-    `MediaPipePoseByTrack` (un'istanza MediaPipe indipendente PER PERSONA,
-    non condivisa) -- vedi il suo docstring per il perche' un'unica istanza
-    condivisa fra le persone del frame manderebbe MediaPipe in crash
-    ("Input timestamp must be monotonically increasing").
+    """Generator holding ALL the per-frame logic of the segmentation
+    pipeline (tracking, optional re-id, optional per-mask pose, overlay
+    drawing), shared by `run_segmentation()` (CLI, below) and by
+    `pipeline_runner.py` (GUI) -- same choice as `iter_live_frames()` in
+    live_demo.py, see its docstring for why. `seg_reidentifier` and
+    `mediapipe_pose_estimator` must be built by the caller (instances
+    persistent for the whole session, not recreatable here frame by
+    frame); pass `None` to disable them. `mediapipe_pose_estimator` is a
+    `MediaPipePoseByTrack` (an independent MediaPipe instance PER PERSON,
+    not shared) -- see its docstring for why a single instance shared
+    across the frame's people would crash MediaPipe ("Input timestamp
+    must be monotonically increasing").
 
-    `backend` sceglie il motore di tracking/segmentazione: "yolo" (default,
-    YOLO26-seg + ByteTrack, invariato), "sam31" o "sam2" (vedi
-    segmentation/sam_backend.py -- richiedono device="cuda" e le rispettive
-    librerie installate, non disponibili su mps/cpu). `sam_chunk_size` /
-    `sam_overlap` / `sam_chunk_store_dir` sono usati solo con questi ultimi
-    due (ignorati con "yolo").
+    `backend` selects the tracking/segmentation engine: "yolo" (default,
+    YOLO26-seg + ByteTrack, unchanged), "sam31" or "sam2" (see
+    segmentation/sam_backend.py -- require device="cuda" and the
+    respective libraries installed, not available on mps/cpu).
+    `sam_chunk_size` / `sam_overlap` / `sam_chunk_store_dir` are used only
+    with these last two (ignored with "yolo").
 
-    Disegna SEMPRE l'overlay (maschera, contorno, etichetta ID, +
-    scheletro pose se `mediapipe_pose_estimator` e' attivo) sul frame
-    restituito.
+    ALWAYS draws the overlay (mask, outline, ID label, + pose skeleton if
+    `mediapipe_pose_estimator` is active) on the returned frame.
 
-    Yield per ogni frame processato: `(vis, rows, now, frame_index, raw_ids)`
-    dove `rows` e' la lista di dict (una riga per persona in questo frame,
-    stesso schema del CSV finale -- con in piu' gli angoli articolari
-    `pose_*` se `mediapipe_pose_estimator` e' attivo) e `raw_ids` sono i
-    track_id grezzi di ByteTrack PRIMA dell'eventuale re-id (utile solo per
-    le statistiche di churn stampate da `run_segmentation()`).
+    Yields for every processed frame: `(vis, rows, now, frame_index, raw_ids)`
+    where `rows` is the list of dicts (one row per person in this frame,
+    same schema as the final CSV -- plus the `pose_*` joint angles if
+    `mediapipe_pose_estimator` is active) and `raw_ids` are ByteTrack's
+    raw track_ids BEFORE any re-id (useful only for the churn statistics
+    printed by `run_segmentation()`).
     """
     tracker = build_tracker(
         backend, model_name=model_name, device=device, conf_threshold=conf_threshold,
@@ -184,9 +183,9 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
             label_pos = centroid if not np.isnan(centroid).any() else bbox[:2]
             draw_person_label(vis, label_pos, track_id, color)
 
-            # -- pose DENTRO la maschera tracciata (opzionale): identita'
-            # "presa in prestito" da seg_reid/ByteTrack, vedi
-            # pose/mediapipe_pose.py per il perche' di questo design.
+            # -- pose INSIDE the tracked mask (optional): identity
+            # "borrowed" from seg_reid/ByteTrack, see
+            # pose/mediapipe_pose.py for why this design.
             if mediapipe_pose_estimator is not None:
                 kxy, kconf = mediapipe_pose_estimator.estimate(
                     track_id, frame_result.frame, bbox, timestamp_ms=int(now * 1000))
@@ -214,24 +213,24 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
                       sam_reseed_new_people: bool = True,
                       sam_redetect_every: int | None = None,
                       sam_text_prompt: str | None = None) -> pd.DataFrame:
-    """CLI: consuma `iter_segmentation_frames()` (unica fonte della logica
-    per-frame, condivisa con la GUI), gestisce la finestra cv2 (se
-    show_window) e stampa le statistiche finali di churn/re-id."""
-    # -- re-identificazione (opzionale, richiede --max-people): sostituisce
-    # subito frame_result.people con la versione a person_id stabile, con
-    # tetto rigido su max_people -- vedi seg_reid.py per il perche' e i
-    # limiti (unico punto di wiring, come in live_demo.py per reid.py).
+    """CLI: consumes `iter_segmentation_frames()` (single source of the
+    per-frame logic, shared with the GUI), manages the cv2 window (if
+    show_window) and prints the final churn/re-id statistics."""
+    # -- re-identification (optional, requires --max-people): immediately
+    # replaces frame_result.people with the stable-person_id version,
+    # with a hard cap on max_people -- see seg_reid.py for why and the
+    # limits (single wiring point, as in live_demo.py for reid.py).
     if with_seg_reid and max_people is None:
-        raise ValueError("--with-seg-reid richiede --max-people (il tetto rigido "
-                          "ha senso solo con un numero di persone noto)")
+        raise ValueError("--with-seg-reid requires --max-people (the hard cap "
+                          "only makes sense with a known number of people)")
     seg_reidentifier = SegReIdentifier(max_people=max_people) if with_seg_reid else None
     mediapipe_pose_estimator = (
         MediaPipePoseByTrack(model_path=pose_landmarker_model) if with_mediapipe_pose else None
     )
 
     rows: list[dict] = []
-    raw_id_frame_count: dict[int, int] = defaultdict(int)   # id grezzi assegnati da ByteTrack
-    final_id_frame_count: dict[int, int] = defaultdict(int)  # id finali (= raw se seg_reid disattivo)
+    raw_id_frame_count: dict[int, int] = defaultdict(int)   # raw ids assigned by ByteTrack
+    final_id_frame_count: dict[int, int] = defaultdict(int)  # final ids (= raw if seg_reid off)
     win_name = "segmentation_demo"
     if show_window:
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
@@ -266,94 +265,94 @@ def run_segmentation(source, fps: float, model_name: str = "yolo26s-seg.pt",
 
     n_raw_ids = len(raw_id_frame_count)
     lifespans = sorted(raw_id_frame_count.values())
-    # 15 frame = min_signature_frames di default in reid.py: stesso
-    # riferimento usato in track_stability_check.py, per confrontabilita'.
+    # 15 frames = reid.py's default min_signature_frames: same reference
+    # used in track_stability_check.py, for comparability.
     short_lived = sum(1 for v in lifespans if v < 15)
-    print(f"Frame processati: {n_frames}  |  Id grezzi assegnati da ByteTrack: {n_raw_ids}")
+    print(f"Frames processed: {n_frames}  |  Raw ids assigned by ByteTrack: {n_raw_ids}")
     if lifespans:
-        mediana = lifespans[len(lifespans) // 2]
-        print(f"Durata id grezzi in frame: min={lifespans[0]}  mediana={mediana}  max={lifespans[-1]}")
-        print(f"Id grezzi sotto 15 frame: {short_lived}/{n_raw_ids} ({100 * short_lived / n_raw_ids:.0f}%)")
+        median = lifespans[len(lifespans) // 2]
+        print(f"Raw id duration in frames: min={lifespans[0]}  median={median}  max={lifespans[-1]}")
+        print(f"Raw ids under 15 frames: {short_lived}/{n_raw_ids} ({100 * short_lived / n_raw_ids:.0f}%)")
     if seg_reidentifier is not None:
         n_final_ids = len(final_id_frame_count)
-        print(f"seg_reid: {len(seg_reidentifier.merge_log)} raw track_id ri-associati -> "
-              f"{n_final_ids} id finali (tetto max_people={max_people} rispettato per costruzione)")
+        print(f"seg_reid: {len(seg_reidentifier.merge_log)} raw track_ids re-associated -> "
+              f"{n_final_ids} final ids (max_people={max_people} cap respected by construction)")
 
     df = pd.DataFrame(rows)
     df.to_csv(out_csv, index=False)
-    print(f"Salvate {len(df)} righe in {out_csv}")
+    print(f"Saved {len(df)} rows to {out_csv}")
     return df
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Pipeline di tracking basata su segmentation (YOLO26-seg + ByteTrack), "
-                     "con overlay live e CSV. Nessun keypoint per ora -- vedi seg_estimation.py.")
-    parser.add_argument("--source", required=True, help="Percorso video o indice webcam")
-    parser.add_argument("--fps", type=float, required=True, help="Frame rate della sorgente")
+        description="Segmentation-based tracking pipeline (YOLO26-seg + ByteTrack), "
+                     "with live overlay and CSV. No keypoints for now -- see seg_estimation.py.")
+    parser.add_argument("--source", required=True, help="Video path or webcam index")
+    parser.add_argument("--fps", type=float, required=True, help="Source frame rate")
     parser.add_argument("--model", default="yolo26s-seg.pt",
-                         help="Modello YOLO26 di instance segmentation (yolo26n/s/m/l/x-seg.pt)")
+                         help="YOLO26 instance segmentation model (yolo26n/s/m/l/x-seg.pt)")
     parser.add_argument("--device", default=None,
-                         help="mps | cpu | cuda (default: auto-rilevato -- cuda se una GPU "
-                              "NVIDIA e' disponibile, altrimenti mps su Apple Silicon, "
-                              "altrimenti cpu, vedi common/device.py)")
+                         help="mps | cpu | cuda (default: auto-detected -- cuda if an NVIDIA "
+                              "GPU is available, otherwise mps on Apple Silicon, "
+                              "otherwise cpu, see common/device.py)")
     parser.add_argument("--conf-threshold", type=float, default=0.1,
-                         help="Tenere a o sotto track_low_thresh di ByteTrack (0.1 di default)")
+                         help="Keep at or below ByteTrack's track_low_thresh (0.1 by default)")
     parser.add_argument("--tracker", default="bytetrack.yaml",
-                         help="Config tracker Ultralytics, es. configs/bytetrack_permissive.yaml")
+                         help="Ultralytics tracker config, e.g. configs/bytetrack_permissive.yaml")
     parser.add_argument("--max-people", type=int, default=None,
-                         help="Numero noto di partecipanti alla sessione (2 per 1v1, fino a "
-                              "una decina per un gruppo): tiene solo le N detection piu' "
-                              "sicure per frame; con --with-seg-reid diventa anche un tetto "
-                              "rigido sul numero totale di identita' della sessione")
+                         help="Known number of session participants (2 for 1v1, up to about "
+                              "ten for a group): keeps only the N most confident detections "
+                              "per frame; with --with-seg-reid it also becomes a hard cap "
+                              "on the total number of identities in the session")
     parser.add_argument("--with-seg-reid", action="store_true",
-                         help="Ri-associa i raw track_id di ByteTrack a un numero fisso di "
-                              "person_id stabili (posizione/colore/forma della sagoma, vedi "
-                              "seg_reid.py), garantendo che non vengano MAI creati piu' di "
-                              "--max-people id in tutta la sessione. Richiede --max-people.")
+                         help="Re-associates ByteTrack's raw track_ids to a fixed number of "
+                              "stable person_ids (silhouette position/color/shape, see "
+                              "seg_reid.py), guaranteeing that NEVER more than "
+                              "--max-people ids are created in the whole session. Requires --max-people.")
     parser.add_argument("--with-mediapipe-pose", action="store_true",
-                         help="Applica MediaPipe Pose Landmarker (modalita' singola persona) "
-                              "dentro il ritaglio di ciascuna sagoma tracciata: disegna lo "
-                              "scheletro e aggiunge gli angoli articolari (pose_*) al CSV. "
-                              "Richiede mediapipe + il modello --pose-landmarker-model, vedi "
+                         help="Applies MediaPipe Pose Landmarker (single-person mode) "
+                              "inside the crop of each tracked silhouette: draws the "
+                              "skeleton and adds the joint angles (pose_*) to the CSV. "
+                              "Requires mediapipe + the --pose-landmarker-model model, see "
                               "pose/mediapipe_pose.py.")
     parser.add_argument("--pose-landmarker-model", default="pose_landmarker_lite.task",
-                         help="Modello MediaPipe Pose Landmarker (usato solo con "
+                         help="MediaPipe Pose Landmarker model (used only with "
                               "--with-mediapipe-pose)")
-    parser.add_argument("--out", default="segmentation_session.csv", help="CSV di output")
+    parser.add_argument("--out", default="segmentation_session.csv", help="Output CSV")
     parser.add_argument("--no-window", action="store_true",
-                         help="Esegui senza finestra video (solo log + CSV, piu' veloce)")
+                         help="Run without a video window (log + CSV only, faster)")
     parser.add_argument("--backend", default="yolo", choices=sorted(BACKEND_KEYS),
-                         help="Motore di segmentazione/tracking: 'yolo' (default, YOLO26-seg + "
-                              "ByteTrack) | 'sam31' | 'sam2' (vedi segmentation/sam_backend.py "
-                              "-- richiedono device=cuda e le rispettive librerie installate)")
+                         help="Segmentation/tracking engine: 'yolo' (default, YOLO26-seg + "
+                              "ByteTrack) | 'sam31' | 'sam2' (see segmentation/sam_backend.py "
+                              "-- require device=cuda and the respective libraries installed)")
     parser.add_argument("--sam-chunk-size", type=int, default=600,
-                         help="Solo con --backend sam31/sam2: numero di frame per chunk")
+                         help="Only with --backend sam31/sam2: number of frames per chunk")
     parser.add_argument("--sam-overlap", type=int, default=50,
-                         help="Solo con --backend sam31/sam2: frame in comune tra un chunk "
-                              "e il successivo, usati per la riconciliazione degli id")
+                         help="Only with --backend sam31/sam2: frames shared between one "
+                              "chunk and the next, used for id reconciliation")
     parser.add_argument("--sam-chunk-store-dir", default=None,
-                         help="Solo con --backend sam31/sam2: cartella dove salvare "
-                              "incrementalmente i risultati di ogni chunk (opzionale)")
+                         help="Only with --backend sam31/sam2: folder to incrementally save "
+                              "the results of each chunk (optional)")
     parser.add_argument("--sam-no-reseed-new-people", action="store_true",
-                         help="Solo con --backend sam31/sam2: disattiva la scoperta di "
-                              "persone NUOVE ai confini dei chunk (YOLO propone i box SOLO "
-                              "al primo frame del video). Da' la condizione 'SAM puro' per "
-                              "confrontare con la versione di default (con reseeding) -- "
-                              "vedi benchmark_backends.py e segmentation/sam_backend.py.")
+                         help="Only with --backend sam31/sam2: disables discovery of "
+                              "NEW people at chunk boundaries (YOLO proposes boxes ONLY "
+                              "on the video's first frame). Gives the 'pure SAM' condition "
+                              "for comparing against the default version (with reseeding) -- "
+                              "see benchmark_backends.py and segmentation/sam_backend.py.")
     parser.add_argument("--sam-redetect-every", type=int, default=None,
-                         help="Solo con --backend sam31/sam2: richiama YOLO ogni N frame "
-                              "DENTRO il chunk (non solo al suo confine) per scoprire persone "
-                              "nuove piu' spesso -- utile se sam31/sam2 producono molte meno "
-                              "maschere di yolo+bytetrack sullo stesso video (YOLO+ByteTrack "
-                              "rileva su ogni frame). Default: nessuna ri-detection intermedia.")
+                         help="Only with --backend sam31/sam2: reruns YOLO every N frames "
+                              "INSIDE the chunk (not just at its boundary) to discover new "
+                              "people more often -- useful if sam31/sam2 produce far fewer "
+                              "masks than yolo+bytetrack on the same video (YOLO+ByteTrack "
+                              "detects on every frame). Default: no intermediate re-detection.")
     parser.add_argument("--sam-text-prompt", default=None,
-                         help="Solo con --backend sam31 (SAM2 non ha prompt testuale): concetto "
-                              "aperto (es. 'person') con cui SAM 3.1 scopre le persone DA SOLO "
-                              "nel chunk, senza YOLO come proposer -- stessa tecnica della "
-                              "pipeline CHUV (psifx --text_prompt). Vedi sam31_estimation.py "
-                              "per i limiti di certezza sull'API reale (non ancora verificata "
-                              "su una macchina CUDA in questo progetto).")
+                         help="Only with --backend sam31 (SAM2 has no text prompt): open-ended "
+                              "concept (e.g. 'person') with which SAM 3.1 discovers people ON "
+                              "ITS OWN in the chunk, without YOLO as a proposer -- same "
+                              "technique as the CHUV pipeline (psifx --text_prompt). See "
+                              "sam31_estimation.py for the certainty limits about the real API "
+                              "(not yet verified on a CUDA machine in this project).")
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source

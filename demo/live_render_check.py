@@ -1,19 +1,19 @@
 """
 live_render_check.py
 =====================
-Verifica, SENZA fotocamera né Ultralytics/torch, che la logica di
-`live_demo.py` sia corretta: simula un loop frame-by-frame "come se" i
-keypoint arrivassero da una sorgente live (qui: le sequenze sintetiche di
-`synth_data.py`), applica esattamente la stessa logica di finestra
-scorrevole + disegno scheletro/overlay usata nello script live reale, e
-scrive un video mp4 ispezionabile.
+Verifies, WITHOUT a camera or Ultralytics/torch, that `live_demo.py`'s
+logic is correct: simulates a frame-by-frame loop "as if" keypoints were
+coming from a live source (here: the synthetic sequences from
+`synth_data.py`), applies exactly the same sliding-window + skeleton/
+overlay drawing logic used in the real live script, and writes an
+inspectable mp4 video.
 
-Misura anche il tempo di CPU speso per frame nella parte di feature
-extraction + disegno (esclusa l'inferenza del modello, che va misurata
-separatamente sul Mac): utile per capire quale margine di budget-frame
-resta per l'inferenza YOLO dato un target di FPS.
+Also measures the CPU time spent per frame in the feature extraction +
+drawing part (excluding model inference, which must be measured
+separately on the Mac): useful to understand how much frame-budget margin
+is left for YOLO inference given a target FPS.
 
-Esegui con: python live_render_check.py
+Run with: python live_render_check.py
 Output: demo_outputs/live_render_check.mp4, demo_outputs/live_frame_timing.csv
 """
 
@@ -48,11 +48,11 @@ CANVAS_W, CANVAS_H = 800, 500
 
 def format_metrics(track_id: int, angles: dict, energy: float, rep_score: dict) -> list[str]:
     lines = [f"ID {track_id}"]
-    lines.append(f"energia mov.: {energy:6.1f}" if not np.isnan(energy) else "energia mov.: --")
+    lines.append(f"movement energy: {energy:6.1f}" if not np.isnan(energy) else "movement energy: --")
     if not np.isnan(rep_score.get("peak_power_ratio", np.nan)):
-        lines.append(f"ripetitivita': {rep_score['peak_power_ratio']:.2f} @ {rep_score['peak_freq_hz']:.1f}Hz")
+        lines.append(f"repetitiveness: {rep_score['peak_power_ratio']:.2f} @ {rep_score['peak_freq_hz']:.1f}Hz")
     else:
-        lines.append("ripetitivita': --")
+        lines.append("repetitiveness: --")
     for name in ("left_elbow_angle", "right_elbow_angle"):
         v = angles.get(name, np.nan)
         lines.append(f"{name}: {v:5.0f} deg" if not np.isnan(v) else f"{name}: --")
@@ -76,7 +76,7 @@ def main():
     prev_t = time.perf_counter()
     for frame_idx in range(N_FRAMES):
         t0 = time.perf_counter()
-        canvas = np.full((CANVAS_H, CANVAS_W, 3), 30, dtype=np.uint8)  # sfondo grigio scuro
+        canvas = np.full((CANVAS_H, CANVAS_W, 3), 30, dtype=np.uint8)  # dark gray background
 
         for track_id, seq in people.items():
             kxy = seq[frame_idx]
@@ -114,10 +114,10 @@ def main():
 
     avg_ms = timing_df["processing_ms"].mean()
     p95_ms = timing_df["processing_ms"].quantile(0.95)
-    print(f"Frame elaborati: {len(timing_df)}")
-    print(f"Tempo medio per frame (feature+disegno, ESCLUSA inferenza YOLO): {avg_ms:.2f} ms  (p95: {p95_ms:.2f} ms)")
-    print(f"Budget teorico residuo per l'inferenza a {FPS:.0f} FPS: {1000/FPS - avg_ms:.2f} ms/frame")
-    print(f"Video di verifica: {OUT_DIR / 'live_render_check.mp4'}")
+    print(f"Frames processed: {len(timing_df)}")
+    print(f"Average time per frame (feature+drawing, EXCLUDING YOLO inference): {avg_ms:.2f} ms  (p95: {p95_ms:.2f} ms)")
+    print(f"Theoretical remaining budget for inference at {FPS:.0f} FPS: {1000/FPS - avg_ms:.2f} ms/frame")
+    print(f"Verification video: {OUT_DIR / 'live_render_check.mp4'}")
 
 
 if __name__ == "__main__":

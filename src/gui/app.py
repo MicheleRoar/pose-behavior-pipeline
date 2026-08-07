@@ -40,8 +40,8 @@ from PIL import Image, ImageTk
 
 from gui.pipeline_runner import iter_pipeline_frames, RunnerFrame
 from gui.video_player import VideoPlayer
-from common.device import detect_default_device  # solo la funzione: non importa torch
-                                                    # finche' non viene CHIAMATA (vedi sotto)
+from common.device import detect_default_device  # only the function: doesn't import torch
+                                                    # until it's CALLED (see below)
 
 ARCH_YOLO = "YOLO"
 ARCH_SAM3 = "SAM3 (not available here — runs on dedicated GPUs, see README)"
@@ -125,9 +125,9 @@ class App:
         max_row = ttk.Frame(control)
         max_row.pack(fill="x", pady=(0, 10))
         ttk.Label(max_row, text="Max number of people (optional):").pack(side="left")
-        # Nessun default -- deve essere l'utente a impostarlo esplicitamente,
-        # non un tetto silenzioso a "2" applicato anche se non lo tocca
-        # (vedi la stessa correzione in webui/index.html).
+        # No default -- the user must set it explicitly, not a silent
+        # cap of "2" applied even if they don't touch it
+        # (see the same fix in webui/index.html).
         self.max_people_var = tk.StringVar(value="")
         ttk.Entry(max_row, textvariable=self.max_people_var, width=4).pack(side="left", padx=(6, 0))
 
@@ -278,11 +278,11 @@ class App:
         # outside Segmentation) and pipeline_runner.py.
         with_mediapipe_pose = mode_key == "segmentation" and self.mediapipe_pose_var.get()
 
-        # Rilevato ogni volta che si costruisce il player (non in cima al
-        # modulo): cosi' la GUI resta apribile anche senza torch installato,
-        # e il rilevamento richiede una chiamata a torch solo quando serve
-        # davvero (Play/Restart) -- prima "mps" era fisso, il che rompeva
-        # silenziosamente su una macchina con GPU CUDA (vedi common/device.py).
+        # Detected every time the player is built (not at the top of the
+        # module): this way the GUI stays launchable even without torch
+        # installed, and detection only requires a torch call when it's
+        # truly needed (Play/Restart) -- before, "mps" was hardcoded, which
+        # silently broke on a machine with a CUDA GPU (see common/device.py).
         device = detect_default_device()
         kwargs = dict(
             mode=mode_key, source=self.video_path, fps=fps, device=device,

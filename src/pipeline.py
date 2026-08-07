@@ -1,17 +1,17 @@
 """
 pipeline.py
 ===========
-Orchestrazione end-to-end: video -> keypoint multi-persona (pose_estimation)
--> buffer per-persona -> feature comportamentali (features) -> tabella tidy
-esportabile in CSV per analisi successive con pandas/scikit-learn.
+End-to-end orchestration: video -> multi-person keypoints (pose_estimation)
+-> per-person buffer -> behavioral features (features) -> tidy table
+exportable to CSV for downstream analysis with pandas/scikit-learn.
 
-Uso tipico (video pre-registrato, caso d'uso principale per l'analisi
-clinica batch):
+Typical use (pre-recorded video, the main use case for batch clinical
+analysis):
 
     python pipeline.py --source path/to/video.mp4 --fps 30 --out features.csv
 
-Uso live (dimostrativo, es. con Canon R8 collegata via EOS Webcam Utility
-come sorgente 0, o capture card HDMI):
+Live use (demonstrative, e.g. with a Canon R8 connected via EOS Webcam
+Utility as source 0, or an HDMI capture card):
 
     python pipeline.py --source 0 --fps 30 --out live_session.csv
 """

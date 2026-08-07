@@ -1,23 +1,22 @@
 """
 chunk_store.py
 ================
-Persistenza incrementale su disco dei risultati di un chunk (maschere + id
-+ confidenze). `sam_backend.py` chiama `save_chunk()` non appena un chunk e'
-completato, PRIMA di passare al successivo -- cosi' su un video lungo (o in
-caso di crash/interruzione a meta' elaborazione) il lavoro gia' fatto non va
-perso. La ripresa automatica da un chunk gia' salvato non e' ancora
-implementata (solo scrittura/lettura per ora): resta un'estensione naturale
-di `sam_backend.py` se servisse in pratica.
+Incremental on-disk persistence of a chunk's results (masks + ids +
+confidences). `sam_backend.py` calls `save_chunk()` as soon as a chunk is
+completed, BEFORE moving on to the next one -- so on a long video (or in
+case of a crash/interruption partway through) the work already done isn't
+lost. Automatic resumption from an already-saved chunk isn't implemented
+yet (write/read only for now): it remains a natural extension of
+`sam_backend.py` if it's ever needed in practice.
 
-Formato: un file `.npz` per chunk, array paralleli `frame_index`,
-`track_id`, `box`, `polygon`, `conf` -- uno per (persona, frame). `box` e
-`polygon` sono array di oggetto (`dtype=object`, richiede
-`allow_pickle=True` al caricamento) perche' ogni poligono ha un numero di
-vertici diverso: incapsularli in una tabella piatta tipo CSV/parquet
-richiederebbe comunque una colonna "oggetto" per lo stesso motivo. NON si
-salva il frame (l'immagine): solo dati derivati, per non esplodere lo
-spazio disco -- l'immagine si puo' sempre rileggere dal video sorgente per
-indice frame.
+Format: one `.npz` file per chunk, parallel arrays `frame_index`,
+`track_id`, `box`, `polygon`, `conf` -- one per (person, frame). `box` and
+`polygon` are object arrays (`dtype=object`, requires `allow_pickle=True`
+on load) because each polygon has a different number of vertices:
+packing them into a flat CSV/parquet-style table would still need an
+"object" column for the same reason. The frame (image) is NOT saved: only
+derived data, to avoid blowing up disk space -- the image can always be
+re-read from the source video by frame index.
 """
 
 from __future__ import annotations
@@ -35,11 +34,11 @@ def chunk_filename(chunk_index: int) -> str:
 
 
 def save_chunk(results: list[SegFrameResult], out_dir: str, chunk_index: int) -> str:
-    """Scrive su disco un chunk gia' completato (lista di `SegFrameResult`,
-    uno per frame elaborato in questo chunk). Ritorna il percorso del file
-    scritto. Un chunk senza nessuna persona rilevata in nessun frame produce
-    comunque un file valido (array vuoti), cosi' `load_chunk()` non deve
-    distinguere "chunk mancante" da "chunk vuoto"."""
+    """Writes an already-completed chunk to disk (list of `SegFrameResult`,
+    one per frame processed in this chunk). Returns the path of the
+    written file. A chunk with no person detected in any frame still
+    produces a valid file (empty arrays), so `load_chunk()` doesn't have
+    to distinguish "missing chunk" from "empty chunk"."""
     os.makedirs(out_dir, exist_ok=True)
     frame_indices: list[int] = []
     track_ids: list[int] = []
@@ -68,7 +67,7 @@ def save_chunk(results: list[SegFrameResult], out_dir: str, chunk_index: int) ->
 
 @dataclass
 class ChunkRecord:
-    """Una riga (persona, frame) riletta da un chunk salvato."""
+    """A (person, frame) row read back from a saved chunk."""
     frame_index: int
     track_id: int
     bbox: np.ndarray
@@ -77,10 +76,10 @@ class ChunkRecord:
 
 
 def load_chunk(path: str) -> list[ChunkRecord]:
-    """Rilegge un chunk salvato da `save_chunk()`. Ritorna una lista piatta
-    di `ChunkRecord` (un elemento per persona/frame, non raggruppata per
-    frame) -- e' compito del chiamante riaggregarla per `frame_index` se
-    serve ricostruire dei `SegFrameResult`."""
+    """Reads back a chunk saved by `save_chunk()`. Returns a flat list of
+    `ChunkRecord` (one element per person/frame, not grouped by frame) --
+    it's up to the caller to re-aggregate it by `frame_index` if
+    reconstructing `SegFrameResult`s is needed."""
     data = np.load(path, allow_pickle=True)
     n = len(data["frame_index"])
     return [

@@ -1,32 +1,32 @@
 """
 mediapipe_models.py
 =====================
-Risoluzione/download automatico dei modelli MediaPipe Tasks (`.task`)
-usati da `pose/mediapipe_pose.py` (Pose Landmarker), `pose/hands.py` (Hand
-Landmarker) e `pose/gaze_head.py` (Face Landmarker) -- helper condiviso
-per non triplicare la stessa logica nei tre moduli.
+Automatic resolution/download of MediaPipe Tasks models (`.task`) used by
+`pose/mediapipe_pose.py` (Pose Landmarker), `pose/hands.py` (Hand
+Landmarker), and `pose/gaze_head.py` (Face Landmarker) -- shared helper so
+the same logic isn't tripled across the three modules.
 
-Perche' esiste (bug reale, osservato da Michele su macchina Linux)
+Why this exists (real bug, observed by Michele on a Linux machine)
 ---------------------------------------------------------------------
-I default originali di questi tre moduli erano nomi nudi tipo
-`"hand_landmarker.task"`, risolti da MediaPipe come path RELATIVO ALLA
-CWD -- funzionava solo lanciando lo script dalla stessa cartella in cui
-si era fatto il `curl` manuale, falliva con un errore poco chiaro tipo
-"unable to find hand_landmarker" lanciando da una cwd diversa (es.
-`cd src && python webui_app.py` invece che dalla cartella in cui il file
-era stato scaricato a mano). Il fix per `pose_landmarker_lite.task`
-(mediapipe_pose.py) e' stato il primo; qui la stessa logica viene
-riusata per `hand_landmarker.task`/`face_landmarker.task`, che avevano
-esattamente lo stesso problema (confermato: Michele ha dovuto creare un
-symlink a mano come workaround prima di questo fix).
+The original defaults for these three modules were bare names like
+`"hand_landmarker.task"`, resolved by MediaPipe as a path RELATIVE TO THE
+CWD -- this only worked when launching the script from the same folder
+where the manual `curl` had been done, and failed with an unclear error
+like "unable to find hand_landmarker" when launching from a different cwd
+(e.g. `cd src && python webui_app.py` instead of the folder where the file
+had been manually downloaded). The fix for `pose_landmarker_lite.task`
+(mediapipe_pose.py) was the first one; here the same logic is reused for
+`hand_landmarker.task`/`face_landmarker.task`, which had exactly the same
+problem (confirmed: Michele had to manually create a symlink as a
+workaround before this fix).
 
-`resolve_model_path()` risolve il nome nudo di default in una cache
-FISSA dentro il progetto (`<repo>/models/`, indipendente da dove viene
-lanciato lo script) e scarica il file li' se assente -- nessun `curl`/
-symlink manuale piu' necessario. Un path esplicito passato dall'utente
-(gia' esistente, o un nome diverso dal default nudo) resta invariato,
-nessuna sovrascrittura -- permette di puntare a varianti gia' scaricate
-altrove (es. "full"/"heavy" invece di "lite").
+`resolve_model_path()` resolves the bare default name into a FIXED cache
+inside the project (`<repo>/models/`, independent of where the script is
+launched from) and downloads the file there if missing -- no more manual
+`curl`/symlink needed. An explicit path passed by the user (already
+existing, or a name different from the bare default) is left unchanged,
+never overwritten -- this allows pointing to variants already downloaded
+elsewhere (e.g. "full"/"heavy" instead of "lite").
 """
 
 from __future__ import annotations
@@ -36,21 +36,21 @@ import urllib.request
 from pathlib import Path
 
 # .../pose-behavior-pipeline/src/common/mediapipe_models.py -> parents[2]
-# e' la root del progetto (src/common -> src -> root), stessa convenzione
-# di Path(__file__).resolve().parents[N] gia' usata in
+# is the project root (src/common -> src -> root), same convention as
+# Path(__file__).resolve().parents[N] already used in
 # segmentation/sam2_estimation.py.
 MODELS_CACHE_DIR = Path(__file__).resolve().parents[2] / "models"
 
 
 def resolve_model_path(model_path: str, *, download_url: str) -> str:
-    """Se `model_path` esiste gia' come file (path esplicito dell'utente,
-    anche relativo alla cwd corrente -- comportamento invariato per chi lo
-    passa apposta), lo usa cosi' com'e'. Altrimenti, SOLO se il suo nome e'
-    esattamente il nome nudo di default (l'ultimo pezzo di `download_url`,
-    non un path custom che l'utente ha sbagliato -- in quel caso e'
-    meglio l'errore originale di MediaPipe che indovinare), lo risolve
-    nella cache fissa del progetto (`MODELS_CACHE_DIR`), scaricandolo li'
-    se non presente."""
+    """If `model_path` already exists as a file (an explicit path from the
+    user, even relative to the current cwd -- unchanged behavior for
+    whoever passes it on purpose), it's used as-is. Otherwise, ONLY if its
+    name is exactly the bare default name (the last piece of
+    `download_url`, not a custom path the user got wrong -- in that case
+    MediaPipe's original error is better than guessing), it's resolved
+    into the project's fixed cache (`MODELS_CACHE_DIR`), downloading it
+    there if not present."""
     if os.path.isfile(model_path):
         return model_path
     default_basename = download_url.rsplit("/", 1)[-1]
@@ -63,12 +63,12 @@ def resolve_model_path(model_path: str, *, download_url: str) -> str:
 
 
 def _download(url: str, dest: Path) -> None:
-    """Scarica `url` in `dest`, creando le cartelle mancanti. Nessun
-    retry/hash-check: se il download si interrompe a meta', il file
-    parziale resta li' e il prossimo avvio lo tratterebbe come 'gia'
-    presente' (bug noto, accettabile per ora -- se capita, basta
-    cancellare il file e rilanciare)."""
+    """Downloads `url` to `dest`, creating missing folders. No retry/hash
+    check: if the download is interrupted halfway, the partial file stays
+    there and the next startup would treat it as 'already present' (known
+    bug, acceptable for now -- if it happens, just delete the file and
+    relaunch)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"[mediapipe_models] scarico {dest.name} (una tantum) in {dest} ...")
+    print(f"[mediapipe_models] downloading {dest.name} (one-time) to {dest} ...")
     urllib.request.urlretrieve(url, dest)
-    print(f"[mediapipe_models] fatto: {dest}")
+    print(f"[mediapipe_models] done: {dest}")

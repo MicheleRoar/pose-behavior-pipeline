@@ -1,36 +1,36 @@
 """
 webui_app.py
 =============
-Lancia la nuova interfaccia grafica "Behaviour Vision Lab" (finestra
-pywebview che carica webui/index.html, con webui/api.py come bridge verso
-la pipeline). Va eseguito da dentro `src/`:
+Launches the new "Behaviour Vision Lab" graphical interface (a pywebview
+window that loads webui/index.html, with webui/api.py as the bridge to the
+pipeline). Must be run from inside `src/`:
 
     cd src && python webui_app.py
 
-Sta a livello di `src/` (non dentro `webui/`) per lo stesso motivo di
-`gui_app.py` / `live_demo.py` / `segmentation_demo.py`: quando Python esegue
-uno script direttamente, aggiunge automaticamente la SUA cartella (`src/`)
-in cima a `sys.path`, il che rende risolvibili gli import `from gui...`,
-`from pose...`, `from segmentation...` usati da webui/api.py senza bisogno
-di manipolare sys.path a mano. Lanciando invece `python webui/api.py` (o un
-ipotetico `webui/app.py`) direttamente, sys.path[0] sarebbe `src/webui/`
-invece di `src/`, e quegli import fallirebbero.
+Lives at the `src/` level (not inside `webui/`) for the same reason as
+`gui_app.py` / `live_demo.py` / `segmentation_demo.py`: when Python runs a
+script directly, it automatically adds ITS OWN folder (`src/`) to the top
+of `sys.path`, which makes the `from gui...`, `from pose...`, `from
+segmentation...` imports used by webui/api.py resolvable without manually
+touching sys.path. Running `python webui/api.py` (or a hypothetical
+`webui/app.py`) directly instead would make sys.path[0] `src/webui/`
+instead of `src/`, and those imports would fail.
 
-Questa e' un'interfaccia ALTERNATIVA a quella Tkinter (`gui_app.py`), non
-una sostituzione: stessa pipeline sotto (VideoPlayer/iter_pipeline_frames,
-invariati), presentazione diversa. Vedi README per quale scegliere:
-- `gui_app.py` (Tkinter): nessuna dipendenza aggiuntiva oltre Pillow, avvio
-  piu' leggero, look nativo ma limitato (niente switch arrotondati, gradienti,
-  card scure come nel mock "Behaviour Vision Lab").
-- `webui_app.py` (questo file, pywebview + HTML/CSS/JS): richiede
-  `pip install pywebview`, riproduce fedelmente il mock fornito.
+This is an ALTERNATIVE interface to the Tkinter one (`gui_app.py`), not a
+replacement: same pipeline underneath (VideoPlayer/iter_pipeline_frames,
+unchanged), different presentation. See the README for which one to pick:
+- `gui_app.py` (Tkinter): no extra dependency beyond Pillow, lighter
+  startup, native but limited look (no rounded switches, gradients, dark
+  cards like in the "Behaviour Vision Lab" mockup).
+- `webui_app.py` (this file, pywebview + HTML/CSS/JS): requires
+  `pip install pywebview`, faithfully reproduces the provided mockup.
 
-Richiede una sorgente video reale e un display grafico: non eseguibile
-nell'ambiente sandbox usato per sviluppare il resto della pipeline. La
-logica pura del bridge (parametri, codifica frame, metriche) e' invece
-verificata separatamente, senza pywebview ne' finestra, in
-`demo/webui_api_check.py`; la logica di cache/seek dietro Play/Indietro/
-Avanti/timeline in `demo/video_player_check.py`.
+Requires a real video source and a graphical display: not runnable in the
+sandbox environment used to develop the rest of the pipeline. The bridge's
+pure logic (parameters, frame encoding, metrics) is instead verified
+separately, with no pywebview or window, in `demo/webui_api_check.py`; the
+cache/seek logic behind Play/Back/Forward/timeline is verified in
+`demo/video_player_check.py`.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ INDEX_HTML = Path(__file__).resolve().parent / "webui" / "index.html"
 
 
 def run_webui() -> None:
-    import webview  # import ritardato: solo chi lancia questa GUI ha bisogno di pywebview
+    import webview  # delayed import: only whoever launches this GUI needs pywebview
 
     api = Api()
     window = webview.create_window(

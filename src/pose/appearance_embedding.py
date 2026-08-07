@@ -1,63 +1,63 @@
 """
 appearance_embedding.py
 =========================
-Segnale di aspetto basato su un vero embedding di deep re-identification
-(OSNet, via `torchreid`), invece delle euristiche colore/forma/posizione
-gia' presenti in `reid.py`/`seg_reid.py`. Nasce dalla richiesta esplicita
-di aggiungere OSNet e "l'idea" di StrongSORT alla pipeline, con priorita'
-assoluta: gli id non devono cambiare, e le persone devono restare in
-memoria per essere ri-associate facilmente al rientro.
+Appearance signal based on a real deep re-identification embedding
+(OSNet, via `torchreid`), instead of the color/shape/position heuristics
+already present in `reid.py`/`seg_reid.py`. Born from the explicit
+request to add OSNet and "the idea" of StrongSORT to the pipeline, with
+absolute priority: ids must not change, and people must stay in memory
+to be easily re-associated on return.
 
-Perche' "OSNet + l'idea di StrongSORT" e non "sostituire tutto con
-StrongSORT" (scelta di scoping, vedi anche la memoria di progetto)
+Why "OSNet + the idea of StrongSORT" and not "replace everything with
+StrongSORT" (scoping choice, see also the project memory)
 ------------------------------------------------------------------------
-StrongSORT (Du et al. 2022) e' DeepSORT + tre aggiunte principali: (1) un
-embedding di aspetto vero (tipicamente OSNet) al posto delle feature IoU-
-only di SORT, (2) un "feature bank" per traccia aggiornato con una media
-mobile esponenziale (EMA) invece di tenere solo l'ultimo embedding visto,
-(3) un filtro di Kalman "NSA" (rumore di processo scalato sulla confidenza
-della detection) piu' compensazione del moto di camera (ECC) -- questi
-ultimi pensati per una camera CHE SI MUOVE (es. inseguimento drone/veicolo),
-non il caso qui (camera fissa, contesto clinico).
+StrongSORT (Du et al. 2022) is DeepSORT plus three main additions: (1) a
+real appearance embedding (typically OSNet) instead of SORT's IoU-only
+features, (2) a per-track "feature bank" updated with an exponential
+moving average (EMA) instead of keeping only the last embedding seen,
+(3) an "NSA" Kalman filter (process noise scaled by detection confidence)
+plus camera motion compensation (ECC) -- these last two designed for a
+MOVING camera (e.g. drone/vehicle tracking), not the case here (fixed
+camera, clinical context).
 
-Riscrivere da zero l'intero tracker (Kalman NSA + ECC + matching cascade)
-butterebbe via `identity_manager.py` gia' costruito e testato (matching
-ungherese batch, policy "uncertain" invece di fusione silenziosa,
-`session_mode`, causalita', il tetto `max_people` per sessioni chiuse) --
-tutta logica su misura per il contesto clinico che un tracker generico non
-conosce. Le due idee di StrongSORT che contano davvero per la richiesta
-("non cambiare id" + "restare in memoria per il rientro") sono invece
-esattamente (1) e (2): un embedding di aspetto piu' forte delle euristiche
-attuali, e una memoria che si CONSOLIDA nel tempo invece di basarsi su un
-solo frame. Questo modulo fornisce (1) (`OSNetEmbedder`); (2) e' applicata
-qui sotto (`ema_update`) e usata da `reid.py`/`seg_reid.py` per aggiornare
-`self.embedding` ad ogni frame in cui la persona e' visibile, non solo al
-momento della perdita.
+Rewriting the whole tracker from scratch (NSA Kalman + ECC + matching
+cascade) would throw away the already-built and tested
+`identity_manager.py` (batch Hungarian matching, "uncertain" policy
+instead of silent merging, `session_mode`, causality, the `max_people`
+cap for closed sessions) -- all logic tailored to the clinical context
+that a generic tracker doesn't know about. The two StrongSORT ideas that
+actually matter for the request ("don't change ids" + "stay in memory
+for re-entry") are exactly (1) and (2): a stronger appearance embedding
+than the current heuristics, and a memory that CONSOLIDATES over time
+instead of relying on a single frame. This module provides (1)
+(`OSNetEmbedder`); (2) is applied below (`ema_update`) and used by
+`reid.py`/`seg_reid.py` to update `self.embedding` on every frame the
+person is visible, not just at the moment of loss.
 
-Dipendenza pesante e opzionale
+Heavy, optional dependency
 --------------------------------
-`torchreid` (e quindi `torch`) NON sono elencati in requirements.txt come
-dipendenza normale -- stesso trattamento di SAM 3.1/SAM2, vedi li'.
-L'import e' quindi ritardato dentro `OSNetEmbedder.__init__`: senza
-torchreid installato, il resto della pipeline (incluso il resto del
-Re-ID euristico) continua a funzionare normalmente, semplicemente senza
-questo segnale aggiuntivo. Il primo utilizzo di un `model_name` noto (es.
-'osnet_x1_0') senza `model_path` fa scaricare a torchreid i pesi
-pre-addestrati dal suo model zoo -- richiede quindi una connessione
-internet al primo avvio, non solo l'installazione del pacchetto.
+`torchreid` (and therefore `torch`) are NOT listed in requirements.txt as
+a normal dependency -- same treatment as SAM 3.1/SAM2, see there. The
+import is therefore delayed inside `OSNetEmbedder.__init__`: without
+torchreid installed, the rest of the pipeline (including the rest of the
+heuristic Re-ID) keeps working normally, simply without this extra
+signal. The first use of a known `model_name` (e.g. 'osnet_x1_0')
+without `model_path` makes torchreid download the pretrained weights
+from its model zoo -- so an internet connection is required on first
+run, not just installing the package.
 
-Formato dei crop
+Crop format
 -----------------
-`torchreid.utils.FeatureExtractor` accetta array numpy (H, W, C) e li
-converte internamente con `torchvision.transforms.ToPILImage()`, che per
-un array 3 canali produce un'immagine in modalita' 'RGB' -- quindi il
-crop va preparato in RGB, non nel BGR nativo di OpenCV (vedi `_crop_person`,
-`[:, :, ::-1]`). Se viene passato anche il poligono maschera (non solo il
-bbox), lo sfondo dentro il bbox ma fuori dalla sagoma viene azzerato prima
-di passare il crop al modello: l'embedding si concentra sulla persona, non
-sul contesto (sfondo, altre persone parzialmente dentro lo stesso bbox) --
-un miglioramento rispetto a un crop-bbox grezzo, discusso nella
-consultazione architetturale iniziale.
+`torchreid.utils.FeatureExtractor` accepts numpy arrays (H, W, C) and
+converts them internally with `torchvision.transforms.ToPILImage()`,
+which for a 3-channel array produces an image in 'RGB' mode -- so the
+crop must be prepared in RGB, not OpenCV's native BGR (see
+`_crop_person`, `[:, :, ::-1]`). If the mask polygon is also passed (not
+just the bbox), the background inside the bbox but outside the
+silhouette is zeroed out before passing the crop to the model: the
+embedding focuses on the person, not the context (background, other
+people partially inside the same bbox) -- an improvement over a raw
+bbox-crop, discussed in the initial architectural consultation.
 """
 
 from __future__ import annotations
@@ -66,56 +66,57 @@ import numpy as np
 
 DEFAULT_MODEL_NAME = "osnet_x1_0"
 
-# Sotto queste dimensioni (pixel) un crop e' troppo piccolo/troppo
-# schiacciato per fidarsi dell'embedding risultante -- stesso principio di
-# "nessun segnale inventato" di compute_color_signature/_mask_hue_histogram:
-# meglio None che un embedding rumoroso spacciato per affidabile.
+# Below these dimensions (pixels) a crop is too small/too squashed to
+# trust the resulting embedding -- same "no made-up signal" principle as
+# compute_color_signature/_mask_hue_histogram: better None than a noisy
+# embedding passed off as reliable.
 MIN_CROP_W = 24
 MIN_CROP_H = 48
 
-# Frazione minima di pixel-maschera dentro il bbox perche' valga la pena
-# azzerare lo sfondo (sotto questa soglia il poligono e' probabilmente
-# troppo degenere/rumoroso per un mascheramento affidabile -- si usa
-# comunque il crop-bbox grezzo, non si scarta il frame).
+# Minimum fraction of mask pixels inside the bbox for it to be worth
+# zeroing out the background (below this threshold the polygon is
+# probably too degenerate/noisy for reliable masking -- the raw
+# bbox-crop is used anyway, the frame isn't discarded).
 _MIN_MASK_FILL = 0.15
 
 
 def _resolve_feature_extractor():
-    """Risolve la classe `FeatureExtractor`, gestendo DUE layout diversi del
-    pacchetto 'torchreid' che si puo' finire per installare con
-    `pip install torchreid`:
+    """Resolves the `FeatureExtractor` class, handling TWO different
+    layouts of the 'torchreid' package that `pip install torchreid` can
+    end up installing:
 
-    - il progetto originale (github.com/KaiyangZhou/deep-person-reid,
-      installabile con `pip install git+...` o `pip install -e .` da un
-      clone) espone `torchreid/utils/` come un vero sottopacchetto --
-      `from torchreid.utils import FeatureExtractor` funziona.
-    - la distribuzione PyPI "torchreid-pip" di terzi (quella che installa
-      di default il semplice `pip install torchreid`, verificato: e' un
-      repackaging non ufficiale) nasconde tutto sotto `torchreid.reid.*` e
-      si limita a rebindare `utils` come ATTRIBUTO del pacchetto top-level
-      dentro il proprio `torchreid/__init__.py` (`from torchreid.reid import
-      ..., utils`) -- non un vero sottomodulo. Con questo layout, `from
-      torchreid.utils import FeatureExtractor` fallisce con
-      `ModuleNotFoundError: No module named 'torchreid.utils'` anche se il
-      pacchetto e' installato correttamente (causa reale di un bug
-      segnalato dall'utente: "torchreid" importabile da solo, ma questo
-      import specifico no).
+    - the original project (github.com/KaiyangZhou/deep-person-reid,
+      installable with `pip install git+...` or `pip install -e .` from
+      a clone) exposes `torchreid/utils/` as a real subpackage --
+      `from torchreid.utils import FeatureExtractor` works.
+    - the third-party PyPI "torchreid-pip" distribution (the one that
+      plain `pip install torchreid` installs by default, verified: it's
+      an unofficial repackaging) hides everything under
+      `torchreid.reid.*` and only rebinds `utils` as a top-level package
+      ATTRIBUTE inside its own `torchreid/__init__.py` (`from
+      torchreid.reid import ..., utils`) -- not a real submodule. With
+      this layout, `from torchreid.utils import FeatureExtractor` fails
+      with `ModuleNotFoundError: No module named 'torchreid.utils'` even
+      if the package is correctly installed (the real cause of a bug
+      reported by the user: "torchreid" importable on its own, but this
+      specific import isn't).
 
-    Importare `torchreid` e poi accedere per ATTRIBUTO
-    (`torchreid.utils.FeatureExtractor`) funziona in entrambi i casi, quindi
-    e' quello che usiamo qui invece di un `from torchreid.utils import ...`
-    diretto."""
+    Importing `torchreid` and then accessing it by ATTRIBUTE
+    (`torchreid.utils.FeatureExtractor`) works in both cases, so that's
+    what we use here instead of a direct `from torchreid.utils import
+    ...`."""
     import torchreid
     return torchreid.utils.FeatureExtractor
 
 
 class OSNetEmbedder:
-    """Wrapper minimale su `torchreid.utils.FeatureExtractor` per un singolo
-    modello OSNet. Uso in reid.py/seg_reid.py (un solo punto di wiring):
+    """Minimal wrapper over `torchreid.utils.FeatureExtractor` for a
+    single OSNet model. Usage in reid.py/seg_reid.py (a single wiring
+    point):
 
-        embedder = OSNetEmbedder(device="cpu")  # o "cuda"/"mps" se disponibile
+        embedder = OSNetEmbedder(device="cpu")  # or "cuda"/"mps" if available
         ...
-        vec = embedder.embed(frame_bgr, bbox_xyxy, poly=poly)  # None se crop scadente
+        vec = embedder.embed(frame_bgr, bbox_xyxy, poly=poly)  # None if the crop is poor
     """
 
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME, model_path: str | None = None,
@@ -124,42 +125,43 @@ class OSNetEmbedder:
             FeatureExtractor = _resolve_feature_extractor()
         except ImportError as exc:
             raise ImportError(
-                "L'embedding di aspetto OSNet richiede 'torch' e 'torchreid', "
-                "non installati per default (dipendenza pesante, opzionale -- "
-                "vedi requirements.txt). Installare con: "
+                "OSNet appearance embedding requires 'torch' and 'torchreid', "
+                "not installed by default (heavy, optional dependency -- "
+                "see requirements.txt). Install with: "
                 "pip install torch torchreid"
             ) from exc
         except AttributeError as exc:
             raise ImportError(
-                "'torchreid' risulta installato ma non espone "
-                "'torchreid.utils.FeatureExtractor' -- probabile che "
-                "'pip install torchreid' abbia installato la distribuzione "
-                "PyPI 'torchreid-pip' di terzi (repackaging con un layout "
-                "diverso, non il progetto originale deep-person-reid) o "
-                "un'installazione incompleta. Verificare con: "
+                "'torchreid' appears to be installed but does not expose "
+                "'torchreid.utils.FeatureExtractor' -- likely that "
+                "'pip install torchreid' installed the third-party PyPI "
+                "distribution 'torchreid-pip' (a repackaging with a "
+                "different layout, not the original deep-person-reid "
+                "project) or an incomplete installation. Check with: "
                 "python -c \"import torchreid; print(torchreid.utils.FeatureExtractor)\""
             ) from exc
 
         kwargs = dict(model_name=model_name, device=device, verbose=False)
         if model_path:
             kwargs["model_path"] = model_path
-        # pretrained=True quando model_path e' assente: torchreid scarica i
-        # pesi dal proprio model zoo al primo utilizzo di un model_name noto
-        # (richiede internet la prima volta, poi restano in cache locale).
+        # pretrained=True when model_path is absent: torchreid downloads
+        # the weights from its model zoo on first use of a known
+        # model_name (requires internet the first time, then cached
+        # locally).
         self._extractor = FeatureExtractor(**kwargs)
         self.model_name = model_name
         self.device = device
 
     def embed(self, frame_bgr: np.ndarray, bbox_xyxy: np.ndarray,
                poly: np.ndarray | None = None) -> np.ndarray | None:
-        """Embedding L2-normalizzato (np.ndarray 1D) della persona in
-        `bbox_xyxy` (e opzionalmente mascherata da `poly`) dentro
-        `frame_bgr`, oppure `None` se il crop e' troppo piccolo/degenere per
-        fidarsi."""
+        """L2-normalized embedding (1D np.ndarray) of the person in
+        `bbox_xyxy` (and optionally masked by `poly`) inside
+        `frame_bgr`, or `None` if the crop is too small/degenerate to
+        trust."""
         crop_rgb = _crop_person(frame_bgr, bbox_xyxy, poly)
         if crop_rgb is None:
             return None
-        features = self._extractor([crop_rgb])  # torch tensor (1, D), no_grad interno
+        features = self._extractor([crop_rgb])  # torch tensor (1, D), internal no_grad
         vec = features[0].detach().cpu().numpy().astype(np.float64)
         norm = np.linalg.norm(vec)
         if norm < 1e-9 or not np.isfinite(norm):
@@ -186,16 +188,16 @@ def _crop_person(frame_bgr: np.ndarray, bbox_xyxy: np.ndarray,
         cv2.fillPoly(mask, [np.round(shifted).astype(np.int32)], 255)
         fill = cv2.countNonZero(mask) / float(mask.size)
         if fill >= _MIN_MASK_FILL:
-            crop[mask == 0] = 0  # azzera lo sfondo, l'embedding si concentra sulla persona
+            crop[mask == 0] = 0  # zero out the background, the embedding focuses on the person
 
-    return crop[:, :, ::-1]  # BGR (OpenCV) -> RGB (atteso da torchreid)
+    return crop[:, :, ::-1]  # BGR (OpenCV) -> RGB (expected by torchreid)
 
 
 def embedding_similarity(a: np.ndarray | None, b: np.ndarray | None) -> float | None:
-    """Similarita' 0..1 tra due embedding L2-normalizzati, via cosine
-    similarity riscalata da [-1, 1] a [0, 1] (stessa convenzione 0..1 degli
-    altri segnali del modulo, non la convenzione [-1, 1] nativa del coseno).
-    `None` se manca uno dei due embedding."""
+    """0..1 similarity between two L2-normalized embeddings, via cosine
+    similarity rescaled from [-1, 1] to [0, 1] (same 0..1 convention as
+    the module's other signals, not cosine's native [-1, 1] convention).
+    `None` if either embedding is missing."""
     if a is None or b is None:
         return None
     cos = float(np.dot(a, b))
@@ -203,61 +205,63 @@ def embedding_similarity(a: np.ndarray | None, b: np.ndarray | None) -> float | 
 
 
 def torchreid_available() -> bool:
-    """True se `torchreid.utils.FeatureExtractor` e' effettivamente
-    raggiungibile in questo ambiente (stessa risoluzione di
-    `_resolve_feature_extractor()` usata da `OSNetEmbedder`, non solo un
-    `import torchreid` nudo -- un `import torchreid` puo' riuscire mentre
-    `torchreid.utils.FeatureExtractor` no, vedi il docstring di
-    `_resolve_feature_extractor` per il perche' concreto, verificato su un
-    caso reale). Non istanzia nessun modello (non scarica pesi, non tocca
-    la GPU) -- usato solo per gating lato GUI (checkbox disabilitata con un
-    motivo, stesso schema di `cudaAvailable`/le opzioni SAM 3.1/SAM2 in
-    app.js), MAI per decidere silenziosamente di saltare l'embedding: se
-    l'utente lo richiede esplicitamente ma la dipendenza manca,
-    `OSNetEmbedder.__init__` solleva comunque il suo `ImportError` con le
-    istruzioni di installazione, non fallisce in silenzio."""
+    """True if `torchreid.utils.FeatureExtractor` is actually reachable
+    in this environment (same resolution as `_resolve_feature_extractor()`
+    used by `OSNetEmbedder`, not just a bare `import torchreid` -- an
+    `import torchreid` can succeed while `torchreid.utils.FeatureExtractor`
+    doesn't, see `_resolve_feature_extractor`'s docstring for the
+    concrete reason, verified on a real case). Doesn't instantiate any
+    model (doesn't download weights, doesn't touch the GPU) -- used only
+    for GUI-side gating (checkbox disabled with a reason, same pattern as
+    `cudaAvailable`/the SAM 3.1/SAM2 options in app.js), NEVER to
+    silently decide to skip the embedding: if the user explicitly
+    requests it but the dependency is missing, `OSNetEmbedder.__init__`
+    still raises its `ImportError` with installation instructions, it
+    doesn't fail silently."""
     try:
         _resolve_feature_extractor()
     except (ImportError, AttributeError):
         return False
     except Exception as exc:
-        # torchreid e' un pacchetto fermo dal 2021: capita che l'import
-        # fallisca con qualcos'altro (non ImportError) su un ambiente con
-        # numpy/torch piu' recenti -- es. `np.float`/`np.int` rimossi in
-        # numpy>=1.24, referenziati da alcune versioni di torchreid/yacs, che
-        # sollevano AttributeError durante l'import, non ImportError. Se non
-        # lo intercettassimo qui, l'eccezione risalirebbe fino a
-        # `Api.detect_device()` (nessun try/except li', vedi webui/api.py) e
-        # farebbe fallire ANCHE il rilevamento cuda/mps/cpu insieme ad esso
-        # (app.js gestisce l'intera chiamata con un solo try/catch) -- un
-        # sintomo confuso ("SAM 3.1/SAM2 e l'embedding sono entrambi
-        # disabilitati, anche se torch e' installato") per una causa non
-        # ovvia. Meglio segnalare qui SOLO l'embedding come non disponibile,
-        # stampando il motivo reale sul terminale (non visibile in UI, ma
-        # utile per diagnosticare) invece di un errore silenzioso o di un
-        # crash che disabilita anche il rilevamento device.
-        print(f"[appearance_embedding] torchreid installato ma l'import fallisce "
-              f"({type(exc).__name__}: {exc}) -- embedding OSNet non disponibile. "
-              f"Probabile incompatibilita' di versione (torchreid e' un pacchetto "
-              f"non piu' mantenuto attivamente, spesso in conflitto con numpy/torch "
-              f"recenti).")
+        # torchreid is a package that's been stalled since 2021: the
+        # import can sometimes fail with something else (not
+        # ImportError) on an environment with more recent numpy/torch --
+        # e.g. `np.float`/`np.int` removed in numpy>=1.24, referenced by
+        # some versions of torchreid/yacs, which raise AttributeError
+        # during import, not ImportError. If we didn't catch it here,
+        # the exception would propagate all the way up to
+        # `Api.detect_device()` (no try/except there, see webui/api.py)
+        # and would make cuda/mps/cpu detection fail ALONG with it
+        # (app.js handles the whole call with a single try/catch) -- a
+        # confusing symptom ("SAM 3.1/SAM2 and the embedding are both
+        # disabled, even though torch is installed") for a non-obvious
+        # cause. Better to flag ONLY the embedding as unavailable here,
+        # printing the real reason to the terminal (not visible in the
+        # UI, but useful for diagnosis) instead of a silent error or a
+        # crash that also disables device detection.
+        print(f"[appearance_embedding] torchreid installed but the import fails "
+              f"({type(exc).__name__}: {exc}) -- OSNet embedding not available. "
+              f"Likely a version incompatibility (torchreid is a package "
+              f"no longer actively maintained, often conflicting with recent "
+              f"numpy/torch).")
         return False
     return True
 
 
 def ema_update(prev: np.ndarray | None, new: np.ndarray | None,
                 alpha: float = 0.9) -> np.ndarray | None:
-    """Media mobile esponenziale su un embedding "in memoria" -- l'idea di
-    StrongSORT (2) citata nel docstring del modulo: invece di ricalcolare
-    l'embedding da un solo frame (rumoroso: motion blur, posa, occlusione
-    parziale), lo si affina nel tempo, cosi' la firma memorizzata per una
-    persona diventa via via piu' stabile piu' a lungo resta visibile --
-    esattamente il comportamento richiesto ("restare in memoria per
-    associarli facilmente al rientro"). `alpha` alto (default 0.9, come
-    tipico in letteratura StrongSORT/DeepSORT) da' molto peso alla storia,
-    poco al frame corrente: un singolo frame anomalo non fa "saltare"
-    l'embedding memorizzato. Ri-normalizzato a norma 1 dopo la media (la
-    media di due vettori unitari non e' in generale unitaria)."""
+    """Exponential moving average on an embedding "in memory" -- the
+    StrongSORT idea (2) cited in the module docstring: instead of
+    recomputing the embedding from a single frame (noisy: motion blur,
+    pose, partial occlusion), it's refined over time, so the signature
+    stored for a person becomes progressively more stable the longer it
+    stays visible -- exactly the requested behavior ("staying in memory
+    to easily re-associate them on return"). High `alpha` (default 0.9,
+    typical in the StrongSORT/DeepSORT literature) gives a lot of weight
+    to history, little to the current frame: a single anomalous frame
+    doesn't make the stored embedding "jump". Re-normalized to unit norm
+    after averaging (the average of two unit vectors isn't generally
+    unitary)."""
     if new is None:
         return prev
     if prev is None:

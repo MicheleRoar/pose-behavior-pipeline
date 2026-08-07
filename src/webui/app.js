@@ -1,30 +1,31 @@
 /*
  * app.js
  * =======
- * Logica del frontend "Behaviour Vision Lab": legge lo stato dei controlli
- * della sidebar (Input / Task / Segmentation / Pose / Identity &
- * Re-identification / Outputs / Advanced settings), chiama il bridge Python
- * (webui/api.py, esposto come `window.pywebview.api.<metodo>(...)`, ognuno
- * una promise), e aggiorna il DOM (frame video, timeline, status bar) in
- * risposta ai payload ricevuti.
+ * "Behaviour Vision Lab" frontend logic: reads the state of the sidebar
+ * controls (Input / Task / Segmentation / Pose / Identity &
+ * Re-identification / Outputs / Advanced settings), calls the Python
+ * bridge (webui/api.py, exposed as `window.pywebview.api.<method>(...)`,
+ * each one a promise), and updates the DOM (video frame, timeline, status
+ * bar) in response to the received payloads.
  *
- * Segmentazione e pose sono scelte INDIPENDENTI (vedi #segmentation-card e
- * #pose-card): non piu' un'unica selezione "Architecture" che decideva
- * entrambe. Il backend (gui/pipeline_runner.py) sceglie il wiring esatto in
- * base alla combinazione Task/Segmentation-model/Pose-model -- questo file
- * si limita a mostrare/nascondere i controlli giusti e a spiegare in una
- * riga (vedi applySegGuidance/applyPoseGuidance) da dove viene l'input per
- * ciascuna combinazione, cosi' l'utente non deve indovinarlo.
+ * Segmentation and pose are INDEPENDENT choices (see #segmentation-card
+ * and #pose-card): no longer a single "Architecture" selection that
+ * decided both. The backend (gui/pipeline_runner.py) picks the exact
+ * wiring based on the Task/Segmentation-model/Pose-model combination --
+ * this file just shows/hides the right controls and explains in one
+ * line (see applySegGuidance/applyPoseGuidance) where the input for each
+ * combination comes from, so the user doesn't have to guess.
  *
- * Due percorsi diversi per far arrivare un frame sullo schermo:
- *  1. Play: `api.play(fps)` avvia un thread Python in background che spinge
- *     ogni frame da solo chiamando `window.onPipelineFrame(payload)` (vedi
- *     webui/api.py::Api._push_frame) -- qui non c'e' nessun polling lato JS.
- *  2. Back/Forward/Seek: la chiamata stessa (`api.step_forward()` ecc.)
- *     RESTITUISCE il payload del frame, quindi lo si passa direttamente a
- *     `onPipelineFrame` invece di aspettare una spinta separata.
- * In entrambi i casi il payload ha la stessa forma {ok, frame, status}, cosi'
- * il rendering ha un solo punto d'ingresso.
+ * Two different paths for getting a frame onto the screen:
+ *  1. Play: `api.play(fps)` starts a background Python thread that pushes
+ *     every frame on its own by calling `window.onPipelineFrame(payload)`
+ *     (see webui/api.py::Api._push_frame) -- there's no JS-side polling
+ *     here.
+ *  2. Back/Forward/Seek: the call itself (`api.step_forward()` etc.)
+ *     RETURNS the frame's payload, so it's passed directly to
+ *     `onPipelineFrame` instead of waiting for a separate push.
+ * In both cases the payload has the same shape {ok, frame, status}, so
+ * rendering has a single entry point.
  */
 
 (() => {
@@ -35,27 +36,27 @@
     hasPlayer: false,
     lastKnownCursor: 0,
     cachedFrameCount: 0,
-    totalFrameCount: null,   // da probe_video_metadata via pick_video_file() -- solo informativo
+    totalFrameCount: null,   // from probe_video_metadata via pick_video_file() -- informational only
     totalDurationS: null,
     lastTimecodeS: 0,
     maxPeople: null,
-    detectedDevice: null,  // da Api.detect_device() (vedi init()) -- usato SOLO per
-    // abilitare/disabilitare SAM 3.1/SAM2 nel selettore Segmentation model, il
-    // controllo definitivo resta lato server in Api.build_player().
-    torchreidAvailable: false,  // idem, ma per il toggle "Appearance embedding (OSNet)"
-    task: "both",       // "segmentation" | "pose" | "both" -- vedi #task-segmented
-    session: "multiple", // "single" | "multiple" -- vedi #session-segmented
+    detectedDevice: null,  // from Api.detect_device() (see init()) -- used ONLY to
+    // enable/disable SAM 3.1/SAM2 in the Segmentation model selector, the
+    // definitive check stays server-side in Api.build_player().
+    torchreidAvailable: false,  // same idea, but for the "Appearance embedding (OSNet)" toggle
+    task: "both",       // "segmentation" | "pose" | "both" -- see #task-segmented
+    session: "multiple", // "single" | "multiple" -- see #session-segmented
   };
 
   // ---------------------------------------------------------------- utils
   function $(id) { return document.getElementById(id); }
 
   function api() {
-    // window.pywebview.api non e' garantito pronto finche' l'evento
-    // 'pywebviewready' non e' scattato (vedi bindReady sotto) -- ma anche
-    // dopo, se il modulo viene aperto in un browser normale per debug (senza
-    // pywebview) l'oggetto semplicemente non esiste: qui lo segnaliamo
-    // chiaramente invece di far fallire silenziosamente ogni bottone.
+    // window.pywebview.api isn't guaranteed to be ready until the
+    // 'pywebviewready' event has fired (see bindReady below) -- but even
+    // after that, if the module is opened in a regular browser for
+    // debugging (without pywebview) the object simply doesn't exist:
+    // here we flag it clearly instead of silently failing every button.
     if (!window.pywebview || !window.pywebview.api) {
       throw new Error("pywebview bridge not available (opened outside the app window?)");
     }
@@ -63,14 +64,13 @@
   }
 
   function setStatusPill(text, kind) {
-    // "kind" e' "live" (in riproduzione, pallino acceso) o "idle" (pallino
-    // spento).
+    // "kind" is "live" (playing, dot lit) or "idle" (dot off).
     $("status-label").textContent = text;
     $("dot-status").className = "status-dot " + (kind === "live" ? "status-dot-live" : "status-dot-idle");
   }
 
   function formatTimecode(seconds) {
-    // "HH:MM:SS.cc" (centesimi), stesso formato del mock ("00:00:06.30").
+    // "HH:MM:SS.cc" (hundredths), same format as the mock ("00:00:06.30").
     const s = Math.max(0, seconds || 0);
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
@@ -81,7 +81,7 @@
   }
 
   function formatTimeShort(seconds) {
-    // "MM:SS" per le tacche della timeline (o "H:MM:SS" se serve).
+    // "MM:SS" for the timeline ticks (or "H:MM:SS" if needed).
     const s = Math.max(0, Math.round(seconds || 0));
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
@@ -100,9 +100,9 @@
   }
 
   // ------------------------------------------------------- segmented control
-  // Task (Segmentation/Pose/Both) e Session (Single/Multiple person) usano
-  // lo stesso pattern: un gruppo di bottoni con data-value, una classe
-  // "active" spostata al click, un callback per rifare il gating dipendente.
+  // Task (Segmentation/Pose/Both) and Session (Single/Multiple person) use
+  // the same pattern: a group of buttons with data-value, an "active"
+  // class moved on click, a callback to redo the dependent gating.
   function wireSegmented(containerId, onChange) {
     const container = $(containerId);
     container.querySelectorAll(".seg-btn").forEach((btn) => {
@@ -120,10 +120,10 @@
   }
 
   // ------------------------------------------------------------- gating
-  // Task -> quali card (Segmentation/Pose) sono visibili, e ricalcola tutto
-  // il resto a cascata (guidance, identity, outputs, summary) -- stesso
-  // ruolo di applyModeGating() nella versione precedente, ma su un albero di
-  // controlli piu' ricco.
+  // Task -> which cards (Segmentation/Pose) are visible, and recomputes
+  // everything else in a cascade (guidance, identity, outputs, summary)
+  // -- same role as applyModeGating() in the previous version, but on a
+  // richer control tree.
   function applyTaskGating() {
     const task = state.task;
     $("segmentation-card").classList.toggle("hidden", task === "pose");
@@ -136,11 +136,11 @@
     updateSummary();
   }
 
-  // Segmentation model -> riga di guida sotto il selettore ("Guidance: text
-  // prompt 'person'" ecc., vedi il mock), campo prompt SAM 3.1, gating CUDA
-  // per SAM 3.1/SAM2 (SAMURAI resta SEMPRE disabilitato, vedi l'attributo
-  // "disabled" nell'HTML e il commento li' sul perche': il suo filtro di
-  // Kalman non regge il multi-persona).
+  // Segmentation model -> guidance line under the selector ("Guidance:
+  // text prompt 'person'" etc., see the mock), SAM 3.1 prompt field, CUDA
+  // gating for SAM 3.1/SAM2 (SAMURAI stays ALWAYS disabled, see the
+  // "disabled" attribute in the HTML and the comment there on why: its
+  // Kalman filter can't handle multiple people).
   function applySegGuidance() {
     const select = $("seg-model-select");
     const cudaAvailable = state.detectedDevice === "cuda";
@@ -170,11 +170,11 @@
     $("sam-chunk-fields").classList.toggle("hidden", !showChunkFields);
   }
 
-  // Pose model -> riga di guida: dipende sia dal modello di pose sia da
-  // COSA sta alimentando MediaPipe in questa combinazione (vedi la tabella
-  // di auto-selezione dell'input nel docstring di
-  // gui/pipeline_runner.iter_pipeline_frames -- questa funzione la
-  // rispecchia in linguaggio naturale, non la reinventa).
+  // Pose model -> guidance line: depends both on the pose model and on
+  // WHAT is feeding MediaPipe in this combination (see the input
+  // auto-selection table in the docstring of
+  // gui/pipeline_runner.iter_pipeline_frames -- this function mirrors it
+  // in natural language, it doesn't reinvent it).
   function applyPoseGuidance() {
     const poseModel = $("pose-model-select").value;
     const segActive = state.task !== "pose";
@@ -190,22 +190,22 @@
     $("scale-select").parentElement; // no-op, model size applies to any YOLO model in play
   }
 
-  // Identity & Re-identification: mostra/nasconde il campo "Max people"
-  // (irrilevante con Session=Single, forzato a 1 comunque), abilita/
-  // disabilita "Flag uncertain matches"/"Lost identity memory" (hanno senso
-  // solo con Tracking + Re-identification), aggiorna la pillola di stato.
+  // Identity & Re-identification: shows/hides the "Max people" field
+  // (irrelevant with Session=Single, forced to 1 regardless), enables/
+  // disables "Flag uncertain matches"/"Lost identity memory" (only make
+  // sense with Tracking + Re-identification), updates the status pill.
   //
-  // La pillola deve rispecchiare ESATTAMENTE la stessa condizione usata lato
-  // server (vedi webui/api.py::build_player_kwargs, variabile
-  // `seg_reid_ready`): il motore di re-id sulla SEGMENTAZIONE
-  // (SegReIdentifier) richiede max_people per costruzione (solleva
-  // ValueError altrimenti), quello sulla POSE (ReIdentifier) invece no. Se
-  // qui la mostrassimo sempre come "Re-ID active" appena e' selezionato il
-  // menu, un utente con Task=Segmentation/Both, Session=Multiple e "Max
-  // number of people" vuoto vedrebbe una pillola verde MENTRE la
-  // segmentazione gira comunque senza nessuna riassociazione -- esattamente
-  // il bug diagnosticato dagli screenshot di ID instabili (296/169/7 sulla
-  // stessa persona): il campo sembrava attivo ma non lo era.
+  // The pill must EXACTLY mirror the same condition used server-side
+  // (see webui/api.py::build_player_kwargs, `seg_reid_ready` variable):
+  // the re-id engine for SEGMENTATION (SegReIdentifier) requires
+  // max_people by construction (raises ValueError otherwise), the one
+  // for POSE (ReIdentifier) doesn't. If we always showed it here as
+  // "Re-ID active" as soon as the menu is selected, a user with
+  // Task=Segmentation/Both, Session=Multiple and an empty "Max number of
+  // people" would see a green pill WHILE segmentation runs anyway with
+  // no re-association at all -- exactly the bug diagnosed from the
+  // unstable-ID screenshots (296/169/7 on the same person): the field
+  // looked active but wasn't.
   function applyIdentityGating() {
     const mode = $("identity-mode-select").value;
     const isReid = mode === "tracking_reid";
@@ -237,10 +237,10 @@
     }
   }
 
-  // Outputs: mani/viso restano cablati SOLO sul percorso YOLO26 Pose (vedi
-  // webui/api.py::build_player_kwargs) -- con MediaPipe selezionato in Pose
-  // lo scheletro c'e' comunque, ma dita/blink/bocca/sopracciglia non sono
-  // ancora collegati su quel percorso (limite onesto, vedi
+  // Outputs: hands/face stay wired ONLY to the YOLO26 Pose path (see
+  // webui/api.py::build_player_kwargs) -- with MediaPipe selected for
+  // Pose the skeleton is still there, but fingers/blink/mouth/eyebrows
+  // aren't wired up on that path yet (honest limitation, see
   // pipeline_runner._iter_pose_mediapipe).
   function applyOutputsGating() {
     const poseCapable = state.task !== "segmentation";
@@ -263,10 +263,11 @@
   }
 
   // ---------------------------------------------------------------- summary
-  // Riepilogo in linguaggio naturale della configurazione corrente, ricavato
-  // dai controlli reali -- mai un testo fisso, cosi' non puo' disallinearsi
-  // da cosa gira davvero (stesso principio di updatePipelineFlow(), che
-  // resta invariata piu' sotto per lo status bar).
+  // Plain-language recap of the current configuration, derived from the
+  // real controls -- never a fixed string, so it can never drift out of
+  // sync with what's actually running (same principle as
+  // updatePipelineFlow(), which stays unchanged further below for the
+  // status bar).
   function updateSummary() {
     const scale = $("scale-select").value;
     const lines = [];
@@ -321,9 +322,9 @@
   };
 
   function updatePipelineFlow() {
-    // Diagramma di flusso REALE, costruito dalla configurazione corrente
-    // della sidebar -- non un testo fisso, cosi' riflette sempre la
-    // combinazione Task/Segmentation-model/Pose-model davvero selezionata.
+    // REAL flow diagram, built from the sidebar's current configuration
+    // -- not a fixed string, so it always reflects the Task/Segmentation-
+    // model/Pose-model combination actually selected.
     const scale = $("scale-select").value;
     const steps = [];
 
@@ -370,13 +371,13 @@
       .some((id) => $(id).checked && !$(id).disabled);
   }
 
-  // Appearance embedding (OSNet, Advanced settings): stesso schema di
-  // applySegGuidance() per SAM 3.1/SAM2 -- disabilita la checkbox e mostra
-  // il motivo se 'torch'/'torchreid' non sono installati (vedi
-  // Api.detect_device()), invece di lasciar scattare un errore solo dopo
-  // "Run analysis". Il controllo definitivo resta comunque lato server
-  // (pose/appearance_embedding.OSNetEmbedder solleva ImportError se forzato
-  // comunque, vedi pipeline_runner._build_embedder).
+  // Appearance embedding (OSNet, Advanced settings): same pattern as
+  // applySegGuidance() for SAM 3.1/SAM2 -- disables the checkbox and
+  // shows the reason if 'torch'/'torchreid' aren't installed (see
+  // Api.detect_device()), instead of letting an error surface only after
+  // "Run analysis". The definitive check still stays server-side
+  // (pose/appearance_embedding.OSNetEmbedder raises ImportError if
+  // forced anyway, see pipeline_runner._build_embedder).
   function applyEmbeddingGating() {
     const toggle = $("appearance-embedding-toggle");
     if (!state.torchreidAvailable) {
@@ -400,8 +401,8 @@
 
   // ------------------------------------------------------------- collect
   function collectParams() {
-    // Nessun campo "device": lo lasciamo assente cosi' Api.build_player()
-    // lo auto-rileva lato Python (cuda/mps/cpu, vedi common/device.py).
+    // No "device" field: we leave it absent so Api.build_player()
+    // auto-detects it server-side (cuda/mps/cpu, see common/device.py).
     return {
       mode: state.task,
       fps: $("fps-input").value,
@@ -490,13 +491,13 @@
   }
 
   function updateTimeline() {
-    // Se la durata totale e' nota (letta dai metadati del file al momento
-    // del caricamento, vedi api.py::probe_video_metadata) la barra mostra
-    // "quanto del video intero e' stato elaborato finora"; altrimenti (rari
-    // container senza questi metadati) ripiega su "quanto della cache
-    // corrente e' stato visto", che e' comunque tutto cio' che si puo'
-    // sapere. In ENTRAMBI i casi lo scrubber resta cliccabile SOLO nel
-    // prefisso gia' elaborato -- vedi onTimelineClick.
+    // If the total duration is known (read from the file's metadata at
+    // load time, see api.py::probe_video_metadata) the bar shows "how
+    // much of the whole video has been processed so far"; otherwise
+    // (rare containers without this metadata) it falls back to "how much
+    // of the current cache has been seen", which is all that can be
+    // known anyway. In BOTH cases the scrubber remains clickable ONLY on
+    // the already-processed prefix -- see onTimelineClick.
     let progressPct;
     if (state.totalDurationS) {
       progressPct = Math.min(100, (state.lastTimecodeS / state.totalDurationS) * 100);
@@ -572,10 +573,10 @@
   }
 
   async function onRestart() {
-    // "Restart pipeline": ricostruzione forzata da zero, anche se un player
-    // esisteva gia' -- un tracker gia' avviato non si puo' riconfigurare a
-    // meta' strada (vedi gui/video_player.py), stesso ruolo di "Riavvia
-    // pipeline" nel mock / "Restart" nella GUI Tkinter.
+    // "Restart pipeline": forced rebuild from scratch, even if a player
+    // already existed -- a tracker already started can't be reconfigured
+    // halfway through (see gui/video_player.py), same role as "Restart
+    // pipeline" in the mock / "Restart" in the Tkinter GUI.
     state.hasPlayer = false;
     await applySettings();
   }
@@ -605,9 +606,9 @@
   }
 
   async function seekOrCatchUp(targetIndex) {
-    // Salta istantaneamente se il frame e' gia' nella cache elaborata,
-    // altrimenti elabora in sequenza fino a raggiungerlo (nessun salto
-    // impossibile in avanti) -- stessa logica riusata da timeline/skip.
+    // Jumps instantly if the frame is already in the processed cache,
+    // otherwise processes sequentially until reaching it (no impossible
+    // forward jump) -- same logic reused by timeline/skip.
     targetIndex = Math.max(0, targetIndex);
     state.playing = false;
     setPlayIcon(false);
@@ -646,9 +647,10 @@
     const track = $("timeline-track");
     const rect = track.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
-    // Il click e' proporzionale alla durata TOTALE nota (se disponibile),
-    // non solo al prefisso gia' elaborato -- cliccare oltre il prefisso
-    // avvia il recupero sequenziale (vedi seekOrCatchUp), non un salto.
+    // The click is proportional to the known TOTAL duration (if
+    // available), not just the already-processed prefix -- clicking
+    // beyond the prefix starts sequential catch-up (see seekOrCatchUp),
+    // not a jump.
     const referenceFrames = state.totalFrameCount || state.cachedFrameCount || 1;
     const targetIndex = Math.round(ratio * (referenceFrames - 1));
     await seekOrCatchUp(targetIndex);
@@ -693,17 +695,17 @@
     $("pose-model-select").addEventListener("change", () => { applyPoseGuidance(); applyOutputsGating(); refreshAllGating(); });
     $("identity-mode-select").addEventListener("change", () => { applyIdentityGating(); refreshAllGating(); });
     $("scale-select").addEventListener("change", refreshAllGating);
-    // "input" (non "change"): la pillola/il bordo rosso devono aggiornarsi
-    // mentre l'utente digita il numero, non solo quando il campo perde il
-    // focus -- altrimenti resterebbe "Re-ID needs Max people" per un
-    // istante dopo che il valore e' gia' stato inserito.
+    // "input" (not "change"): the pill/red border must update while the
+    // user is typing the number, not only when the field loses focus --
+    // otherwise it would stay "Re-ID needs Max people" for a moment
+    // after the value has already been entered.
     $("max-people-input").addEventListener("input", () => { applyIdentityGating(); updateSummary(); });
 
-    // qualunque cambio di parametro invalida il player corrente: bisogna
-    // premere "Run analysis"/"Restart" per ricostruirlo (un tracker gia'
-    // avviato non si puo' riconfigurare a meta' strada, vedi
-    // video_player.py) -- qui ci limitiamo a segnalarlo, senza ricostruire
-    // da soli ad ogni click.
+    // any parameter change invalidates the current player: "Run
+    // analysis"/"Restart" must be pressed to rebuild it (a tracker
+    // already started can't be reconfigured halfway through, see
+    // video_player.py) -- here we just flag it, without rebuilding on
+    // our own on every click.
     const invalidatingIds = [
       "seg-model-select", "pose-model-select", "identity-mode-select", "scale-select",
       "max-people-input", "flag-uncertain-toggle", "lost-memory-input",
@@ -724,17 +726,17 @@
 
   async function init() {
     wireEvents();
-    applyTaskGating();  // chiama gia' applySegGuidance/applyPoseGuidance/applyOutputsGating/applyIdentityGating
+    applyTaskGating();  // already calls applySegGuidance/applyPoseGuidance/applyOutputsGating/applyIdentityGating
     updateTimeline();
     try {
       const result = await api().detect_device();
       state.detectedDevice = result && result.device;
       state.torchreidAvailable = !!(result && result.torchreid_available);
     } catch (err) {
-      // aperto in un browser normale senza pywebview (vedi api()), o
-      // detect_device() ha fallito per qualche motivo: SAM 3.1/SAM2
-      // restano disabilitati per sicurezza (cudaAvailable resta false),
-      // idem l'embedding OSNet (torchreidAvailable resta false).
+      // opened in a regular browser without pywebview (see api()), or
+      // detect_device() failed for some reason: SAM 3.1/SAM2 stay
+      // disabled for safety (cudaAvailable stays false), same for the
+      // OSNet embedding (torchreidAvailable stays false).
       state.detectedDevice = null;
       state.torchreidAvailable = false;
     }
@@ -744,10 +746,9 @@
   if (window.pywebview) {
     init();
   } else {
-    // in fase di sviluppo il file puo' essere aperto in un browser normale
-    // per controllare rapidamente il layout: i controlli funzionano, le
-    // chiamate all'API falliscono con un messaggio chiaro invece di un
-    // errore silenzioso (vedi api()).
+    // during development the file can be opened in a regular browser to
+    // quickly check the layout: the controls work, the API calls fail
+    // with a clear message instead of a silent error (see api()).
     document.addEventListener("DOMContentLoaded", init);
   }
   window.addEventListener("pywebviewready", init);

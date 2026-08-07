@@ -1,35 +1,35 @@
 """
 chunking.py
 ============
-Logica di suddivisione in finestre (chunk) sovrapposte e di riconciliazione
-degli ID tra un chunk e il successivo -- indipendente da SAM/SAM2, usata
-da `sam_backend.py`. Nessuna dipendenza pesante (solo numpy/cv2, gia'
-richiesti dal resto del progetto): testabile con maschere sintetiche, senza
-avere ne' una GPU ne' i pesi SAM installati (vedi demo/chunking_check.py).
+Logic for splitting video into overlapping chunks (windows) and
+reconciling IDs between one chunk and the next -- independent of
+SAM/SAM2, used by `sam_backend.py`. No heavy dependency (only numpy/cv2,
+already required by the rest of the project): testable with synthetic
+masks, without needing a GPU or the SAM weights installed (see
+demo/chunking_check.py).
 
-Perche' il chunking e' necessario (non solo un'ottimizzazione)
+Why chunking is necessary (not just an optimization)
 ------------------------------------------------------------------
-L'API video di SAM 3.1 e di SAM2 e' stateful: `init_state(video)`
-carica in memoria i pixel di TUTTI i frame passati, prima ancora di
-cominciare a propagare le maschere. Su un video di svariati minuti questo
-non e' semplicemente lento, e' un problema di memoria (VRAM/RAM) -- quindi
-non si passa mai il video intero a `init_state()`, si passa una finestra di
-`chunk_size` frame alla volta. Il prezzo da pagare e' che ogni chunk parte
-"senza memoria" del chunk precedente: gli ID che SAM assegna dentro un
-chunk sono locali a quel chunk, non c'e' garanzia che l'id 1 del chunk 2 sia
-la stessa persona dell'id 1 del chunk 1. Da qui la sovrapposizione
-(`overlap` frame in comune tra un chunk e il successivo) e la
-riconciliazione geometrica sotto: si confrontano le maschere prodotte dai
-due chunk sugli STESSI frame (quelli in comune) e si ricostruisce un id
-globale stabile.
+The SAM 3.1 and SAM2 video API is stateful: `init_state(video)` loads
+the pixels of ALL passed frames into memory, even before starting to
+propagate masks. On a video several minutes long this isn't just slow,
+it's a memory problem (VRAM/RAM) -- so the whole video is never passed
+to `init_state()`, a window of `chunk_size` frames is passed at a time.
+The price to pay is that each chunk starts "without memory" of the
+previous chunk: the IDs SAM assigns within a chunk are local to that
+chunk, there's no guarantee that id 1 of chunk 2 is the same person as
+id 1 of chunk 1. Hence the overlap (`overlap` frames shared between one
+chunk and the next) and the geometric reconciliation below: the masks
+produced by the two chunks are compared on the SAME frames (the shared
+ones) and a stable global id is reconstructed.
 
-Limite noto di questa prima versione: la riconciliazione usa solo IoU
-geometrico sul frame di ancoraggio (l'ultimo frame di overlap). Funziona
-bene se le persone non si sono scambiate di posizione dentro la finestra di
-overlap; in scene affollate con occlusioni proprio a cavallo del confine
-chunk puo' sbagliare -- estensione naturale, se servisse: aggiungere un
-punteggio di somiglianza d'aspetto (colore/texture, come gia' fa
-`segmentation/seg_reid.py` per ByteTrack) accanto all'IoU.
+Known limitation of this first version: reconciliation only uses
+geometric IoU on the anchor frame (the last overlap frame). Works well
+if people haven't swapped positions within the overlap window; in
+crowded scenes with occlusions right at the chunk boundary it can get
+it wrong -- natural extension, if needed: add an appearance similarity
+score (color/texture, as `segmentation/seg_reid.py` already does for
+ByteTrack) alongside the IoU.
 """
 
 from __future__ import annotations
@@ -42,13 +42,13 @@ import numpy as np
 
 
 def iter_chunk_ranges(total_frames: int, chunk_size: int, overlap: int) -> Iterator[tuple[int, int]]:
-    """Genera coppie (start, end) [end escluso] che coprono `[0, total_frames)`
-    con una sovrapposizione di `overlap` frame tra un chunk e il successivo.
-    L'ultimo chunk puo' essere piu' corto di `chunk_size` (non si estende
-    oltre `total_frames`). Solleva `ValueError` se `chunk_size <= overlap`
-    (altrimenti non si avanzerebbe mai, loop infinito)."""
+    """Generates (start, end) pairs [end exclusive] covering `[0, total_frames)`
+    with an overlap of `overlap` frames between one chunk and the next.
+    The last chunk may be shorter than `chunk_size` (never extends past
+    `total_frames`). Raises `ValueError` if `chunk_size <= overlap`
+    (otherwise it would never advance, infinite loop)."""
     if chunk_size <= overlap:
-        raise ValueError(f"chunk_size ({chunk_size}) deve essere maggiore di overlap ({overlap})")
+        raise ValueError(f"chunk_size ({chunk_size}) must be greater than overlap ({overlap})")
     if total_frames <= 0:
         return
     start = 0
@@ -61,12 +61,12 @@ def iter_chunk_ranges(total_frames: int, chunk_size: int, overlap: int) -> Itera
 
 
 def polygon_iou(poly_a: np.ndarray, poly_b: np.ndarray, frame_shape: tuple[int, int]) -> float:
-    """IoU (intersection over union) tra due poligoni maschera, calcolato
-    rasterizzandoli su una griglia della dimensione del frame (`frame_shape`
-    = (height, width)) e confrontando le maschere binarie risultanti --
-    corretto anche per poligoni non convessi, a differenza di un IoU
-    calcolato sui soli bounding box. Ritorna 0.0 se uno dei due poligoni ha
-    meno di 3 punti (degenere/assente)."""
+    """IoU (intersection over union) between two mask polygons, computed by
+    rasterizing them onto a grid the size of the frame (`frame_shape`
+    = (height, width)) and comparing the resulting binary masks --
+    correct even for non-convex polygons, unlike an IoU computed on
+    bounding boxes alone. Returns 0.0 if either polygon has fewer than
+    3 points (degenerate/absent)."""
     if poly_a.shape[0] < 3 or poly_b.shape[0] < 3:
         return 0.0
     mask_a = np.zeros(frame_shape, dtype=np.uint8)
@@ -84,22 +84,21 @@ def reconcile_ids(
     frame_shape: tuple[int, int],
     iou_threshold: float = 0.3,
 ) -> dict[int, int]:
-    """Confronta le maschere del chunk precedente (`prev_polys_at_anchor`,
-    chiavi = id GLOBALI gia' assegnati) e quelle del chunk nuovo
-    (`new_polys_at_anchor`, chiavi = id LOCALI assegnati da SAM dentro
-    questo chunk) sullo stesso frame di ancoraggio (un frame che entrambi i
-    chunk hanno prodotto, dentro la finestra di overlap).
+    """Compares the masks of the previous chunk (`prev_polys_at_anchor`,
+    keys = GLOBAL ids already assigned) with those of the new chunk
+    (`new_polys_at_anchor`, keys = LOCAL ids assigned by SAM within this
+    chunk) on the same anchor frame (a frame both chunks produced, within
+    the overlap window).
 
-    Ritorna un dict `{id_locale: id_globale}` solo per gli id locali che
-    hanno trovato una corrispondenza sopra `iou_threshold`. Un id locale
-    assente dal dict e' una persona "nuova" per il chiamante (entrata nel
-    campo durante il chunk, o corrispondenza troppo incerta per essere
-    sicuri) -- il chiamante gli assegnera' un id globale mai usato prima
-    (vedi `GlobalIdAllocator`).
+    Returns a `{local_id: global_id}` dict only for the local ids that
+    found a match above `iou_threshold`. A local id absent from the dict
+    is a "new" person for the caller (entered the frame during the
+    chunk, or the match was too uncertain to be sure) -- the caller will
+    assign it a global id never used before (see `GlobalIdAllocator`).
 
-    Abbinamento greedy per IoU decrescente: ogni id (vecchio o nuovo) viene
-    usato al massimo una volta, cosi' due persone vicine non vengono
-    entrambe abbinate allo stesso id."""
+    Greedy matching by decreasing IoU: each id (old or new) is used at
+    most once, so two nearby people are never both matched to the same
+    id."""
     candidates: list[tuple[float, int, int]] = []
     for old_id, old_poly in prev_polys_at_anchor.items():
         for new_id, new_poly in new_polys_at_anchor.items():
@@ -113,7 +112,7 @@ def reconcile_ids(
     used_new: set[int] = set()
     for iou, old_id, new_id in candidates:
         if iou < iou_threshold:
-            break  # ordinato per iou decrescente: tutto il resto e' sotto soglia
+            break  # sorted by decreasing iou: everything else is below threshold
         if old_id in used_old or new_id in used_new:
             continue
         mapping[new_id] = old_id
@@ -124,10 +123,10 @@ def reconcile_ids(
 
 @dataclass
 class GlobalIdAllocator:
-    """Distributore di id globali progressivi, condiviso da tutti i chunk di
-    una stessa sessione. `next_id()` restituisce sempre un intero mai
-    restituito prima -- usato per gli id locali che `reconcile_ids()` non e'
-    riuscita ad abbinare a nessun id gia' noto."""
+    """Distributes progressive global ids, shared by all chunks of the same
+    session. `next_id()` always returns an integer never returned before
+    -- used for local ids that `reconcile_ids()` failed to match to any
+    already-known id."""
     _next: int = field(default=1)
 
     def next_id(self) -> int:

@@ -1,118 +1,115 @@
 """
 sam_backend.py
 ================
-Base condivisa da `Sam31Tracker` (sam31_estimation.py) e `Sam2Tracker`
-(sam2_estimation.py): entrambe le librerie espongono la STESSA API video
-stateful (documentazione ufficiale: facebookresearch/sam3 e
-facebookresearch/sam2) --
+Shared base for `Sam31Tracker` (sam31_estimation.py) and `Sam2Tracker`
+(sam2_estimation.py): both libraries expose the SAME stateful video API
+(official docs: facebookresearch/sam3 and facebookresearch/sam2) --
 
     state = predictor.init_state(frames)
     predictor.add_new_points_or_box(state, frame_idx=..., obj_id=..., box=...)
     for frame_idx, obj_ids, masks in predictor.propagate_in_video(state):
         ...
 
--- quindi tutta la logica di chunking/prompting/riconciliazione/persistenza
-vive UNA volta sola qui; le due sottoclassi implementano solo
-`_build_predictor()` (quale libreria importare/istanziare, import ritardato
-perche' ne' sam3 ne' sam2 sono installabili in questo ambiente: servono
-Python 3.12+/CUDA 12.6+, vedi requirements.txt).
+-- so all the chunking/prompting/reconciliation/persistence logic lives
+here ONCE; the two subclasses implement only `_build_predictor()`
+(which library to import/instantiate, delayed import because neither
+sam3 nor sam2 are installable in this environment: they require Python
+3.12+/CUDA 12.6+, see requirements.txt).
 
-Perche' il chunking (vedi anche segmentation/chunking.py)
+Why chunking (see also segmentation/chunking.py)
 ------------------------------------------------------------
-`init_state()` carica in memoria i pixel di TUTTI i frame passati -- su un
-video di diversi minuti non e' praticabile passarlo intero. Si processa a
-finestre sovrapposte (`chunk_size` frame, `overlap` in comune tra un chunk
-e il successivo).
+`init_state()` loads the pixels of ALL passed frames into memory -- on a
+video several minutes long it's not feasible to pass it whole. It's
+processed in overlapping windows (`chunk_size` frames, `overlap` shared
+between one chunk and the next).
 
-Strategia di prompting/continuita' degli id
+ID prompting/continuity strategy
 ------------------------------------------------
-- Primo chunk: nessuna persona nota ancora. Si usa YOLO (lo stesso modello
-  gia' usato da `SegTracker`, qui solo come RILEVATORE su un singolo frame,
-  non come tracker) per proporre le box iniziali sul primo frame del
-  chunk. ATTENZIONE: questo significa che la qualita' del prompt iniziale
-  dipende comunque da YOLO -- SAM qui sostituisce il TRACKING/re-id nel
-  tempo, non necessariamente la detection iniziale (si potrebbe passare a
-  un prompt testuale "person" se il modello SAM 3.1 concept-prompting lo
-  supporta a sufficienza; da verificare sulla macchina CUDA, vedi
-  Sam31Tracker).
-- Chunk successivi: per ogni persona gia' nota (id globale) si ricava un
-  box prompt dalla sua maschera nell'ULTIMO frame del chunk precedente
-  (che e' anche il PRIMO frame -- "frame di ancoraggio" -- del nuovo
-  chunk, essendo nella finestra di overlap), e lo si registra con
-  `obj_id=<id globale>`: SAM continua quindi a usare direttamente lo
-  stesso id, non serve un abbinamento a posteriori nel caso comune. Si fa
-  girare ANCHE YOLO sul frame di ancoraggio per individuare persone NUOVE
-  (entrate nel campo durante il chunk precedente) non gia' coperte da un
-  prompt esistente (IoU basso con tutte le box gia' seminate): a queste si
-  assegna un id globale mai usato.
-- Come controllo di coerenza (non come meccanismo di abbinamento primario,
-  vedi sopra), sul frame di ancoraggio si confronta comunque la maschera
-  che SAM produce con quella seminata (`chunking.polygon_iou`): se l'IoU
-  cala sotto `iou_threshold` viene solo loggato un avviso -- puo' voler
-  dire che SAM ha perso la persona o "scambiato" identita' nell'overlap,
-  utile da vedere nei log ma non gestito automaticamente in questa prima
-  versione (vedi chunking.py per il limite noto).
+- First chunk: no known person yet. YOLO is used (the same model already
+  used by `SegTracker`, here only as a DETECTOR on a single frame, not
+  as a tracker) to propose the initial boxes on the chunk's first frame.
+  NOTE: this means the quality of the initial prompt still depends on
+  YOLO -- SAM here replaces TRACKING/re-id over time, not necessarily
+  the initial detection (one could switch to a text prompt "person" if
+  the SAM 3.1 concept-prompting model supports it well enough; to be
+  verified on the CUDA machine, see Sam31Tracker).
+- Subsequent chunks: for each already-known person (global id) a box
+  prompt is derived from their mask in the LAST frame of the previous
+  chunk (which is also the FIRST frame -- "anchor frame" -- of the new
+  chunk, being in the overlap window), and it's registered with
+  `obj_id=<global id>`: SAM thus continues to directly use the same id,
+  no need for after-the-fact matching in the common case. YOLO is ALSO
+  run on the anchor frame to spot NEW people (who entered the frame
+  during the previous chunk) not already covered by an existing prompt
+  (low IoU with all already-seeded boxes): these are assigned a
+  never-used global id.
+- As a consistency check (not as a primary matching mechanism, see
+  above), the mask SAM produces on the anchor frame is still compared
+  against the seeded one (`chunking.polygon_iou`): if the IoU drops
+  below `iou_threshold` only a warning is logged -- it may mean SAM lost
+  the person or "swapped" identities in the overlap, useful to see in
+  the logs but not handled automatically in this first version (see
+  chunking.py for the known limitation).
 
-Ri-detection periodica dentro il chunk (`redetect_every`)
+Periodic re-detection within the chunk (`redetect_every`)
 -------------------------------------------------------------
-Problema osservato (Michele, confronto diretto YOLO+ByteTrack vs
-Sam2Tracker sullo stesso video): YOLO+ByteTrack rileva su OGNI frame,
-mentre nello schema sopra YOLO gira una sola volta per chunk (il frame di
-ancoraggio) -- con `chunk_size` di default 600, una detection ogni ~40s a
-15fps. Chi non e' esattamente nel frame di ancoraggio resta invisibile per
-TUTTO il resto del chunk, anche se e' visibile nel 99% degli altri frame;
-in piu' SAM propaga per inerzia (memoria interna) e se perde una persona a
-meta' chunk (occlusione, movimento rapido) non ha modo di ririlevarla
-prima del prossimo confine di chunk. Risultato: molte meno maschere
-rispetto a YOLO+ByteTrack, non per una differenza di qualita' del modello
-ma per la frequenza di ri-detection.
+Observed problem (Michele, direct comparison YOLO+ByteTrack vs
+Sam2Tracker on the same video): YOLO+ByteTrack detects on EVERY frame,
+while in the scheme above YOLO runs only once per chunk (the anchor
+frame) -- with the default `chunk_size` of 600, one detection every ~40s
+at 15fps. Whoever isn't exactly in the anchor frame stays invisible for
+the ENTIRE rest of the chunk, even if visible in 99% of the other
+frames; on top of that SAM propagates by inertia (internal memory) and
+if it loses a person halfway through a chunk (occlusion, fast movement)
+it has no way to re-detect them before the next chunk boundary. Result:
+many fewer masks compared to YOLO+ByteTrack, not due to a model quality
+difference but due to re-detection frequency.
 
-`redetect_every` (default `None` = comportamento invariato, un'unica
-finestra grande quanto il chunk) spezza ogni chunk in sotto-finestre da
-`redetect_every` frame: si propaga una sotto-finestra alla volta
+`redetect_every` (default `None` = unchanged behavior, a single window
+as large as the chunk) splits each chunk into sub-windows of
+`redetect_every` frames: one sub-window is propagated at a time
 (`propagate_in_video(state, start_frame_idx=..., max_frame_num_to_track=...)`,
-assunto disponibile perche' documentato nelle notebook ufficiali SAM2/SAM3
-per aggiungere oggetti a meta' video -- NON ancora verificato su una
-macchina CUDA reale, vedi la nota "Onesta'" sotto), poi si richiama YOLO
-sul primo frame della sotto-finestra SUCCESSIVA per proporre eventuali
-persone nuove non ancora seminate (stesso confronto IoU di
-`reseed_new_people`, e infatti rispetta lo stesso flag: con
-`reseed_new_people=False` nessuna ri-detection avviene, ne' al confine di
-chunk ne' dentro il chunk -- resta la condizione "SAM puro"). Le persone
-gia' note continuano a propagare automaticamente (stesso `state`, stessa
-memoria SAM) -- non serve riseminarle ad ogni sotto-finestra, la
-ri-detection propone SOLO le eventuali new entries.
+assumed available because documented in the official SAM2/SAM3 notebooks
+for adding objects mid-video -- NOT yet verified on a real CUDA machine,
+see the "Honesty" note below), then YOLO is called on the first frame of
+the NEXT sub-window to propose any new people not yet seeded (same IoU
+comparison as `reseed_new_people`, and indeed it respects the same flag:
+with `reseed_new_people=False` no re-detection happens, neither at the
+chunk boundary nor within the chunk -- it remains the "pure SAM"
+condition). Already-known people keep propagating automatically (same
+`state`, same SAM memory) -- no need to reseed them at every
+sub-window, re-detection ONLY proposes any new entries.
 
-Onesta' su cosa e' verificato qui
+Honesty about what's verified here
 --------------------------------------
-Questo modulo e' stato scritto e testato inizialmente SOLO con un predictor
-finto iniettato al posto di sam3/sam2 (vedi `demo/sam_backend_check.py`,
-nessuna GPU CUDA in questo ambiente). `_init_state()` sotto e' stato pero'
-CORRETTO a partire da un test reale su una macchina CUDA (col fork
-SAMURAI, che vendorizza lo stesso `sam2_video_predictor` di SAM2 vanilla --
-stesso comportamento atteso con `Sam2Tracker`): il predictor NON accetta
-una lista di frame in memoria come si era assunto all'inizio -- si e'
-scontrato con "Only MP4 video and JPEG folder are supported". Si scrive
-quindi ogni chunk come sequenza JPEG in una cartella temporanea (vedi
-sotto) prima di chiamare `init_state()`. Non ancora confermato se SAM 3.1
-ha lo stesso vincolo (eredita lo stesso codice video di SAM2, quindi
-probabile) -- se si scoprisse che accetta anche liste di frame,
-`_init_state()` resta comunque overridabile per sottoclasse se in futuro
-conviene differenziare.
+This module was initially written and tested ONLY with a fake predictor
+injected in place of sam3/sam2 (see `demo/sam_backend_check.py`, no CUDA
+GPU in this environment). `_init_state()` below was however CORRECTED
+based on a real test on a CUDA machine (with the SAMURAI fork, which
+vendors the same `sam2_video_predictor` as vanilla SAM2 -- same expected
+behavior with `Sam2Tracker`): the predictor does NOT accept a list of
+in-memory frames as was initially assumed -- it hit "Only MP4 video and
+JPEG folder are supported". Each chunk is therefore written as a JPEG
+sequence in a temporary folder (see below) before calling
+`init_state()`. Not yet confirmed whether SAM 3.1 has the same
+constraint (it inherits the same video code from SAM2, so likely) -- if
+it turns out it also accepts frame lists, `_init_state()` remains
+overridable per subclass in case it's worth differentiating in the
+future.
 
-Perche' Sam2Tracker e non SamuraiTracker
+Why Sam2Tracker and not SamuraiTracker
 ------------------------------------------
-`SamuraiTracker` (rimosso) usava lo stesso predictor con la modalita'
-motion-aware di SAMURAI attiva. Verificato su una macchina CUDA reale:
-quel codice (`sam2_base.py::_forward_sam_heads`) assume un solo oggetto
-per sessione (scritto/validato sui benchmark di visual object tracking
-single-target LaSOT/GOT-10k/TrackingNet) -- seminando piu' persone nella
-stessa sessione (il caso normale qui) va in crash con `RuntimeError:
-Boolean value of Tensor with more than one value is ambiguous`. SAM2
-vanilla (`Sam2Tracker`, sam2_estimation.py) usa lo stesso predictor SENZA
-quella patch: supporta il multi-oggetto batchato nativamente, a costo di
-perdere il motion-modeling attraverso le occlusioni. Vedi il docstring di
-`segmentation/sam2_estimation.py` per il dettaglio completo.
+`SamuraiTracker` (removed) used the same predictor with SAMURAI's
+motion-aware mode active. Verified on a real CUDA machine: that code
+(`sam2_base.py::_forward_sam_heads`) assumes a single object per session
+(written/validated on the LaSOT/GOT-10k/TrackingNet single-target visual
+object tracking benchmarks) -- seeding multiple people in the same
+session (the normal case here) crashes with `RuntimeError: Boolean value
+of Tensor with more than one value is ambiguous`. Vanilla SAM2
+(`Sam2Tracker`, sam2_estimation.py) uses the same predictor WITHOUT that
+patch: it natively supports batched multi-object, at the cost of losing
+motion-modeling through occlusions. See the docstring of
+`segmentation/sam2_estimation.py` for the full detail.
 """
 
 from __future__ import annotations
@@ -130,20 +127,20 @@ from segmentation.chunking import GlobalIdAllocator, iter_chunk_ranges, polygon_
 from segmentation.seg_estimation import SegFrameResult
 
 COCO_PERSON_CLASS_ID = 0
-NEW_PERSON_IOU_THRESHOLD = 0.2  # sotto questa soglia una detection YOLO sul
-# frame di ancoraggio e' considerata una persona NUOVA (non gia' seminata)
+NEW_PERSON_IOU_THRESHOLD = 0.2  # below this threshold a YOLO detection on
+# the anchor frame is considered a NEW person (not already seeded)
 
 
 def _probe_video(source) -> tuple[int, tuple[int, int]]:
-    """Numero di frame totali e (height, width) del video sorgente --
-    usato per dimensionare le rasterizzazioni di `polygon_iou` e per
-    calcolare i chunk. Stesso approccio "solo metadati, nessuna inferenza"
-    di `webui/api.py::probe_video_metadata`, reimplementato qui per non
-    creare una dipendenza di `segmentation/` verso `webui/`."""
+    """Total frame count and (height, width) of the source video --
+    used to size `polygon_iou`'s rasterizations and to compute chunks.
+    Same "metadata only, no inference" approach as
+    `webui/api.py::probe_video_metadata`, reimplemented here to avoid
+    creating a dependency of `segmentation/` on `webui/`."""
     cap = cv2.VideoCapture(source)
     try:
         if not cap.isOpened():
-            raise ValueError(f"Impossibile aprire la sorgente video: {source!r}")
+            raise ValueError(f"Unable to open video source: {source!r}")
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -153,12 +150,12 @@ def _probe_video(source) -> tuple[int, tuple[int, int]]:
 
 
 def _read_frame_range(source, start: int, end: int) -> list[np.ndarray]:
-    """Legge in memoria i frame `[start, end)` (BGR). Il posizionamento via
-    `CAP_PROP_POS_FRAMES` non e' garantito perfettamente accurato su tutti i
-    codec/contenitori (nota gia' presente altrove nel progetto, vedi
-    `probe_video_metadata`), ma sufficiente per questo uso: eventuali
-    scostamenti di uno-due frame non compromettono la riconciliazione, che
-    lavora comunque su una finestra di overlap di decine di frame."""
+    """Reads frames `[start, end)` into memory (BGR). Seeking via
+    `CAP_PROP_POS_FRAMES` isn't guaranteed to be perfectly accurate on
+    all codecs/containers (a note already present elsewhere in the
+    project, see `probe_video_metadata`), but is sufficient for this
+    use: any one- or two-frame drift doesn't compromise reconciliation,
+    which works on an overlap window of dozens of frames anyway."""
     cap = cv2.VideoCapture(source)
     try:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
@@ -174,31 +171,32 @@ def _read_frame_range(source, start: int, end: int) -> list[np.ndarray]:
 
 
 def _to_boolean_mask(mask) -> np.ndarray:
-    """Converte l'oggetto maschera restituito da `propagate_in_video()` in
-    un array numpy booleano (H,W), qualunque sia il formato di partenza --
-    verificato SOLO col predictor finto dei test fin qui (nessuna GPU CUDA
-    in questo ambiente): SAM2 restituisce tipicamente un tensore
-    PyTorch di LOGIT (valori reali, non gia' 0/1), su GPU, spesso con una
-    dimensione canale in piu' (es. forma (1,H,W) invece di (H,W)). Senza
-    questa conversione `_mask_to_polygon()` riceveva dati nel formato
-    sbagliato e produceva contorni vuoti o insensati SENZA sollevare
-    un'eccezione -- da qui il sintomo osservato ("il video parte ma non
-    appaiono le maschere"), non un crash.
+    """Converts the mask object returned by `propagate_in_video()` into
+    a boolean numpy array (H,W), whatever the starting format --
+    verified ONLY with the fake predictor in the tests so far (no CUDA
+    GPU in this environment): SAM2 typically returns a PyTorch LOGIT
+    tensor (real values, not already 0/1), on GPU, often with an extra
+    channel dimension (e.g. shape (1,H,W) instead of (H,W)). Without
+    this conversion `_mask_to_polygon()` received data in the wrong
+    format and produced empty or nonsensical contours WITHOUT raising an
+    exception -- hence the observed symptom ("the video plays but no
+    masks appear"), not a crash.
 
-    - Se l'oggetto ha un metodo `.detach()` (duck-typing per torch.Tensor,
-      niente `import torch` qui: non deve essere richiesto per usare il
-      solo backend YOLO), lo si porta su CPU e si converte in numpy.
-    - Se resta un array a 3 dimensioni (canale extra tipo (1,H,W)), si
-      tiene solo il primo canale.
-    - Se e' gia' booleano, si restituisce cosi' com'e' (caso del predictor
-      finto nei test, e di un ipotetico predictor che restituisce gia'
-      maschere pronte).
-    - Altrimenti si ASSUME siano logit e si soglia a 0.0 (foreground se
-      > 0), la convenzione usata da SAM2 per i suoi mask_logits. Se sulla
-      macchina CUDA le maschere risultassero palesemente sbagliate (troppo
-      piccole/grandi/vuote) nonostante questo fix, e' il primo punto da
-      controllare: potrebbero essere gia' probabilita' in [0,1], nel qual
-      caso la soglia giusta sarebbe 0.5, non 0.0."""
+    - If the object has a `.detach()` method (duck-typing for
+      torch.Tensor, no `import torch` here: it must not be required to
+      use only the YOLO backend), it's moved to CPU and converted to
+      numpy.
+    - If it remains a 3-dimensional array (extra channel like (1,H,W)),
+      only the first channel is kept.
+    - If it's already boolean, it's returned as-is (the fake predictor's
+      case in the tests, and of a hypothetical predictor that already
+      returns ready-made masks).
+    - Otherwise it's ASSUMED to be logits and thresholded at 0.0
+      (foreground if > 0), the convention SAM2 uses for its
+      mask_logits. If on the CUDA machine the masks turn out to be
+      obviously wrong (too small/large/empty) despite this fix, it's
+      the first thing to check: they might already be probabilities in
+      [0,1], in which case the right threshold would be 0.5, not 0.0."""
     if hasattr(mask, "detach"):
         mask = mask.detach().cpu().numpy()
     mask = np.asarray(mask)
@@ -210,12 +208,12 @@ def _to_boolean_mask(mask) -> np.ndarray:
 
 
 def _mask_to_polygon(mask: np.ndarray) -> np.ndarray:
-    """Maschera binaria (H,W) -> poligono (N,2) del contorno esterno piu'
-    grande (una persona puo' produrre piu' componenti connesse per un
-    'buco' nella maschera; si tiene solo la principale, stessa scelta
-    pragmatica di `mask_area`/`mask_centroid` in seg_estimation.py che
-    trattano una maschera come un singolo poligono). Poligono vuoto (0,2)
-    se la maschera non contiene pixel positivi."""
+    """Binary mask (H,W) -> polygon (N,2) of the largest outer contour
+    (a person can produce multiple connected components due to a "hole"
+    in the mask; only the main one is kept, the same pragmatic choice as
+    `mask_area`/`mask_centroid` in seg_estimation.py, which treat a mask
+    as a single polygon). Empty polygon (0,2) if the mask contains no
+    positive pixels."""
     mask_u8 = mask.astype(np.uint8)
     contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -225,8 +223,8 @@ def _mask_to_polygon(mask: np.ndarray) -> np.ndarray:
 
 
 def _polygon_to_box(poly: np.ndarray) -> np.ndarray:
-    """Bounding box (x1,y1,x2,y2) del poligono, usata come prompt per
-    `add_new_points_or_box()`. `[0,0,0,0]` se il poligono e' vuoto."""
+    """Bounding box (x1,y1,x2,y2) of the polygon, used as a prompt for
+    `add_new_points_or_box()`. `[0,0,0,0]` if the polygon is empty."""
     if poly.shape[0] == 0:
         return np.zeros(4)
     x1, y1 = poly.min(axis=0)
@@ -235,20 +233,20 @@ def _polygon_to_box(poly: np.ndarray) -> np.ndarray:
 
 
 def _box_to_polygon(box: np.ndarray) -> np.ndarray:
-    """Inverso di `_polygon_to_box`: poligono rettangolare (4,2) da una box
-    (x1,y1,x2,y2) -- serve per riusare `chunking.polygon_iou`/`reconcile_ids`
-    (che lavorano su poligoni) quando l'unica informazione disponibile e'
-    una box (es. detection YOLO, o istanze scoperte da un prompt testuale
-    SAM 3, vedi `Sam31Tracker._seed_new_chunk()`)."""
+    """Inverse of `_polygon_to_box`: rectangular polygon (4,2) from a box
+    (x1,y1,x2,y2) -- needed to reuse `chunking.polygon_iou`/`reconcile_ids`
+    (which work on polygons) when the only information available is a
+    box (e.g. a YOLO detection, or instances discovered by a SAM 3 text
+    prompt, see `Sam31Tracker._seed_new_chunk()`)."""
     return np.array([[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]])
 
 
 class ChunkedVideoPredictorBackend:
-    """Vedi il docstring del modulo. Le sottoclassi devono implementare
-    `_build_predictor()`; possono ridefinire `_init_state()` /
-    `_add_box_prompt()` / `_propagate()` se la firma reale della libreria
-    diverge da quella assunta qui (vedi la nota "Onesta' su cosa e'
-    verificato" sopra)."""
+    """See the module docstring. Subclasses must implement
+    `_build_predictor()`; they can override `_init_state()` /
+    `_add_box_prompt()` / `_propagate()` if the real library signature
+    diverges from what's assumed here (see the "Honesty about what's
+    verified" note above)."""
 
     def __init__(self, *, device: str = "cuda", chunk_size: int = 600,
                  overlap: int = 50, iou_threshold: float = 0.3,
@@ -259,34 +257,34 @@ class ChunkedVideoPredictorBackend:
                  reseed_new_people: bool = True,
                  redetect_every: int | None = None):
         if device != "cuda":
-            # SAM 3.1/SAM2 non dichiarano supporto mps/cpu (vedi ricerca
-            # citata nel README) -- meglio fallire subito con un messaggio
-            # chiaro che lasciar provare e ottenere un errore oscuro dentro
-            # la libreria.
+            # SAM 3.1/SAM2 don't declare mps/cpu support (see the
+            # research cited in the README) -- better to fail
+            # immediately with a clear message than to let it try and
+            # get an obscure error inside the library.
             raise ValueError(
-                f"{type(self).__name__} richiede device='cuda' (SAM 3.1/SAM2 "
-                f"non supportano mps/cpu al momento) -- ricevuto device={device!r}"
+                f"{type(self).__name__} requires device='cuda' (SAM 3.1/SAM2 "
+                f"don't currently support mps/cpu) -- received device={device!r}"
             )
         if overlap < 1:
-            # La riconciliazione ID tra chunk consecutivi (reconcile_ids,
-            # vedi run() sotto) confronta le maschere sullo STESSO frame
-            # prodotto da entrambi i chunk (il "frame di ancoraggio", vedi
-            # il docstring del modulo/di chunking.py) -- con overlap=0 i
-            # chunk sono adiacenti ma non condividono NESSUN frame, quindi
-            # `prev_anchor_polys` risulterebbe sempre vuoto e ogni nuovo
-            # chunk assegnerebbe id globali TUTTI nuovi, perdendo in
-            # silenzio la continuita' d'identita' ad ogni confine -- un
-            # fallimento peggiore di un errore esplicito qui. La pipeline
-            # CHUV di produzione non ha un parametro di overlap (vedi
-            # Video-Annotation-System, chunk_size=400 senza overlap), ma
-            # riconcilia diversamente (IoU diretto tra l'ultimo frame
-            # tracciato del chunk N e il primo del chunk N+1, non un
-            # confronto sullo stesso frame) -- un design diverso da questo,
-            # non replicabile solo mettendo overlap=0 qui.
+            # ID reconciliation between consecutive chunks
+            # (reconcile_ids, see run() below) compares masks on the
+            # SAME frame produced by both chunks (the "anchor frame",
+            # see the module/chunking.py docstring) -- with overlap=0
+            # the chunks are adjacent but share NO frame, so
+            # `prev_anchor_polys` would always be empty and every new
+            # chunk would assign ALL-new global ids, silently losing
+            # identity continuity at every boundary -- a worse failure
+            # than an explicit error here. The production CHUV pipeline
+            # doesn't have an overlap parameter (see
+            # Video-Annotation-System, chunk_size=400 with no overlap),
+            # but reconciles differently (direct IoU between the last
+            # tracked frame of chunk N and the first of chunk N+1, not a
+            # comparison on the same frame) -- a different design from
+            # this one, not replicable just by setting overlap=0 here.
             raise ValueError(
-                f"overlap deve essere >= 1 (ricevuto {overlap}) -- la riconciliazione "
-                "degli id tra chunk richiede almeno un frame in comune, vedi il "
-                "docstring di ChunkedVideoPredictorBackend.__init__"
+                f"overlap must be >= 1 (received {overlap}) -- id reconciliation "
+                "between chunks requires at least one shared frame, see the "
+                "docstring of ChunkedVideoPredictorBackend.__init__"
             )
         self.device = device
         self.chunk_size = chunk_size
@@ -296,36 +294,37 @@ class ChunkedVideoPredictorBackend:
         self.conf_threshold = conf_threshold
         self.chunk_store_dir = chunk_store_dir
         self.max_people = max_people
-        # Se False: YOLO viene chiamato SOLO al bootstrap del chunk 0 (deve
-        # pur esserci un primo prompt da qualche parte), mai per scoprire
-        # persone NUOVE ai confini dei chunk successivi -- SAM/SAM2 resta
-        # libero di gestire (o non gestire) da solo l'ingresso di qualcuno
-        # a meta' video. Serve per ottenere una condizione "SAM puro" da
-        # confrontare con quella di default (con reseeding), invece di
-        # avere un solo metodo ibrido spacciato per "capacita' di SAM" --
-        # vedi la discussione sulla baseline falsata e benchmark_backends.py.
+        # If False: YOLO is called ONLY at the bootstrap of chunk 0
+        # (there must be a first prompt from somewhere), never to
+        # discover NEW people at subsequent chunk boundaries -- SAM/SAM2
+        # remains free to handle (or not handle) someone entering
+        # mid-video on its own. Needed to obtain a "pure SAM" condition
+        # to compare against the default one (with reseeding), instead
+        # of having a single hybrid method passed off as "SAM's
+        # capability" -- see the discussion on the skewed baseline and
+        # benchmark_backends.py.
         self.reseed_new_people = reseed_new_people
-        # Vedi "Ri-detection periodica" nel docstring del modulo. None =
-        # una sola finestra per chunk (comportamento originale, invariato).
+        # See "Periodic re-detection" in the module docstring. None = a
+        # single window per chunk (original, unchanged behavior).
         self.redetect_every = redetect_every
-        self._detector = None  # YOLO caricato pigramente in _detect_people()
-        self._current_chunk_tmpdir: str | None = None  # vedi _init_state()/run()
+        self._detector = None  # YOLO lazily loaded in _detect_people()
+        self._current_chunk_tmpdir: str | None = None  # see _init_state()/run()
 
-    # -------------------------------------------------- da implementare
+    # -------------------------------------------------- to implement
     def _build_predictor(self):
         raise NotImplementedError
 
-    # ------------------------------------------------- override opzionale
+    # ------------------------------------------------- optional override
     def _init_state(self, predictor, frames: list[np.ndarray]):
-        """SAM2 (e presumibilmente SAM 3.1, stesso codice video di
-        origine) NON accetta una lista di frame in memoria: vuole un
-        percorso a un video MP4 o a una cartella di JPEG in sequenza
-        (verificato su una macchina CUDA reale, vedi il docstring del
-        modulo). Si scrive quindi il chunk corrente come `000000.jpg`,
-        `000001.jpg`, ... in una cartella temporanea -- che resta viva
-        finche' il chunk non e' stato completamente propagato: la
-        cancella `run()` subito dopo (non qui, perche' questo metodo
-        ritorna prima che `propagate_in_video()` abbia letto i file)."""
+        """SAM2 (and presumably SAM 3.1, same originating video code)
+        does NOT accept a list of in-memory frames: it wants a path to
+        an MP4 video or a folder of sequential JPEGs (verified on a real
+        CUDA machine, see the module docstring). The current chunk is
+        therefore written as `000000.jpg`, `000001.jpg`, ... in a
+        temporary folder -- which stays alive until the chunk has been
+        fully propagated: `run()` deletes it right after (not here,
+        because this method returns before `propagate_in_video()` has
+        read the files)."""
         self._current_chunk_tmpdir = tempfile.mkdtemp(prefix="chunked_video_predictor_")
         for i, frame in enumerate(frames):
             cv2.imwrite(os.path.join(self._current_chunk_tmpdir, f"{i:06d}.jpg"), frame)
@@ -343,15 +342,15 @@ class ChunkedVideoPredictorBackend:
                          chunk_index: int, frame_shape: tuple[int, int],
                          prev_anchor_polys: dict[int, np.ndarray],
                          allocator: GlobalIdAllocator) -> dict[int, np.ndarray]:
-        """Decide chi seguire in questo chunk, REGISTRA i prompt presso il
-        predictor (side effect, non lasciato al chiamante: vedi
-        `Sam31Tracker._seed_new_chunk()` per il perche' -- in modalita'
-        prompt testuale una singola chiamata scopre E registra le persone
-        insieme, non si possono separare i due passi come nel caso a box),
-        e ritorna `{id_globale: box}` per chi e' attualmente noto.
+        """Decides who to follow in this chunk, REGISTERS the prompts
+        with the predictor (side effect, not left to the caller: see
+        `Sam31Tracker._seed_new_chunk()` for why -- in text-prompt mode
+        a single call discovers AND registers people together, the two
+        steps can't be separated as in the box case), and returns
+        `{global_id: box}` for whoever is currently known.
 
-        Default (usato da `Sam2Tracker` e da `Sam31Tracker` in modalita' a
-        box): YOLO propone le box, vedi il docstring del modulo."""
+        Default (used by `Sam2Tracker` and by `Sam31Tracker` in box
+        mode): YOLO proposes the boxes, see the module docstring."""
         seed_boxes: dict[int, np.ndarray] = {}
         if chunk_index == 0:
             for box in self._detect_people(chunk_frames[0]):
@@ -362,17 +361,18 @@ class ChunkedVideoPredictorBackend:
             if self.reseed_new_people:
                 for box in self._detect_people(chunk_frames[0]):
                     if not _overlaps_any(box, seed_boxes.values(), frame_shape, NEW_PERSON_IOU_THRESHOLD):
-                        seed_boxes[allocator.next_id()] = box  # persona nuova, mai vista prima
-            # se reseed_new_people e' False: nessuna chiamata a YOLO qui,
-            # SAM/SAM2 continua SOLO le tracce gia' note (o non ne trova
-            # piu' nessuna se tutti sono usciti dal campo) -- e' la
-            # condizione "SAM puro" per il confronto in benchmark_backends.py.
+                        seed_boxes[allocator.next_id()] = box  # new person, never seen before
+            # if reseed_new_people is False: no call to YOLO here,
+            # SAM/SAM2 continues ONLY the already-known tracks (or finds
+            # none left if everyone has left the frame) -- this is the
+            # "pure SAM" condition for the comparison in
+            # benchmark_backends.py.
 
         if self.max_people is not None and len(seed_boxes) > self.max_people:
-            # tetto rigido, stessa logica di cap_by_confidence altrove nel
-            # progetto: qui non abbiamo una confidenza per ordinare, si
-            # tiene semplicemente l'ordine di scoperta (persone gia' note
-            # prima delle nuove, essendo inserite per prime nel dict).
+            # hard cap, same logic as cap_by_confidence elsewhere in the
+            # project: here we have no confidence to sort by, so we
+            # simply keep discovery order (already-known people before
+            # new ones, being inserted first into the dict).
             seed_boxes = dict(list(seed_boxes.items())[: self.max_people])
 
         for global_id, box in seed_boxes.items():
@@ -382,22 +382,22 @@ class ChunkedVideoPredictorBackend:
     def _propagate(self, predictor, state, *, start_frame_idx: int = 0,
                     max_frame_num_to_track: int | None = None
                     ) -> Iterator[tuple[int, dict[int, np.ndarray]]]:
-        """Deve restituire, per ogni frame locale al chunk, `(frame_idx,
-        {obj_id: mask_booleana})`. La conversione a maschera booleana (da
-        tensore torch/logit a numpy bool, vedi `_to_boolean_mask()`)
-        avviene QUI, non nel chiamante, cosi' il resto di `run()` puo'
-        assumere sempre lo stesso formato indipendentemente da cosa
-        restituisce la libreria reale.
+        """Must return, for every frame local to the chunk, `(frame_idx,
+        {obj_id: boolean_mask})`. The conversion to a boolean mask (from
+        a torch/logit tensor to numpy bool, see `_to_boolean_mask()`)
+        happens HERE, not in the caller, so the rest of `run()` can
+        always assume the same format regardless of what the real
+        library returns.
 
-        `start_frame_idx`/`max_frame_num_to_track`: propagano solo una
-        SOTTO-finestra del chunk (usato da `redetect_every`, vedi il
-        docstring del modulo) invece dell'intero chunk in un colpo solo --
-        firma presente nelle notebook ufficiali SAM2/SAM3 per riprendere la
-        propagazione dopo aver aggiunto nuovi oggetti a meta' video, ma MAI
-        chiamata su una macchina CUDA reale in questo progetto finora: se
-        il predittore reale la rifiuta o si comporta diversamente, e' il
-        primo punto da correggere (insieme a `_add_box_prompt()` per il
-        frame_idx non-zero usato dalla ri-detection)."""
+        `start_frame_idx`/`max_frame_num_to_track`: propagate only a
+        SUB-window of the chunk (used by `redetect_every`, see the
+        module docstring) instead of the whole chunk at once -- a
+        signature present in the official SAM2/SAM3 notebooks for
+        resuming propagation after adding new objects mid-video, but
+        NEVER called on a real CUDA machine in this project so far: if
+        the real predictor rejects it or behaves differently, it's the
+        first thing to fix (along with `_add_box_prompt()` for the
+        non-zero frame_idx used by re-detection)."""
         for frame_idx, obj_ids, masks in predictor.propagate_in_video(
             state, start_frame_idx=start_frame_idx, max_frame_num_to_track=max_frame_num_to_track,
         ):
@@ -416,10 +416,11 @@ class ChunkedVideoPredictorBackend:
                 break
             state = self._init_state(predictor, chunk_frames)
 
-            # Decide chi seguire E registra i prompt presso il predictor
-            # (side effect di _seed_new_chunk, vedi il suo docstring) --
-            # default YOLO/box, sovrascritto da Sam31Tracker per il prompt
-            # testuale di SAM 3 quando `text_prompt` e' impostato.
+            # Decides who to follow AND registers the prompts with the
+            # predictor (side effect of _seed_new_chunk, see its
+            # docstring) -- default YOLO/box, overridden by
+            # Sam31Tracker for SAM 3's text prompt when `text_prompt` is
+            # set.
             seed_boxes = self._seed_new_chunk(
                 predictor, state, chunk_frames=chunk_frames, chunk_index=chunk_index,
                 frame_shape=frame_shape, prev_anchor_polys=prev_anchor_polys, allocator=allocator,
@@ -427,42 +428,46 @@ class ChunkedVideoPredictorBackend:
 
             chunk_results: list[SegFrameResult] = []
             polys_by_local_frame: dict[int, dict[int, np.ndarray]] = {}
-            # Ultima box nota per ogni id (aggiornata dopo ogni sotto-finestra
-            # propagata) -- usata dalla ri-detection periodica per decidere se
-            # una detection YOLO e' una persona GIA' nota (IoU alta con la sua
-            # ultima posizione) o NUOVA. Deliberatamente NON i seed_boxes
-            # originali (che diventerebbero stantii dopo che qualcuno si
-            # muove): vedi "Ri-detection periodica" nel docstring del modulo.
+            # Last known box for each id (updated after every propagated
+            # sub-window) -- used by periodic re-detection to decide
+            # whether a YOLO detection is an ALREADY-known person (high
+            # IoU with their last position) or a NEW one. Deliberately
+            # NOT the original seed_boxes (which would go stale after
+            # someone moves): see "Periodic re-detection" in the module
+            # docstring.
             known_boxes: dict[int, np.ndarray] = dict(seed_boxes)
 
             try:
-                # Una sola finestra grande quanto il chunk se redetect_every
-                # non e' impostato (comportamento originale, invariato).
+                # A single window as large as the chunk if
+                # redetect_every isn't set (original, unchanged
+                # behavior).
                 window_size = self.redetect_every or len(chunk_frames)
                 local_idx = 0
                 while local_idx < len(chunk_frames):
                     window_end = min(local_idx + window_size, len(chunk_frames))
 
                     if not known_boxes:
-                        # Nessuna persona da seguire in questa finestra: ne' una
-                        # traccia in corso ne' una nuova rilevata da YOLO -- puo'
-                        # succedere con un video che si apre su una stanza vuota,
-                        # o se YOLO manca la detection su quel frame specifico
-                        # (illuminazione, posa, soglia di confidenza).
-                        # `propagate_in_video()` di SAM/SAM2 SOLLEVA un errore
-                        # ("No points are provided; please add points first") se
-                        # chiamata senza nessun prompt registrato -- qui si
-                        # emettono frame vuoti per QUESTA finestra invece di far
-                        # esplodere l'intera pipeline, e si riprova comunque a
-                        # ririlevare all'inizio della finestra successiva (se
-                        # redetect_every e' impostato). Se questo compare per
-                        # OGNI finestra di OGNI chunk, il problema e' quasi
-                        # certamente a monte: verificare che `_detect_people()`
-                        # trovi davvero qualcuno sul frame.
-                        print(f"[{type(self).__name__}] avviso: nessuna persona da seguire "
-                              f"nella finestra locale [{local_idx},{window_end}) del chunk "
-                              f"{chunk_index} (frame originali [{start + local_idx},"
-                              f"{start + window_end})) -- frame vuoti per questa finestra.")
+                        # No person to follow in this window: neither an
+                        # ongoing track nor a new one detected by YOLO --
+                        # can happen with a video that opens on an empty
+                        # room, or if YOLO misses the detection on that
+                        # specific frame (lighting, pose, confidence
+                        # threshold). SAM/SAM2's `propagate_in_video()`
+                        # RAISES an error ("No points are provided;
+                        # please add points first") if called with no
+                        # prompt registered -- here empty frames are
+                        # emitted for THIS window instead of blowing up
+                        # the whole pipeline, and re-detection is still
+                        # retried at the start of the next window (if
+                        # redetect_every is set). If this appears for
+                        # EVERY window of EVERY chunk, the problem is
+                        # almost certainly upstream: check that
+                        # `_detect_people()` actually finds someone in
+                        # the frame.
+                        print(f"[{type(self).__name__}] warning: no person to follow "
+                              f"in local window [{local_idx},{window_end}) of chunk "
+                              f"{chunk_index} (original frames [{start + local_idx},"
+                              f"{start + window_end})) -- empty frames for this window.")
                         chunk_results.extend(
                             SegFrameResult(frame_index=start + i, frame=chunk_frames[i], people=[])
                             for i in range(local_idx, window_end)
@@ -478,20 +483,23 @@ class ChunkedVideoPredictorBackend:
                                 poly = _mask_to_polygon(mask)
                                 polys_this_frame[obj_id] = poly
                                 box = _polygon_to_box(poly)
-                                # SAM non produce una confidenza di detection comparabile
-                                # a quella di YOLO: 1.0 come segnaposto esplicito, MAI
-                                # usato per il tetto max_people qui (gia' applicato sopra
-                                # sui seed) -- vedi cap_by_confidence in tracking_common.py
-                                # per il caso YOLO, dove la confidenza e' invece reale.
+                                # SAM doesn't produce a detection
+                                # confidence comparable to YOLO's: 1.0
+                                # as an explicit placeholder, NEVER used
+                                # for the max_people cap here (already
+                                # applied above on the seeds) -- see
+                                # cap_by_confidence in tracking_common.py
+                                # for the YOLO case, where the
+                                # confidence is instead real.
                                 people.append((obj_id, box, poly, 1.0))
                             polys_by_local_frame[local_out_idx] = polys_this_frame
                             chunk_results.append(SegFrameResult(
                                 frame_index=start + local_out_idx, frame=chunk_frames[local_out_idx],
                                 people=people,
                             ))
-                        # posizione piu' recente nota per ogni id ancora
-                        # tracciato (un poligono vuoto = SAM l'ha perso: esce
-                        # da known_boxes, ririlevabile come "nuovo" in seguito)
+                        # most recent known position for each still-tracked
+                        # id (an empty polygon = SAM lost it: it exits
+                        # known_boxes, re-detectable as "new" later)
                         last_polys = polys_by_local_frame.get(window_end - 1, {})
                         known_boxes = {
                             obj_id: _polygon_to_box(poly)
@@ -503,95 +511,99 @@ class ChunkedVideoPredictorBackend:
                         break
 
                     if self.redetect_every and self.reseed_new_people:
-                        # Ri-detection periodica: propone SOLO persone nuove (IoU
-                        # bassa con tutte le posizioni note) -- chi e' gia'
-                        # tracciato continua a propagare da solo, non va riseminato.
+                        # Periodic re-detection: proposes ONLY new
+                        # people (low IoU with all known positions) --
+                        # whoever is already tracked keeps propagating
+                        # on its own, no need to reseed them.
                         for box in self._detect_people(chunk_frames[local_idx]):
                             if not _overlaps_any(box, known_boxes.values(), frame_shape, NEW_PERSON_IOU_THRESHOLD):
                                 new_id = allocator.next_id()
                                 self._add_box_prompt(predictor, state, frame_idx=local_idx, obj_id=new_id, box=box)
                                 known_boxes[new_id] = box
             finally:
-                # la cartella temporanea coi JPEG del chunk (vedi _init_state())
-                # non serve piu' una volta che propagate_in_video() e' stata
-                # consumata fino in fondo (o non e' mai stata chiamata, vedi
-                # sopra) -- ripulita anche se l'inferenza solleva un'eccezione
-                # a meta' chunk, per non lasciare cartelle temporanee orfane
-                # su un video lungo con molti chunk.
+                # the chunk's temporary JPEG folder (see _init_state())
+                # is no longer needed once propagate_in_video() has been
+                # fully consumed (or was never called, see above) --
+                # cleaned up even if inference raises an exception
+                # mid-chunk, to avoid leaving orphaned temp folders on a
+                # long video with many chunks.
                 self._cleanup_chunk_tmpdir()
 
-            # controllo di coerenza (solo log, vedi docstring del modulo)
+            # consistency check (log only, see module docstring)
             anchor_polys = polys_by_local_frame.get(0, {})
             for global_id, seeded_poly in prev_anchor_polys.items():
                 produced_poly = anchor_polys.get(global_id)
                 if produced_poly is None:
-                    print(f"[{type(self).__name__}] avviso: id {global_id} non ritrovato "
-                          f"al frame di ancoraggio del chunk {chunk_index}")
+                    print(f"[{type(self).__name__}] warning: id {global_id} not found "
+                          f"at the anchor frame of chunk {chunk_index}")
                     continue
                 iou = polygon_iou(seeded_poly, produced_poly, frame_shape)
                 if iou < self.iou_threshold:
-                    print(f"[{type(self).__name__}] avviso: id {global_id} IoU basso "
-                          f"({iou:.2f}) al frame di ancoraggio del chunk {chunk_index} "
-                          f"-- possibile perdita/scambio di identita'")
+                    print(f"[{type(self).__name__}] warning: id {global_id} low IoU "
+                          f"({iou:.2f}) at the anchor frame of chunk {chunk_index} "
+                          f"-- possible identity loss/swap")
 
             if self.chunk_store_dir:
                 save_chunk(chunk_results, self.chunk_store_dir, chunk_index)
 
-            # frame di ancoraggio per il PROSSIMO chunk: l'ultimo frame di
-            # questo chunk che ricade nella finestra di overlap col successivo
+            # anchor frame for the NEXT chunk: the last frame of this
+            # chunk that falls within the overlap window with the next one
             next_anchor_local = len(chunk_frames) - self.overlap
             prev_anchor_polys = polys_by_local_frame.get(next_anchor_local, {})
 
-            # evita di riemettere due volte i frame della finestra di overlap
-            # (gia' emessi dal chunk precedente, tranne per il primo chunk)
+            # avoids re-emitting the overlap window's frames twice
+            # (already emitted by the previous chunk, except for the
+            # first chunk)
             skip = 0 if chunk_index == 0 else self.overlap
             for r in chunk_results[skip:]:
                 yield r
 
     # --------------------------------------------------------------- YOLO
     def _detect_people(self, frame: np.ndarray) -> list[np.ndarray]:
-        """Box (x1,y1,x2,y2) delle persone rilevate da YOLO su un singolo
-        frame -- usato SOLO per proporre prompt iniziali a SAM (non per
-        tracciare), vedi il docstring del modulo per il perche'. Import
-        ritardato: stesso motivo di `SegTracker`.
+        """Boxes (x1,y1,x2,y2) of people detected by YOLO on a single
+        frame -- used ONLY to propose initial prompts to SAM (not to
+        track), see the module docstring for why. Delayed import: same
+        reason as `SegTracker`.
 
-        Logga sempre cosa trova (o non trova): utile per distinguere "il
-        frame e' davvero senza persone" da "YOLO ha un problema" -- vedi
-        la sessione di debug con SAMURAI in cui l'avviso 'nessuna persona
-        da seguire' usciva anche con persone chiaramente visibili nel
-        frame (poi risolta: il vero problema era il crash multi-oggetto di
-        SAMURAI, non YOLO, vedi il docstring del modulo)."""
+        Always logs what it finds (or doesn't find): useful to tell
+        "the frame really has no people" apart from "YOLO has a
+        problem" -- see the SAMURAI debugging session where the
+        'no person to follow' warning appeared even with people clearly
+        visible in the frame (later resolved: the real problem was
+        SAMURAI's multi-object crash, not YOLO, see the module
+        docstring)."""
         if self._detector is None:
             from ultralytics import YOLO
             self._detector = YOLO(self.prompt_model)
-            print(f"[{type(self).__name__}] proposer YOLO caricato: modello={self.prompt_model!r} "
+            print(f"[{type(self).__name__}] YOLO proposer loaded: model={self.prompt_model!r} "
                   f"device={self.device!r} conf_threshold={self.conf_threshold}")
         result = self._detector.predict(
             source=frame, device=self.device, conf=self.conf_threshold,
             classes=[COCO_PERSON_CLASS_ID], verbose=False,
         )[0]
         if result.boxes is None or len(result.boxes) == 0:
-            # "result.boxes is None" e "len(...) == 0 ma non None" sono
-            # entrambi "zero detection", ma distinguerli nel log serve a
-            # chi debugga: se qui compare la riga sotto anche su un frame
-            # con persone ben visibili, il sospetto si sposta da "il frame
-            # e' vuoto" a "il modello/soglia/device di questo detector ha
-            # un problema" (es. confrontare con --backend yolo sullo
-            # stesso video: se LI' YOLO trova le persone, il problema e'
-            # specifico di questa chiamata .predict(), non del modello).
-            print(f"[{type(self).__name__}] YOLO: 0 persone rilevate su questo frame "
+            # "result.boxes is None" and "len(...) == 0 but not None"
+            # are both "zero detections", but distinguishing them in
+            # the log helps whoever is debugging: if this line appears
+            # even on a frame with people clearly visible, suspicion
+            # shifts from "the frame is empty" to "this detector's
+            # model/threshold/device has a problem" (e.g. compare with
+            # --backend yolo on the same video: if YOLO finds the
+            # people THERE, the problem is specific to this
+            # .predict() call, not the model).
+            print(f"[{type(self).__name__}] YOLO: 0 people detected on this frame "
                   f"(conf_threshold={self.conf_threshold})")
             return []
         confs = [round(c, 2) for c in result.boxes.conf.cpu().numpy().tolist()]
-        print(f"[{type(self).__name__}] YOLO: {len(confs)} persona/e rilevate su questo frame "
-              f"(confidenze: {confs})")
+        print(f"[{type(self).__name__}] YOLO: {len(confs)} person/people detected on this frame "
+              f"(confidences: {confs})")
         return [box for box in result.boxes.xyxy.cpu().numpy()]
 
 
 def _overlaps_any(box: np.ndarray, existing_boxes, frame_shape: tuple[int, int], threshold: float) -> bool:
-    """True se `box` ha IoU >= `threshold` con almeno una delle
-    `existing_boxes` -- box, non poligoni, quindi si costruisce un
-    poligono rettangolare al volo per riusare `polygon_iou`."""
+    """True if `box` has IoU >= `threshold` with at least one of the
+    `existing_boxes` -- boxes, not polygons, so a rectangular polygon is
+    built on the fly to reuse `polygon_iou`."""
     box_poly = _box_to_polygon(box)
     for other in existing_boxes:
         other_poly = _box_to_polygon(other)

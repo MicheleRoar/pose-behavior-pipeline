@@ -1,34 +1,33 @@
 """
 track_stability_check.py
 =========================
-Confronto diagnostico: quanti track_id distinti produce ByteTrack usando un
-modello di SEGMENTATION (yolo26-seg) invece del modello di POSE
-(yolo26-pose) attualmente usato in pose_estimation.py, sulla stessa
-sorgente e con la stessa configurazione di tracker/soglie.
+Diagnostic comparison: how many distinct track_ids does ByteTrack produce
+using a SEGMENTATION model (yolo26-seg) instead of the POSE model
+(yolo26-pose) currently used in pose_estimation.py, on the same source and
+with the same tracker/threshold configuration.
 
-Motivazione: sul video reale (visione dall'alto, movimento rapido,
-illuminazione artificiale) ByteTrack + YOLO-pose produce moltissimi id
-diversi (50+ in pochi minuti anche con conf-threshold/tracker/max-people
-gia' tarati). Ipotesi da verificare: un modello di segmentation, che deve
-solo delimitare la sagoma (non stimare 17 keypoint precisi), potrebbe
-mantenere una confidenza di detection piu' stabile su una persona
-parzialmente visibile o in movimento rapido, e quindi un tracking piu'
-continuo -- indipendentemente dal fatto che poi si riesca o no a estrarne
-keypoint utilizzabili.
+Motivation: on real video (top-down view, fast movement, artificial
+lighting) ByteTrack + YOLO-pose produces a huge number of distinct ids
+(50+ within a few minutes even with conf-threshold/tracker/max-people
+already tuned). Hypothesis to verify: a segmentation model, which only
+has to delineate the silhouette (not estimate 17 precise keypoints),
+might keep a more stable detection confidence on a partially visible or
+fast-moving person, and therefore more continuous tracking -- regardless
+of whether usable keypoints can then be extracted from it or not.
 
-Questo script NON estrae keypoint (i modelli -seg di Ultralytics non ne
-hanno, solo maschera + box): serve solo a contare id distinti e la loro
-durata, per decidere se vale la pena investire nel percorso "segmentation +
-pose sulla sagoma" (di cui si e' discusso ma che NON e' ancora
-implementato -- vedi il modulo pose_estimation.py per l'approccio attuale
-a modello singolo YOLO-pose).
+This script does NOT extract keypoints (Ultralytics' -seg models don't
+have any, only mask + box): it only counts distinct ids and their
+duration, to decide whether it's worth investing in the "segmentation +
+pose on the silhouette" path (which has been discussed but is NOT yet
+implemented -- see the pose_estimation.py module for the current
+single-model YOLO-pose approach).
 
-Confronto suggerito: lanciare questo script E live_demo.py/pipeline.py
-sullo STESSO video con la STESSA configurazione di --tracker/--conf-
-threshold/--max-people, e confrontare il numero di id distinti riportato
-qui con quello osservato nel CSV/log della pipeline normale.
+Suggested comparison: run this script AND live_demo.py/pipeline.py on the
+SAME video with the SAME --tracker/--conf-threshold/--max-people
+configuration, and compare the number of distinct ids reported here with
+the one observed in the normal pipeline's CSV/log.
 
-Uso:
+Usage:
     python track_stability_check.py --source video.mp4 --fps 15 \
         --model yolo26s-seg.pt --tracker configs/bytetrack_permissive.yaml \
         --conf-threshold 0.1 --max-people 2
@@ -44,8 +43,8 @@ from common.device import detect_default_device
 
 def run(source, fps: float, model_name: str, device: str, conf_threshold: float,
         tracker_config: str, max_people: int | None) -> None:
-    # Import ritardato, stessa ragione di pose_estimation.py: il resto del
-    # pacchetto resta testabile senza ultralytics/torch installati.
+    # Delayed import, same reason as pose_estimation.py: the rest of the
+    # package stays testable without ultralytics/torch installed.
     from ultralytics import YOLO
 
     from common.tracking_common import cap_by_confidence
@@ -80,47 +79,47 @@ def run(source, fps: float, model_name: str, device: str, conf_threshold: float,
 
     n_ids = len(id_frame_count)
     lifespans = sorted(id_frame_count.values())
-    # 15 frame = soglia min_signature_frames di default in reid.py: un id
-    # piu' corto di cosi' non arriverebbe mai ad avere una firma, quindi
-    # non e' recuperabile da reid.py in nessun caso (ne' normale ne' forzato).
+    # 15 frames = the default min_signature_frames threshold in reid.py: an
+    # id shorter than this would never build up a signature, so it can
+    # never be recovered by reid.py (neither normally nor forced).
     short_lived = sum(1 for v in lifespans if v < 15)
 
-    print(f"Modello: {model_name}  |  tracker: {tracker_config}  |  "
+    print(f"Model: {model_name}  |  tracker: {tracker_config}  |  "
           f"conf-threshold: {conf_threshold}"
           + (f"  |  max-people: {max_people}" if max_people is not None else ""))
-    print(f"Frame totali processati: {n_frames}  (~{n_frames / fps:.1f}s a {fps} fps)")
-    print(f"Id distinti: {n_ids}")
+    print(f"Total frames processed: {n_frames}  (~{n_frames / fps:.1f}s at {fps} fps)")
+    print(f"Distinct ids: {n_ids}")
     if lifespans:
-        mediana = lifespans[len(lifespans) // 2]
-        print(f"Durata id in frame: min={lifespans[0]}  mediana={mediana}  max={lifespans[-1]}")
-        print(f"Id sotto 15 frame (troppo brevi per reid.py, min_signature_frames di default): "
+        median = lifespans[len(lifespans) // 2]
+        print(f"Id duration in frames: min={lifespans[0]}  median={median}  max={lifespans[-1]}")
+        print(f"Ids under 15 frames (too short for reid.py's default min_signature_frames): "
               f"{short_lived}/{n_ids} ({100 * short_lived / n_ids:.0f}%)")
     else:
-        print("Nessun id rilevato.")
+        print("No ids detected.")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Conta gli id distinti prodotti da ByteTrack su un modello di "
-                     "segmentation (yolo26-seg), per confrontare la stabilita' del "
-                     "tracking rispetto al modello di pose gia' in uso in pose_estimation.py. "
-                     "Non estrae keypoint: solo diagnostica di tracking.")
-    parser.add_argument("--source", required=True, help="Percorso video o indice webcam")
+        description="Counts the distinct ids produced by ByteTrack on a segmentation "
+                     "model (yolo26-seg), to compare tracking stability against the pose "
+                     "model already in use in pose_estimation.py. "
+                     "Does not extract keypoints: tracking diagnostics only.")
+    parser.add_argument("--source", required=True, help="Video path or webcam index")
     parser.add_argument("--fps", type=float, default=15.0,
-                         help="Frame rate della sorgente (solo per il riepilogo in secondi)")
+                         help="Source frame rate (only used for the summary in seconds)")
     parser.add_argument("--model", default="yolo26s-seg.pt",
-                         help="Modello YOLO26 di instance segmentation "
+                         help="YOLO26 instance segmentation model "
                               "(yolo26n/s/m/l/x-seg.pt)")
     parser.add_argument("--device", default=None,
-                         help="mps | cpu | cuda (default: auto-rilevato, vedi common/device.py)")
+                         help="mps | cpu | cuda (default: auto-detected, see common/device.py)")
     parser.add_argument("--conf-threshold", type=float, default=0.1,
-                         help="Stessa raccomandazione di pose_estimation.py: tenere a o "
-                              "sotto track_low_thresh (0.1 di default in bytetrack.yaml)")
+                         help="Same recommendation as pose_estimation.py: keep at or "
+                              "below track_low_thresh (0.1 by default in bytetrack.yaml)")
     parser.add_argument("--tracker", default="bytetrack.yaml",
-                         help="Config tracker Ultralytics, es. configs/bytetrack_permissive.yaml")
+                         help="Ultralytics tracker config, e.g. configs/bytetrack_permissive.yaml")
     parser.add_argument("--max-people", type=int, default=None,
-                         help="Come in pose_estimation.py: tiene solo le N detection piu' "
-                              "sicure per frame, se il numero di partecipanti e' noto")
+                         help="As in pose_estimation.py: keeps only the N most confident "
+                              "detections per frame, if the number of participants is known")
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source

@@ -1,12 +1,12 @@
 """
 chunking_check.py
 ===================
-Verifica `segmentation/chunking.py` (suddivisione in chunk sovrapposti,
-IoU su poligoni rasterizzati, riconciliazione id greedy, allocatore id
-globali) con dati sintetici -- nessuna dipendenza da SAM/SAM2/GPU, solo
-numpy/cv2 gia' richiesti dal resto del progetto.
+Verifies `segmentation/chunking.py` (overlapping chunk splitting, IoU on
+rasterized polygons, greedy id reconciliation, global id allocator) with
+synthetic data -- no dependency on SAM/SAM2/GPU, only numpy/cv2 already
+required by the rest of the project.
 
-Uso:
+Usage:
     python demo/chunking_check.py
 """
 
@@ -31,17 +31,17 @@ def part1_chunk_ranges_cover_full_video_with_overlap():
     assert ranges[0] == (0, 300), ranges[0]
     assert ranges[1] == (250, 550), ranges[1]
     assert ranges[2] == (500, 800), ranges[2]
-    assert ranges[3] == (750, 1000), ranges[3]  # ultimo chunk piu' corto
-    assert ranges[-1][1] == 1000, "deve coprire fino all'ultimo frame"
-    # ogni chunk (tranne il primo) inizia esattamente 'overlap' frame prima
-    # della fine del precedente
+    assert ranges[3] == (750, 1000), ranges[3]  # last chunk is shorter
+    assert ranges[-1][1] == 1000, "must cover up to the last frame"
+    # every chunk (except the first) starts exactly 'overlap' frames before
+    # the end of the previous one
     for (prev_start, prev_end), (start, _end) in zip(ranges, ranges[1:]):
         assert start == prev_end - 50, (prev_end, start)
     print("PASS part1_chunk_ranges_cover_full_video_with_overlap")
 
 
 def part2_chunk_ranges_exact_division_no_dangling_tiny_chunk():
-    # 900 frame esatti / chunk 300 overlap 50 -> deve fermarsi in modo pulito
+    # exactly 900 frames / chunk 300 overlap 50 -> must stop cleanly
     ranges = list(iter_chunk_ranges(total_frames=900, chunk_size=300, overlap=50))
     assert ranges[-1][1] == 900
     assert all(end - start > 0 for start, end in ranges)
@@ -51,7 +51,7 @@ def part2_chunk_ranges_exact_division_no_dangling_tiny_chunk():
 def part3_chunk_size_must_exceed_overlap():
     try:
         list(iter_chunk_ranges(total_frames=100, chunk_size=50, overlap=50))
-        raise AssertionError("atteso ValueError con chunk_size <= overlap")
+        raise AssertionError("expected ValueError with chunk_size <= overlap")
     except ValueError:
         pass
     print("PASS part3_chunk_size_must_exceed_overlap")
@@ -62,23 +62,23 @@ def part4_polygon_iou_known_values():
     a = _square(10, 10, 40)
     identical = _square(10, 10, 40)
     disjoint = _square(150, 150, 40)
-    half_overlap = _square(30, 10, 40)  # sovrapposizione parziale su x
+    half_overlap = _square(30, 10, 40)  # partial overlap on x
 
     assert abs(polygon_iou(a, identical, shape) - 1.0) < 1e-6
     assert polygon_iou(a, disjoint, shape) == 0.0
     iou_partial = polygon_iou(a, half_overlap, shape)
     assert 0.0 < iou_partial < 1.0, iou_partial
-    # poligono degenere (< 3 punti) -> 0.0, non un crash
+    # degenerate polygon (< 3 points) -> 0.0, not a crash
     assert polygon_iou(a, np.empty((0, 2)), shape) == 0.0
-    print(f"PASS part4_polygon_iou_known_values (iou parziale={iou_partial:.3f})")
+    print(f"PASS part4_polygon_iou_known_values (partial iou={iou_partial:.3f})")
 
 
 def part5_reconcile_ids_matches_by_geometry():
     shape = (200, 200)
-    # chunk precedente: id globali 10 e 20, in due posizioni distinte
+    # previous chunk: global ids 10 and 20, at two distinct positions
     prev = {10: _square(10, 10), 20: _square(100, 100)}
-    # nuovo chunk: SAM ha assegnato id locali 0 e 1, nelle stesse posizioni
-    # (persone ferme nel frame di ancoraggio) ma enumerate in ordine diverso
+    # new chunk: SAM assigned local ids 0 and 1, at the same positions
+    # (people stationary in the anchor frame) but enumerated in a different order
     new = {0: _square(100, 100), 1: _square(10, 10)}
 
     mapping = reconcile_ids(prev, new, shape, iou_threshold=0.3)
@@ -89,20 +89,20 @@ def part5_reconcile_ids_matches_by_geometry():
 def part6_reconcile_ids_unmatched_local_id_gets_no_mapping():
     shape = (200, 200)
     prev = {10: _square(10, 10)}
-    # persona 1 e' la stessa di prima (10,10); persona 2 e' NUOVA (entrata
-    # nel campo durante questo chunk, nessuna maschera corrispondente prima)
+    # person 1 is the same as before (10,10); person 2 is NEW (entered
+    # the frame during this chunk, no matching mask before)
     new = {0: _square(10, 10), 1: _square(150, 150)}
 
     mapping = reconcile_ids(prev, new, shape, iou_threshold=0.3)
     assert mapping == {0: 10}, mapping
-    assert 1 not in mapping, "l'id locale 1 (persona nuova) non deve avere corrispondenza"
+    assert 1 not in mapping, "local id 1 (new person) must have no match"
     print("PASS part6_reconcile_ids_unmatched_local_id_gets_no_mapping")
 
 
 def part7_reconcile_ids_never_double_assigns():
-    # due nuovi id sono entrambi geometricamente vicini allo stesso vecchio
-    # id (caso ambiguo/raro): solo uno dei due puo' ereditarlo, l'altro resta
-    # senza mapping invece di duplicare l'identita'.
+    # two new ids are both geometrically close to the same old id
+    # (ambiguous/rare case): only one of them can inherit it, the other
+    # stays without a mapping instead of duplicating the identity.
     shape = (200, 200)
     prev = {10: _square(10, 10)}
     new = {0: _square(12, 12), 1: _square(15, 15)}
@@ -129,7 +129,7 @@ def main():
     part6_reconcile_ids_unmatched_local_id_gets_no_mapping()
     part7_reconcile_ids_never_double_assigns()
     part8_global_id_allocator_never_repeats()
-    print("\nTutti i test di chunking.py sono passati.")
+    print("\nAll chunking.py tests passed.")
 
 
 if __name__ == "__main__":

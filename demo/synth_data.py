@@ -1,10 +1,11 @@
 """
 synth_data.py
 =============
-Generatori di sequenze di keypoint COCO-17 sintetiche (bambino con
-movimento ripetitivo, caregiver con movimento naturale), condivisi tra
-`synthetic_demo.py` (verifica batch di features.py) e `live_render_check.py`
-(verifica del rendering live frame-by-frame). Nessun dato reale coinvolto.
+Generators of synthetic COCO-17 keypoint sequences (child with
+repetitive movement, caregiver with natural movement), shared between
+`synthetic_demo.py` (batch verification of features.py) and
+`live_render_check.py` (live frame-by-frame rendering verification). No
+real data involved.
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ from pose.keypoints import KP
 
 
 def base_skeleton(center_x: float, center_y: float, scale: float = 1.0) -> np.ndarray:
-    """Scheletro COCO-17 di riposo, in proporzioni antropometriche
-    approssimate, centrato su (center_x, center_y).
+    """Resting COCO-17 skeleton, in approximate anthropometric
+    proportions, centered on (center_x, center_y).
     """
     layout = {
         "nose": (0, -70), "left_eye": (-5, -74), "right_eye": (5, -74),
@@ -39,9 +40,9 @@ def base_skeleton(center_x: float, center_y: float, scale: float = 1.0) -> np.nd
 
 
 def make_child_sequence(n_frames: int, fps: float, seed: int | None = None) -> np.ndarray:
-    """Bambino: corpo sostanzialmente fermo, braccio destro con movimento
-    ripetitivo ad alta frequenza (~3 Hz) e piccola ampiezza — proxy
-    tecnico/dimostrativo di una stereotipia motoria.
+    """Child: body substantially still, right arm with high-frequency
+    (~3 Hz), small-amplitude repetitive movement — a technical/
+    demonstrative proxy for a motor stereotypy.
     """
     rng = np.random.default_rng(seed)
     t = np.arange(n_frames) / fps
@@ -55,8 +56,8 @@ def make_child_sequence(n_frames: int, fps: float, seed: int | None = None) -> n
 
 
 def make_caregiver_sequence(n_frames: int, fps: float, seed: int | None = None) -> np.ndarray:
-    """Caregiver: movimento di reaching lento e irregolare verso il
-    bambino, nessuna periodicità dominante.
+    """Caregiver: slow and irregular reaching movement toward the
+    child, no dominant periodicity.
     """
     rng = np.random.default_rng(seed)
     t = np.arange(n_frames) / fps

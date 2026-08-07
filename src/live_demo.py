@@ -1,55 +1,55 @@
 """
 live_demo.py
 ============
-Riconoscimento in tempo reale dei movimenti da sorgente live (pensato per la
-Canon EOS R8 collegata al MacBook Pro M1), con overlay dello scheletro e
-delle metriche comportamentali calcolate su una finestra scorrevole.
+Real-time movement recognition from a live source (designed for the
+Canon EOS R8 connected to the MacBook Pro M1), with skeleton overlay and
+behavioral metrics computed over a sliding window.
 
-Sorgenti supportate:
-- Canon EOS R8 via USB + EOS Webcam Utility: compare come webcam standard,
-  quindi `--source 0` (o l'indice corretto se ci sono altre webcam/virtual
-  camera attive: su Mac puoi verificare l'ordine in
-  Impostazioni di Sistema > Privacy e Sicurezza > Fotocamera, oppure con
+Supported sources:
+- Canon EOS R8 via USB + EOS Webcam Utility: appears as a standard
+  webcam, so `--source 0` (or the correct index if other
+  webcams/virtual cameras are active: on Mac you can check the order in
+  System Settings > Privacy & Security > Camera, or with
   `python -c "import cv2;[print(i, cv2.VideoCapture(i).isOpened()) for i in range(4)]"`).
-- Canon EOS R8 con uscita HDMI pulita + capture card (es. Elgato Cam Link):
-  la capture card compare a sua volta come webcam standard, stesso discorso.
-- Un file video, passando il percorso invece di un intero.
+- Canon EOS R8 with clean HDMI output + capture card (e.g. Elgato Cam
+  Link): the capture card also appears as a standard webcam, same deal.
+- A video file, by passing the path instead of an integer.
 
-Esempio (solo scheletro):
+Example (skeleton only):
 
     python live_demo.py --source 0 --fps 30 --model yolo26n-pose.pt --device mps \\
         --window-seconds 3 --blur-faces --out live_session.csv
 
-Esempio con segnali del viso (occhi/bocca/sopracciglia/movimento testa,
-selezionabili indipendentemente) e mani a livello di dita (richiede
-mediapipe e i rispettivi modelli, vedi README):
+Example with face signals (eyes/mouth/eyebrows/head movement,
+independently selectable) and finger-level hands (requires mediapipe
+and the respective models, see README):
 
     python live_demo.py --source 0 --fps 30 --device mps \\
         --with-eyes --with-mouth --with-eyebrows --with-head-movement \\
         --with-hands --out live_session.csv
 
-Con più persone nell'inquadratura (es. bambino + caregiver), YOLO+ByteTrack
-assegna un track_id distinto a ciascuna e li tratta separatamente per
-default (scheletro/postura per tutti). Per limitare i segnali di
-volto/mani a una sola persona fissa (es. non calcolare il blink del
-caregiver), fai una prima prova senza `--target-track-id` per vedere quali
-ID vengono stampati a console ("Nuova persona rilevata: ID N"), poi
-rilancia specificando quello scelto:
+With multiple people in frame (e.g. child + caregiver), YOLO+ByteTrack
+assigns a distinct track_id to each and treats them separately by
+default (skeleton/posture for everyone). To restrict face/hand signals
+to a single fixed person (e.g. don't compute the caregiver's blink
+rate), do a first run without `--target-track-id` to see which IDs get
+printed to the console ("New person detected: ID N"), then relaunch
+specifying the chosen one:
 
     python live_demo.py --source 0 --fps 30 --device mps \\
         --with-eyes --with-mouth --with-hands --target-track-id 1 --out live_session.csv
 
-Per interrompere la sessione: premi 'q' con la finestra video attiva (il
-tasto viene intercettato solo se la finestra ha il focus — clicca sul
-video, non sul terminale), oppure chiudi la finestra dal pulsante, oppure
-Ctrl+C dal terminale. In tutti e tre i casi le feature accumulate vengono
-comunque salvate in `--out` prima di uscire.
+To stop the session: press 'q' with the video window focused (the key
+is only intercepted if the window has focus — click on the video, not
+the terminal), or close the window with the button, or Ctrl+C from the
+terminal. In all three cases the accumulated features are still saved
+to `--out` before exiting.
 
-Nota: questo script richiede `ultralytics` + `opencv-python` installati
-(vedi requirements.txt) e una sorgente video reale; non è eseguibile
-nell'ambiente sandbox usato per sviluppare il resto della pipeline. La
-logica di rendering (scheletro + overlay metriche) è invece verificata
-separatamente in `demo/live_render_check.py` con dati sintetici.
+Note: this script requires `ultralytics` + `opencv-python` installed
+(see requirements.txt) and a real video source; it is not runnable in
+the sandbox environment used to develop the rest of the pipeline. The
+rendering logic (skeleton + metrics overlay) is instead verified
+separately in `demo/live_render_check.py` with synthetic data.
 """
 
 from __future__ import annotations
@@ -81,8 +81,8 @@ from pose.chuv_features import ChuvFeatureTracker, compute_chuv_features
 
 
 def head_center(kxy: np.ndarray) -> np.ndarray:
-    """Centro approssimato della testa da naso/occhi/orecchie (media dei
-    punti disponibili, ignorando eventuali NaN)."""
+    """Approximate head center from nose/eyes/ears (average of the
+    available points, ignoring any NaNs)."""
     idxs = [KP["nose"], KP["left_eye"], KP["right_eye"], KP["left_ear"], KP["right_ear"]]
     pts = kxy[idxs]
     valid = pts[~np.isnan(pts).any(axis=1)]
@@ -152,25 +152,26 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                       flag_uncertain: bool = True,
                       use_appearance_embedding: bool = False,
                       embedding_device: str = "cpu"):
-    """Generatore che contiene TUTTA la logica per-frame della pipeline pose
-    (tracking, reid, gaze, mani, feature engineering, disegno overlay) in un
-    unico punto, condiviso da `run_live()` (CLI, sotto) e da `pipeline_runner.py`
-    (GUI): evita di duplicare ~300 righe di logica stateful che altrimenti
-    rischierebbero di divergere tra le due interfacce nel tempo.
+    """Generator that holds ALL the per-frame logic of the pose pipeline
+    (tracking, reid, gaze, hands, feature engineering, overlay drawing)
+    in a single place, shared by `run_live()` (CLI, below) and by
+    `pipeline_runner.py` (GUI): avoids duplicating ~300 lines of
+    stateful logic that would otherwise risk diverging between the two
+    interfaces over time.
 
-    Disegna SEMPRE l'overlay sul frame restituito (skeleton, etichette,
-    pannelli metriche, fps) -- la GUI lo vuole sempre a schermo; il costo di
-    disegnarlo comunque quando `run_live()` e' in modalita' `--no-window` e'
-    trascurabile rispetto al costo dell'inferenza.
+    ALWAYS draws the overlay on the returned frame (skeleton, labels,
+    metrics panels, fps) -- the GUI always wants it on screen; the cost
+    of drawing it anyway when `run_live()` is in `--no-window` mode is
+    negligible compared to the cost of inference.
 
-    Yield per ogni frame processato: `(frame, rows, now, smoothed_fps, people,
-    gaze_by_track, hands_by_track)`. I primi quattro sono per `run_live()`
-    (CLI) e per l'uso base della GUI; gli ultimi tre sono gia' pronti per
-    essere ridisegnati SU UN FRAME DIVERSO con le stesse funzioni di
-    `common/viz.py` (`draw_skeleton`, ecc.) -- serve a `pipeline_runner.py`
-    per sovrapporre lo scheletro pose al frame gia' annotato dalla
-    segmentazione in modalita' "both", senza duplicare la logica di
-    tracking/reid/gaze/mani qui sopra.
+    Yields for every processed frame: `(frame, rows, now, smoothed_fps,
+    people, gaze_by_track, hands_by_track)`. The first four are for
+    `run_live()` (CLI) and the GUI's basic use; the last three are
+    already ready to be redrawn ON A DIFFERENT FRAME with the same
+    functions from `common/viz.py` (`draw_skeleton`, etc.) -- needed by
+    `pipeline_runner.py` to overlay the pose skeleton on the frame
+    already annotated by segmentation in "both" mode, without
+    duplicating the tracking/reid/gaze/hands logic above.
     """
     tracker = PoseTracker(model_name=model_name, device=device,
                            conf_threshold=conf_threshold, tracker=tracker_config,
@@ -178,24 +179,26 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
     window_len = max(8, int(window_seconds * fps))
     seen_track_ids: set[int] = set()
 
-    # --- feature engineering "in stile CHUV" (opzionale): stessi angoli/
-    # distanze/simmetria/COM/derivate temporali di train.py nel repository
-    # Video-Annotation-System, ricalcolati qui su COCO-17/YOLO invece di
-    # BODY-25/SAM3 (vedi chuv_features.py per il dettaglio e i limiti).
+    # --- "CHUV-style" feature engineering (optional): the same angles/
+    # distances/symmetry/COM/time derivatives as train.py in the
+    # Video-Annotation-System repository, recomputed here on
+    # COCO-17/YOLO instead of BODY-25/SAM3 (see chuv_features.py for
+    # the detail and the limitations).
     chuv_tracker = ChuvFeatureTracker() if with_chuv_features else None
 
-    # --- re-identificazione (opzionale): ri-associa una persona che rientra
-    # nell'inquadratura con un nuovo track_id (ByteTrack) alla sua identita'
-    # precedente, in base alla firma antropometrica + colore maglia/pantaloni/
-    # capelli + posizione (vedi reid.py). Punto di wiring unico: se attiva,
-    # sostituisce subito frame_result.people con la versione a person_id
-    # stabile, cosi' tutto il resto della funzione (che tratta gia' l'id
-    # come una chiave generica) non richiede altre modifiche.
-    # `use_appearance_embedding` (opzionale, richiede 'torch'+'torchreid',
-    # vedi pose/appearance_embedding.py): costruito UNA volta qui, non ad
-    # ogni frame -- se la dipendenza manca, `OSNetEmbedder()` solleva
-    # `ImportError` subito, con un messaggio chiaro (nessun fallback
-    # silenzioso, stesso trattamento di Sam2Tracker/Sam31Tracker).
+    # --- re-identification (optional): re-associates a person who
+    # re-enters the frame with a new track_id (ByteTrack) to their
+    # previous identity, based on anthropometric signature + shirt/
+    # pants/hair color + position (see reid.py). Single wiring point:
+    # if active, it immediately replaces frame_result.people with the
+    # stable-person_id version, so the rest of the function (which
+    # already treats the id as a generic key) requires no further
+    # changes. `use_appearance_embedding` (optional, requires
+    # 'torch'+'torchreid', see pose/appearance_embedding.py): built
+    # ONCE here, not on every frame -- if the dependency is missing,
+    # `OSNetEmbedder()` raises `ImportError` immediately, with a clear
+    # message (no silent fallback, same treatment as
+    # Sam2Tracker/Sam31Tracker).
     embedder = (
         OSNetEmbedder(device=embedding_device)
         if (with_reid and use_appearance_embedding) else None
@@ -220,17 +223,18 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
     pitch_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))
     self_touch_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))
 
-    # --- viso: le quattro sotto-feature (occhi/blink, bocca, sopracciglia,
-    # movimento testa) condividono UNA SOLA chiamata a FaceLandmarker per
-    # frame (restituisce sempre tutti i landmark del volto insieme, non ha
-    # senso richiamarlo piu' volte con sottoinsiemi diversi) -- ma ciascuna
-    # viene poi calcolata/salvata/disegnata solo se il proprio flag e'
-    # attivo, cosi' si possono selezionare indipendentemente in GUI/CLI. ---
+    # --- face: the four sub-features (eyes/blink, mouth, eyebrows, head
+    # movement) share A SINGLE call to FaceLandmarker per frame (it
+    # always returns all face landmarks together, no point calling it
+    # multiple times with different subsets) -- but each is then
+    # computed/saved/drawn only if its own flag is active, so they can
+    # be independently selected in the GUI/CLI. ---
     with_face_any = with_eyes or with_mouth or with_eyebrows or with_head_movement
     head_gaze = None
     if with_face_any:
-        # Import ritardato: gaze_head richiede mediapipe + il modello
-        # face_landmarker.task, non necessari per il resto della pipeline.
+        # Delayed import: gaze_head requires mediapipe + the
+        # face_landmarker.task model, not needed for the rest of the
+        # pipeline.
         from pose.gaze_head import (
             HeadGazeEstimator, match_faces_to_tracks, joint_attention_score,
             MOUTH_TOP, MOUTH_BOTTOM, MOUTH_LEFT, MOUTH_RIGHT,
@@ -241,8 +245,9 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
 
     hand_tracker = None
     if with_hands:
-        # Import ritardato: hands richiede mediapipe + il modello
-        # hand_landmarker.task, non necessari per il resto della pipeline.
+        # Delayed import: hands requires mediapipe + the
+        # hand_landmarker.task model, not needed for the rest of the
+        # pipeline.
         from pose.hands import HandTracker, match_hands_to_wrists, compute_finger_curls, hand_openness
         hand_tracker = HandTracker(model_path=hand_model, num_hands=4)
 
@@ -259,16 +264,17 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
         if reidentifier is not None:
             frame_result.people = reidentifier.resolve(frame_result.people, now, frame=frame)
 
-        # --- nuove persone: stampa a console il track_id la prima volta che
-        # compare, cosi' si puo' identificare rapidamente chi e' chi (es. per
-        # scegliere --target-track-id) senza dover rileggere il CSV a posteriori ---
+        # --- new people: prints the track_id to the console the first
+        # time it appears, so you can quickly identify who is who (e.g.
+        # to choose --target-track-id) without having to re-read the
+        # CSV afterward ---
         for tid, _, _ in frame_result.people:
             if tid not in seen_track_ids:
                 seen_track_ids.add(tid)
                 print(f"New person detected: ID {tid}"
                       + (" (target)" if target_track_id == tid else ""))
 
-        # --- head-pose / gaze (una volta per frame, poi associato ai track) ---
+        # --- head-pose / gaze (once per frame, then matched to tracks) ---
         gaze_by_track: dict[int, dict] = {}
         head_centers: dict[int, np.ndarray] = {
             tid: head_center(kxy) for tid, kxy, _ in frame_result.people
@@ -282,23 +288,24 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                 face_centers, track_ids, [head_centers[t] for t in track_ids]
             )
             for face_idx, tid in assignment.items():
-                # --- filtro target: se e' impostato --target-track-id, calcola
-                # i segnali derivati dal volto (blink, bocca, sopracciglia,
-                # scuotimento/annuimento) solo per quella persona (es. il
-                # bambino), non per chiunque compaia nell'inquadratura (es. il
-                # caregiver). Lo scheletro/postura restano comunque tracciati
-                # per tutti (vedi loop principale piu' sotto). ---
+                # --- target filter: if --target-track-id is set,
+                # compute the face-derived signals (blink, mouth,
+                # eyebrows, shake/nod) only for that person (e.g. the
+                # child), not for whoever appears in frame (e.g. the
+                # caregiver). Skeleton/posture keep being tracked for
+                # everyone regardless (see the main loop below). ---
                 if target_track_id is not None and tid != target_track_id:
                     continue
 
                 fr = face_results[face_idx]
-                # attention_target/score sempre presenti (servono da placeholder
-                # anche se with_head_movement e' spento): il resto delle chiavi
-                # viene aggiunto SOLO dalla sotto-feature corrispondente attiva,
-                # cosi' ciascuna e' selezionabile indipendentemente -- il resto
-                # della funzione (format_metrics, CSV, disegno) legge sempre con
-                # gaze.get(key, ...) quindi una chiave assente equivale a "non
-                # disponibile", non a un errore.
+                # attention_target/score are always present (needed as
+                # a placeholder even if with_head_movement is off): the
+                # rest of the keys are added ONLY by the corresponding
+                # active sub-feature, so each is independently
+                # selectable -- the rest of the function
+                # (format_metrics, CSV, drawing) always reads with
+                # gaze.get(key, ...) so a missing key just means "not
+                # available", not an error.
                 entry: dict = {"attention_target": None, "attention_score": 0.0}
 
                 if with_head_movement:
@@ -307,14 +314,14 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                         "yaw_rep_power_ratio": np.nan, "yaw_rep_freq_hz": np.nan,
                         "pitch_rep_power_ratio": np.nan, "pitch_rep_freq_hz": np.nan,
                     })
-                    # --- scuotimento (yaw) e annuimento (pitch) della testa:
-                    # stessa logica FFT usata per polso/dita, applicata pero'
-                    # al segnale grezzo di yaw/pitch (non alla sua velocita')
-                    # perche' e' gia' un angolo con segno intorno a uno zero
-                    # naturale -- evita l'artefatto di raddoppio della
-                    # frequenza documentato per lo score su polso/dita (che usa
-                    # la velocita' perche' la posizione del polso deriva col
-                    # corpo).
+                    # --- head shake (yaw) and nod (pitch): the same FFT
+                    # logic used for wrist/fingers, applied however to
+                    # the raw yaw/pitch signal (not to its velocity)
+                    # because it's already a signed angle around a
+                    # natural zero -- avoids the frequency-doubling
+                    # artifact documented for the wrist/finger score
+                    # (which uses velocity because the wrist's position
+                    # drifts along with the body).
                     if not np.isnan(fr.yaw):
                         yaw_buffers[tid].append(fr.yaw)
                     if not np.isnan(fr.pitch):
@@ -334,13 +341,13 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                         "mouth_rep_power_ratio": np.nan, "mouth_rep_freq_hz": np.nan,
                         "mouth_pts": fr.landmarks_xy[[MOUTH_TOP, MOUTH_BOTTOM, MOUTH_LEFT, MOUTH_RIGHT]],
                     })
-                    # --- repetitivita' della bocca (proxy di mouthing/
-                    # vocalizzazione ripetuta): la lingua non e' tracciabile
-                    # con FaceLandmarker (che modella solo la superficie del
-                    # volto, non strutture intraorali), quindi usiamo
-                    # l'oscillazione periodica del MAR come sostituto
-                    # comportamentalmente informativo, con la stessa logica
-                    # FFT gia' usata per polso/dita.
+                    # --- mouth repetitiveness (proxy for mouthing/
+                    # repeated vocalization): the tongue isn't trackable
+                    # with FaceLandmarker (which only models the
+                    # surface of the face, not intraoral structures), so
+                    # we use the periodic oscillation of the MAR as a
+                    # behaviorally-informative substitute, with the
+                    # same FFT logic already used for wrist/fingers.
                     if not np.isnan(fr.mouth_ratio):
                         mar_buffers[tid].append(fr.mouth_ratio)
                     if len(mar_buffers[tid]) >= window_len:
@@ -372,9 +379,9 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
 
                 gaze_by_track[tid] = entry
 
-            # euristica di attenzione condivisa: richiede lo yaw, quindi solo
-            # se with_head_movement e' attivo, e solo se ci sono esattamente
-            # due persone con head-pose disponibile in questo frame
+            # shared attention heuristic: requires yaw, so only if
+            # with_head_movement is active, and only if there are
+            # exactly two people with head-pose available in this frame
             if with_head_movement:
                 tracked_with_gaze = [t for t in track_ids if t in gaze_by_track]
                 if len(tracked_with_gaze) == 2:
@@ -388,7 +395,7 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                     gaze_by_track[b]["attention_target"] = a
                     gaze_by_track[b]["attention_score"] = score_b_to_a
 
-        # --- mani/dita (una volta per frame, poi associate ai polsi YOLO) ---
+        # --- hands/fingers (once per frame, then matched to YOLO wrists) ---
         hands_by_track: dict[int, dict] = defaultdict(dict)
         if with_hands and frame_result.people:
             timestamp_ms = int(now * 1000)
@@ -408,7 +415,7 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                 curls = compute_finger_curls(hand_xy)
 
                 key = (tid, side)
-                fingertip_buffers[key].append(hand_xy[8])  # punta indice
+                fingertip_buffers[key].append(hand_xy[8])  # index fingertip
 
                 rep_power_ratio, rep_freq_hz = np.nan, np.nan
                 if len(fingertip_buffers[key]) >= window_len:
@@ -424,7 +431,7 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                 }
 
         rows_this_frame = []
-        panel_y = 10  # riquadri metriche impilati in un angolo fisso (non seguono piu' la testa)
+        panel_y = 10  # metrics panels stacked in a fixed corner (no longer follow the head)
         for track_id, kxy, kconf in frame_result.people:
             if blur_faces:
                 frame = blur_face(frame, kxy, kconf)
@@ -436,7 +443,7 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
             gaze = gaze_by_track.get(track_id)
             hands_info = hands_by_track.get(track_id)
 
-            # --- self-touch: calcolato ogni frame (non serve la finestra) ---
+            # --- self-touch: computed every frame (doesn't need the window) ---
             scale = torso_length(kxy)
             touch_left = self_touch_score(kxy[KP["left_wrist"]], head_centers[track_id], scale)
             touch_right = self_touch_score(kxy[KP["right_wrist"]], head_centers[track_id], scale)
@@ -474,10 +481,10 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                     **angles,
                 }
                 if gaze:
-                    # .get(key, NaN/None) ovunque: quali chiavi esistono
-                    # dipende da quali sotto-feature del viso sono attive
-                    # (vedi sopra) -- una colonna CSV resta comunque sempre
-                    # presente, solo NaN se la sua sotto-feature e' spenta.
+                    # .get(key, NaN/None) everywhere: which keys exist
+                    # depends on which face sub-features are active (see
+                    # above) -- a CSV column is always present regardless,
+                    # just NaN if its sub-feature is off.
                     row.update({
                         "head_yaw": gaze.get("yaw", np.nan), "head_pitch": gaze.get("pitch", np.nan),
                         "head_roll": gaze.get("roll", np.nan),
@@ -518,22 +525,23 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                 tip = (int(hc[0] + 60 * np.sin(ang)), int(hc[1] - 60 * np.cos(ang)))
                 cv2.arrowedLine(frame, tuple(hc.astype(int)), tip, (255, 0, 255), 2, tipLength=0.3)
             if gaze:
-                # draw_face_signals ignora silenziosamente le parti assenti
-                # (None): con le sotto-feature del viso indipendenti, "gaze"
-                # puo' contenere solo un sottoinsieme di bocca/occhi/
-                # sopracciglia -- non serve piu' controllare quale chiave
-                # specifica sia presente prima di chiamarla.
+                # draw_face_signals silently ignores absent parts
+                # (None): with the face sub-features independent,
+                # "gaze" may contain only a subset of mouth/eyes/
+                # eyebrows -- no need to check which specific key is
+                # present before calling it anymore.
                 draw_face_signals(frame, gaze.get("mouth_pts"),
                                    gaze.get("left_eye_pts"), gaze.get("right_eye_pts"),
                                    gaze.get("left_eyebrow_pts"), gaze.get("right_eyebrow_pts"))
             if hands_info:
                 for info in hands_info.values():
                     draw_hand(frame, info["landmarks"])
-            # riquadro metriche impilato in un angolo fisso (alto a sinistra),
-            # non piu' sopra la testa della persona: cosi' non si sposta/non
-            # copre la scena mentre la persona si muove. Il colore del bordo
-            # (uguale allo scheletro) e la riga "ID N" lo collegano comunque
-            # alla persona giusta anche se non e' piu' vicino a lei sullo schermo.
+            # metrics panel stacked in a fixed corner (top left), no
+            # longer above the person's head: so it doesn't move/cover
+            # the scene as the person moves. The border color (same as
+            # the skeleton) and the "ID N" line still tie it to the
+            # right person even if it's no longer close to them on
+            # screen.
             metrics_lines = format_metrics(track_id, angles, energy, rep_score, gaze, hands_info, posture)
             draw_text_block(frame, metrics_lines, origin=(10, panel_y), border_color=track_color)
             _, panel_h = text_block_size(metrics_lines)
@@ -560,12 +568,13 @@ def run_live(source, fps: float, model_name: str, device: str,
              with_chuv_features: bool = False, conf_threshold: float = 0.1,
              tracker_config: str = "bytetrack.yaml",
              max_people: int | None = None) -> pd.DataFrame:
-    """CLI: consuma `iter_live_frames()` (unica fonte della logica per-frame,
-    condivisa con la GUI), gestisce la finestra cv2 (se show_window) e
-    accumula/salva il CSV finale. Comportamento identico a prima del
-    refactor -- vedi `iter_live_frames()` per la logica vera e propria."""
+    """CLI: consumes `iter_live_frames()` (the single source of the
+    per-frame logic, shared with the GUI), manages the cv2 window (if
+    show_window), and accumulates/saves the final CSV. Behavior
+    identical to before the refactor -- see `iter_live_frames()` for
+    the actual logic."""
     log_rows = []
-    window_name = "Live pose behaviour (q per uscire, o chiudi la finestra)"
+    window_name = "Live pose behaviour (press q to quit, or close the window)"
 
     try:
         for frame, rows, now, smoothed_fps, _people, _gaze_by_track, _hands_by_track in iter_live_frames(
@@ -591,18 +600,18 @@ def run_live(source, fps: float, model_name: str, device: str,
             if show_window:
                 cv2.imshow(window_name, frame)
                 key = cv2.waitKey(1) & 0xFF
-                # 'q' funziona solo se la finestra video ha il focus (clicca
-                # sulla finestra, non sul terminale, prima di premere il tasto).
+                # 'q' only works if the video window has focus (click on
+                # the window, not the terminal, before pressing the key).
                 if key == ord("q"):
                     break
                 if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
-                    break  # finestra chiusa dal pulsante
+                    break  # window closed via the button
     except KeyboardInterrupt:
         print("\nInterrupted from keyboard (Ctrl+C): saving the session anyway...")
     finally:
         if show_window:
             cv2.destroyAllWindows()
-            cv2.waitKey(1)  # su macOS serve dopo destroyAllWindows perché la finestra si chiuda davvero
+            cv2.waitKey(1)  # needed on macOS after destroyAllWindows for the window to actually close
 
     df = pd.DataFrame(log_rows)
     if out_csv:
@@ -622,9 +631,9 @@ def main():
                               "or yolo26m-pose.pt, for more stable keypoints and fewer "
                               "tracking-related ID switches.")
     parser.add_argument("--device", default=None,
-                         help="mps | cpu | cuda (default: auto-rilevato -- cuda se una GPU "
-                              "NVIDIA e' disponibile, altrimenti mps su Apple Silicon, "
-                              "altrimenti cpu, vedi common/device.py)")
+                         help="mps | cpu | cuda (default: auto-detected -- cuda if an NVIDIA "
+                              "GPU is available, otherwise mps on Apple Silicon, "
+                              "otherwise cpu, see common/device.py)")
     parser.add_argument("--conf-threshold", type=float, default=0.1,
                          help="Minimum detection confidence passed to YOLO/ByteTrack. Keep this "
                               "at or below ByteTrack's track_low_thresh (0.1 by default): a higher "

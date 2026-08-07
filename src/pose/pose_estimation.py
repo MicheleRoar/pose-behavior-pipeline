@@ -1,32 +1,32 @@
 """
 pose_estimation.py
 ===================
-Wrapper sottile su Ultralytics YOLO-pose per estrarre keypoint COCO-17
-multi-persona con tracking, da un file video o da una sorgente live
-(es. webcam / Canon R8 via EOS Webcam Utility, o capture card HDMI).
+Thin wrapper over Ultralytics YOLO-pose to extract multi-person COCO-17
+keypoints with tracking, from a video file or a live source (e.g. webcam
+/ Canon R8 via EOS Webcam Utility, or an HDMI capture card).
 
-Stato attuale: la pipeline principale usa TEMPORANEAMENTE
-segmentation/seg_estimation.py (solo sagome, niente keypoint) invece di
-questo modulo -- vedi il docstring di quel file per il perche' e il piano
-per ricollegare la pose
-(applicata dentro la sagoma tracciata, non sull'intero box) una volta
-verificata la stabilita' del tracking di base. Questo modulo resta
-funzionante e testato, non e' stato rimosso.
+Current status: the main pipeline TEMPORARILY uses
+segmentation/seg_estimation.py (silhouettes only, no keypoints) instead
+of this module -- see that file's docstring for why, and the plan to
+reconnect pose estimation (applied inside the tracked silhouette, not on
+the whole box) once the stability of the base tracking has been
+verified. This module remains functional and tested, it has not been
+removed.
 
-Pensato per girare su Apple Silicon (M1/M2/...) sfruttando il backend MPS
-(`device="mps"`); su altre macchine cade automaticamente su CPU/CUDA se
-disponibile.
+Designed to run on Apple Silicon (M1/M2/...) using the MPS backend
+(`device="mps"`); on other machines it automatically falls back to
+CPU/CUDA if available.
 
-Questo modulo richiede `ultralytics` e `opencv-python`, non installati
-nell'ambiente sandbox usato per sviluppare/testare `features.py`
-(vedi README per le istruzioni di installazione locale sul Mac).
+This module requires `ultralytics` and `opencv-python`, not installed in
+the sandbox environment used to develop/test `features.py` (see the
+README for local installation instructions on the Mac).
 
-Esempio d'uso:
+Usage example:
 
     from pose.pose_estimation import PoseTracker
 
     tracker = PoseTracker(model_name="yolo26n-pose.pt", device="mps")
-    for result in tracker.run(source=0):   # 0 = prima webcam disponibile
+    for result in tracker.run(source=0):   # 0 = first available webcam
         for track_id, kpts, conf in result.people:
             ...  # kpts: array (17, 2), conf: array (17,)
 """
@@ -45,50 +45,51 @@ class FrameResult:
     frame_index: int
     frame: np.ndarray
     people: list[tuple[int, np.ndarray, np.ndarray]] = field(default_factory=list)
-    # ogni elemento: (track_id, keypoints (17,2), confidences (17,))
+    # each element: (track_id, keypoints (17,2), confidences (17,))
 
 
 class PoseTracker:
-    """Estrae keypoint multi-persona con tracking da una sorgente video
-    usando Ultralytics YOLO-pose.
+    """Extracts multi-person keypoints with tracking from a video source
+    using Ultralytics YOLO-pose.
 
     Parameters
     ----------
-    model_name : nome/percorso del modello (es. "yolo26n-pose.pt" per il
-        modello nano, più veloce; "yolo26s-pose.pt"/"yolo26m-pose.pt" per
-        maggiore accuratezza a scapito della velocità — in batch offline,
-        senza vincolo di tempo reale, conviene usare il modello più grande
-        che il device riesce a sostenere).
-    device : "mps" su Apple Silicon, "cpu" come fallback, "cuda" se
-        disponibile una GPU NVIDIA.
-    conf_threshold : soglia di confidenza minima per considerare valida una
-        detection. Di default 0.1 (non 0.4): ByteTrack ha una fase di
-        recupero a bassa confidenza (track_low_thresh, 0.1 di default in
-        bytetrack.yaml) pensata apposta per gestire detection deboli senza
-        perdere l'identità — un conf_threshold troppo alto le scarta prima
-        che ByteTrack possa usarle, causando ID spuri su scene difficili
-        (visione dall'alto, movimento rapido, illuminazione artificiale).
-    tracker : config di tracking Ultralytics ("bytetrack.yaml" di default,
-        oppure "configs/bytetrack_permissive.yaml" per scene con cali di
-        confidenza frequenti e non dovuti a vera occlusione — vedi quel
-        file per i dettagli sui parametri).
-    max_people : se impostato, limita il numero di persone per frame a
-        questo valore, tenendo solo le detection con confidenza più alta
-        (utile quando si conosce a priori il numero di partecipanti alla
-        sessione, es. 2 per 1v1 bambino-caregiver, o una decina per una
-        sessione di gruppo: sopprime detection spurie da rumore/riflessi/
-        doppie-detection sopra quel numero prima che diventino un track).
-        Non risolve il problema di una persona reale che perde e riprende
-        un ID dopo una vera occlusione — per quello vedi reid.py e
-        configs/bytetrack_permissive.yaml. None (default) = nessun limite.
+    model_name : model name/path (e.g. "yolo26n-pose.pt" for the nano
+        model, faster; "yolo26s-pose.pt"/"yolo26m-pose.pt" for higher
+        accuracy at the cost of speed -- for offline batch processing,
+        with no real-time constraint, it's worth using the largest model
+        the device can handle).
+    device : "mps" on Apple Silicon, "cpu" as fallback, "cuda" if an
+        NVIDIA GPU is available.
+    conf_threshold : minimum confidence threshold to consider a detection
+        valid. Defaults to 0.1 (not 0.4): ByteTrack has a low-confidence
+        recovery phase (track_low_thresh, 0.1 by default in
+        bytetrack.yaml) specifically designed to handle weak detections
+        without losing identity -- too high a conf_threshold discards
+        them before ByteTrack can use them, causing spurious IDs on
+        difficult scenes (top-down view, fast movement, artificial
+        lighting).
+    tracker : Ultralytics tracking config ("bytetrack.yaml" by default,
+        or "configs/bytetrack_permissive.yaml" for scenes with frequent
+        confidence drops not caused by real occlusion -- see that file
+        for parameter details).
+    max_people : if set, caps the number of people per frame to this
+        value, keeping only the highest-confidence detections (useful
+        when the number of session participants is known in advance,
+        e.g. 2 for a 1v1 child-caregiver session, or a dozen for a group
+        session: suppresses spurious detections from noise/reflections/
+        double-detections above that number before they become a track).
+        Does not solve the problem of a real person losing and regaining
+        an ID after a true occlusion -- for that see reid.py and
+        configs/bytetrack_permissive.yaml. None (default) = no limit.
     """
 
     def __init__(self, model_name: str = "yolo26n-pose.pt", device: str = "mps",
                  conf_threshold: float = 0.1, tracker: str = "bytetrack.yaml",
                  max_people: int | None = None):
-        # Import ritardato: così il resto del pacchetto (features.py,
-        # anonymize.py) resta utilizzabile/testabile anche senza
-        # ultralytics/torch installati (utile per test unitari leggeri).
+        # Delayed import: so the rest of the package (features.py,
+        # anonymize.py) remains usable/testable even without
+        # ultralytics/torch installed (useful for lightweight unit tests).
         from ultralytics import YOLO
 
         self.model = YOLO(model_name)
@@ -98,14 +99,14 @@ class PoseTracker:
         self.max_people = max_people
 
     def run(self, source, stream: bool = True):
-        """Esegue la pose estimation + tracking sulla sorgente indicata.
+        """Runs pose estimation + tracking on the given source.
 
-        `source` può essere:
-        - un intero (indice webcam, es. 0)
-        - il percorso di un file video
-        - una stringa di stream (es. RTSP)
+        `source` can be:
+        - an integer (webcam index, e.g. 0)
+        - the path to a video file
+        - a stream string (e.g. RTSP)
 
-        Restituisce un generatore di `FrameResult`.
+        Returns a generator of `FrameResult`.
         """
         results = self.model.track(
             source=source,
@@ -121,7 +122,7 @@ class PoseTracker:
             if r.keypoints is not None and r.boxes is not None and r.boxes.id is not None:
                 kpts_xy = r.keypoints.xy.cpu().numpy()       # (n_people, 17, 2)
                 kpts_conf = r.keypoints.conf.cpu().numpy()   # (n_people, 17)
-                box_conf = r.boxes.conf.cpu().numpy()        # (n_people,) confidenza detection
+                box_conf = r.boxes.conf.cpu().numpy()        # (n_people,) detection confidence
                 track_ids = r.boxes.id.cpu().numpy().astype(int)
 
                 for idx in cap_by_confidence(box_conf, self.max_people):
@@ -130,12 +131,13 @@ class PoseTracker:
 
 
 def keypoints_dict_to_array(kpts_xy: np.ndarray) -> np.ndarray:
-    """Utility per garantire la shape (17, 2) attesa da features.py, anche
-    se il modello restituisce un numero diverso di keypoint (es. modelli
-    custom): qui si assume schema COCO-17 standard di Ultralytics.
+    """Utility to guarantee the shape (17, 2) expected by features.py,
+    even if the model returns a different number of keypoints (e.g.
+    custom models): here the standard Ultralytics COCO-17 schema is
+    assumed.
     """
     assert kpts_xy.shape[-2:] == (17, 2), (
-        f"Attesi 17 keypoint (schema COCO), ricevuti shape {kpts_xy.shape}. "
-        "Se usi un modello custom, aggiorna keypoints.py di conseguenza."
+        f"Expected 17 keypoints (COCO schema), got shape {kpts_xy.shape}. "
+        "If using a custom model, update keypoints.py accordingly."
     )
     return kpts_xy

@@ -1,62 +1,64 @@
 """
 chuv_features.py
 =================
-Replica in tempo reale del feature engineering del repository CHUV
+Real-time replica of the CHUV repository's feature engineering
 (Video-Annotation-System, `src/models/train.py::normalize_keypoints` +
-`add_derived_pose_features` + `add_temporal_features`), adattata da
-BODY-25 (psifx/SAM3 + MediaPipe, OpenPose-style) a COCO-17 (YOLO-pose) e da
-un calcolo offline/batch a un calcolo frame-per-frame in tempo reale.
+`add_derived_pose_features` + `add_temporal_features`), adapted from
+BODY-25 (psifx/SAM3 + MediaPipe, OpenPose-style) to COCO-17 (YOLO-pose)
+and from an offline/batch computation to a real-time frame-by-frame one.
 
-Perche' qui e non nel repository CHUV: stesso motivo di `reid.py` -- quella
-pipeline richiede SAM3 su GPU CUDA, non disponibile su MacBook M1. Il
-feature engineering (angoli, distanze, simmetria, centro di massa, derivate
-temporali) non dipende da SAM3/psifx: e' pura geometria su keypoint 2D,
-quindi e' portabile e testabile qui con YOLO+ByteTrack su dati non protetti
--- l'obiettivo di questo modulo e' vedere GLI STESSI NUMERI che calcolerebbe
-il repository originale, prodotti pero' da un tracker molto piu' leggero.
+Why here and not in the CHUV repository: same reason as `reid.py` -- that
+pipeline requires SAM3 on a CUDA GPU, not available on a MacBook M1. The
+feature engineering (angles, distances, symmetry, center of mass,
+temporal derivatives) doesn't depend on SAM3/psifx: it's pure geometry on
+2D keypoints, so it's portable and testable here with YOLO+ByteTrack on
+unprotected data -- this module's goal is to see the SAME NUMBERS the
+original repository would compute, but produced by a much lighter
+tracker.
 
-Cosa NON viene replicato
+What is NOT replicated
 -------------------------
-- 5 colonne del set di feature finale del repository CHUV sono coordinate
-  grezze di punta-piede/tallone/sfondo (l_big_toe_y, l_heel_y,
-  r_small_toe_x, r_small_toe_y, r_heel_x, background_y): derivano dallo
-  schema BODY-25 (OpenPose), che li include; COCO-17 (YOLO-pose) NON li
-  ha, quindi queste colonne non sono riproducibili qui.
-- Il modello addestrato (model_xgboost.joblib) NON viene caricato: le sue
-  classi sono codici di annotazione clinica specifici (formato WAKEE) che
-  richiedono dati etichettati da un osservatore umano secondo un
-  protocollo che qui non esiste, e il file che mappa gli indici numerici
-  del modello alle etichette (il LabelEncoder) non e' salvato dal
-  repository originale. Questo modulo si ferma al feature engineering.
+- 5 columns of the CHUV repository's final feature set are raw
+  toe-tip/heel/background coordinates (l_big_toe_y, l_heel_y,
+  r_small_toe_x, r_small_toe_y, r_heel_x, background_y): they come from
+  the BODY-25 (OpenPose) schema, which includes them; COCO-17
+  (YOLO-pose) does NOT have them, so these columns aren't reproducible
+  here.
+- The trained model (model_xgboost.joblib) is NOT loaded: its classes
+  are clinical annotation codes specific to a format (WAKEE) that
+  require data labeled by a human observer following a protocol that
+  doesn't exist here, and the file mapping the model's numeric indices
+  to labels (the LabelEncoder) isn't saved by the original repository.
+  This module stops at feature engineering.
 
-Differenza deliberata: derivate temporali
+Deliberate difference: temporal derivatives
 -------------------------------------------
-Nel repository CHUV le velocita'/accelerazioni sono calcolate con
-`df.groupby(annotation_label).diff()` -- un effetto collaterale del fatto
-che il training e' offline e raggruppato per classe (la derivata si azzera
-ai confini tra classi di annotazione). Qui, in tempo reale, non esiste "la
-classe" del frame corrente mentre lo si acquisisce, quindi la derivata e'
-calcolata in modo continuo, frame-per-frame, per ciascun person_id/track_id
-(vedi `ChuvFeatureTracker`) -- piu' corretto fisicamente, ma non e' un
-numero direttamente confrontabile 1:1 con l'output del repository
-originale su uno stesso video.
+In the CHUV repository velocities/accelerations are computed with
+`df.groupby(annotation_label).diff()` -- a side effect of the fact that
+training is offline and grouped by class (the derivative resets to zero
+at the boundaries between annotation classes). Here, in real time, "the
+class" of the current frame doesn't exist while it's being acquired, so
+the derivative is computed continuously, frame by frame, for each
+person_id/track_id (see `ChuvFeatureTracker`) -- more physically correct,
+but not a number directly comparable 1:1 with the original repository's
+output on the same video.
 
-Nota sul centro di massa (com_x, com_y): dopo la normalizzazione rispetto
-al bacino (mid_hip diventa sempre l'origine (0,0)), com_x/com_y si
-riducono matematicamente a meta' della posizione del collo -- non un vero
-centro di massa fisico multi-segmento. E' una caratteristica del calcolo
-originale del repository CHUV (`com_x = (mid_hip_x + neck_x) / 2` su
-coordinate gia' normalizzate), riprodotta qui fedelmente, non "corretta":
-l'obiettivo di questo modulo e' la fedelta' al repository, non il suo
-miglioramento.
+Note on the center of mass (com_x, com_y): after normalization relative
+to the pelvis (mid_hip always becomes the origin (0,0)), com_x/com_y
+mathematically reduce to half the neck position -- not a true
+multi-segment physical center of mass. This is a characteristic of the
+CHUV repository's original computation (`com_x = (mid_hip_x + neck_x) /
+2` on already-normalized coordinates), faithfully reproduced here, not
+"corrected": this module's goal is fidelity to the repository, not
+improving it.
 
-Nota sulla normalizzazione: nel repository CHUV, una torso_length pari a
-zero viene sostituita con la mediana calcolata sull'intero dataset offline
-(`normalize_keypoints`). Qui, in tempo reale, non esiste "l'intero
-dataset" da cui stimare una mediana in anticipo: se la torso_length di un
-frame e' invalida (nan/troppo piccola), le coordinate normalizzate di quel
-frame sono NaN -- una scelta deliberatamente onesta piuttosto che un
-fallback arbitrario.
+Note on normalization: in the CHUV repository, a torso_length of zero is
+replaced with the median computed over the entire offline dataset
+(`normalize_keypoints`). Here, in real time, "the entire dataset" from
+which to estimate a median in advance doesn't exist: if a frame's
+torso_length is invalid (nan/too small), that frame's normalized
+coordinates are NaN -- a deliberately honest choice rather than an
+arbitrary fallback.
 """
 
 from __future__ import annotations
@@ -68,7 +70,7 @@ import numpy as np
 from pose.keypoints import KP
 
 # ---------------------------------------------------------------------------
-# Keypoint "virtuali" BODY-25 ricostruiti da COCO-17
+# BODY-25 "virtual" keypoints reconstructed from COCO-17
 # ---------------------------------------------------------------------------
 
 def _neck_xy(kxy: np.ndarray) -> np.ndarray:
@@ -86,7 +88,7 @@ RAW_POINTS = [
     "r_eye", "l_eye", "r_ear", "l_ear",
 ]
 
-_COCO_NAME = {  # nome CHUV (r_/l_ prefix, stile BODY-25) -> nome COCO-17 (KP)
+_COCO_NAME = {  # CHUV name (r_/l_ prefix, BODY-25 style) -> COCO-17 name (KP)
     "r_shoulder": "right_shoulder", "l_shoulder": "left_shoulder",
     "r_elbow": "right_elbow", "l_elbow": "left_elbow",
     "r_wrist": "right_wrist", "l_wrist": "left_wrist",
@@ -109,16 +111,17 @@ def _raw_point(kxy: np.ndarray, name: str) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: normalizzazione rispetto al bacino (identica a
-# normalize_keypoints del repository CHUV, salvo la nota sul fallback sopra)
+# Stage 1: normalization relative to the pelvis (identical to
+# normalize_keypoints from the CHUV repository, except for the fallback
+# note above)
 # ---------------------------------------------------------------------------
 
 def normalize_keypoints(kxy: np.ndarray) -> dict[str, np.ndarray]:
-    """Coordinate normalizzate rispetto al bacino: (x - mid_hip_x) /
-    torso_length, (y - mid_hip_y) / torso_length -- stessa formula di
-    `train.py::normalize_keypoints` nel repository CHUV. Ritorna un dict
-    nome -> array (2,) [x, y]; NaN dove il/i keypoint sorgente mancano o la
-    torso_length e' invalida."""
+    """Coordinates normalized relative to the pelvis: (x - mid_hip_x) /
+    torso_length, (y - mid_hip_y) / torso_length -- same formula as
+    `train.py::normalize_keypoints` in the CHUV repository. Returns a
+    dict name -> array (2,) [x, y]; NaN where the source keypoint(s) are
+    missing or torso_length is invalid."""
     mid_hip = _mid_hip_xy(kxy)
     neck = _neck_xy(kxy)
     torso = float(np.linalg.norm(neck - mid_hip))
@@ -132,9 +135,9 @@ def normalize_keypoints(kxy: np.ndarray) -> dict[str, np.ndarray]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: feature derivate (angoli, distanze, simmetria, COM, spread) --
-# stessa logica di add_derived_pose_features del repository CHUV, sulle
-# coordinate gia' normalizzate.
+# Stage 2: derived features (angles, distances, symmetry, COM, spread) --
+# same logic as add_derived_pose_features from the CHUV repository, on
+# already-normalized coordinates.
 # ---------------------------------------------------------------------------
 
 def _angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
@@ -158,11 +161,11 @@ CHUV_ANGLE_TRIPLETS: dict[str, tuple[str, str, str]] = {
     "l_hip_angle": ("mid_hip", "l_hip", "l_knee"),
     "trunk_angle": ("nose", "neck", "mid_hip"),
 }
-# nota: r_shoulder_angle/l_shoulder_angle qui usano il vertice "neck" (come
-# nel repository CHUV) -- una definizione diversa dai
-# left_shoulder_angle/right_shoulder_angle gia' presenti in features.py
-# (che usano il vertice "hip"), quindi NON sono duplicati: sono i due
-# angoli-spalla calcolati con due convenzioni diverse, entrambi conservati.
+# note: r_shoulder_angle/l_shoulder_angle here use the "neck" vertex (as
+# in the CHUV repository) -- a different definition from the
+# left_shoulder_angle/right_shoulder_angle already present in features.py
+# (which use the "hip" vertex), so they are NOT duplicates: they are two
+# shoulder angles computed with two different conventions, both kept.
 
 DERIVED_COLS = [
     *CHUV_ANGLE_TRIPLETS.keys(),
@@ -175,9 +178,9 @@ DERIVED_COLS = [
 
 
 def compute_derived_features(norm: dict[str, np.ndarray]) -> dict[str, float]:
-    """Angoli, distanze, simmetria, COM e spread -- stessa formula di
-    `add_derived_pose_features` nel repository CHUV, applicata alle
-    coordinate gia' normalizzate da `normalize_keypoints`."""
+    """Angles, distances, symmetry, COM and spread -- same formula as
+    `add_derived_pose_features` in the CHUV repository, applied to the
+    coordinates already normalized by `normalize_keypoints`."""
     out: dict[str, float] = {}
 
     for name, (a, b, c) in CHUV_ANGLE_TRIPLETS.items():
@@ -211,10 +214,10 @@ def compute_derived_features(norm: dict[str, np.ndarray]) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3: derivate temporali (velocita'/accelerazione) -- stessa selezione
-# di keypoint di add_temporal_features nel repository CHUV, ma calcolate
-# frame-per-frame in tempo reale (vedi "Differenza deliberata" nel
-# docstring del modulo).
+# Stage 3: temporal derivatives (velocity/acceleration) -- same keypoint
+# selection as add_temporal_features in the CHUV repository, but computed
+# frame-by-frame in real time (see "Deliberate difference" in the module
+# docstring).
 # ---------------------------------------------------------------------------
 
 TEMPORAL_POINTS = ["com", "nose", "l_wrist", "r_wrist", "l_ankle", "r_ankle", "neck", "mid_hip"]
@@ -224,10 +227,10 @@ TEMPORAL_COLS = [f"{name}_{axis}_{kind}" for name in TEMPORAL_POINTS
 
 @dataclass
 class ChuvFeatureTracker:
-    """Mantiene, per person_id/track_id, l'ultimo frame normalizzato e
-    l'ultima velocita' calcolata, per derivare velocita'/accelerazione
-    frame-per-frame senza dover tenere in memoria l'intera sessione (a
-    differenza del repository CHUV, che opera offline su un CSV completo).
+    """Keeps, per person_id/track_id, the last normalized frame and the
+    last computed velocity, to derive velocity/acceleration frame-by-frame
+    without having to keep the entire session in memory (unlike the CHUV
+    repository, which operates offline on a complete CSV).
     """
     _prev: dict[int, dict] = field(default_factory=dict)
 
@@ -264,23 +267,23 @@ class ChuvFeatureTracker:
         return out
 
     def forget(self, track_id: int) -> None:
-        """Da chiamare quando un track_id/person_id esce definitivamente
-        dall'inquadratura, per non lasciare stato agganciato a un id che
-        non ricomparira' -- e per evitare una velocita' vicina a zero
-        (anziche' NaN) se quello stesso id viene riassegnato molto piu'
-        tardi dopo un gap enorme (es. da `reid.py` dopo un lungo rientro)."""
+        """To be called when a track_id/person_id definitively leaves the
+        frame, so as not to leave state attached to an id that won't
+        reappear -- and to avoid a velocity close to zero (instead of
+        NaN) if that same id is reassigned much later after a huge gap
+        (e.g. from `reid.py` after a long re-entry)."""
         self._prev.pop(track_id, None)
 
 
 # ---------------------------------------------------------------------------
-# Punto di ingresso unico per l'uso in live_demo.py
+# Single entry point for use in live_demo.py
 # ---------------------------------------------------------------------------
 
 def compute_chuv_features(kxy: np.ndarray, track_id: int, now: float,
                            tracker: ChuvFeatureTracker) -> dict[str, float]:
-    """Tutte le feature "in stile CHUV" per un singolo frame di una
-    persona: coordinate normalizzate, feature derivate (angoli/distanze/
-    simmetria/COM/spread) e derivate temporali (velocita'/accelerazione).
+    """All "CHUV-style" features for a single frame of a person:
+    normalized coordinates, derived features (angles/distances/symmetry/
+    COM/spread) and temporal derivatives (velocity/acceleration).
     """
     norm = normalize_keypoints(kxy)
     out: dict[str, float] = {}

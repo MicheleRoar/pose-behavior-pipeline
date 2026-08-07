@@ -1,17 +1,17 @@
 """
 synthetic_demo.py
 ==================
-Dimostrazione end-to-end del modulo `features.py` su dati SINTETICI (nessun
-video reale, nessun dato di minori coinvolto): genera due scheletri COCO-17
-plausibili — un "bambino" con un braccio che compie un movimento ripetitivo
-(proxy di una stereotipia motoria) e un "caregiver" con un movimento di
-reaching più irregolare/naturale — e calcola le feature comportamentali.
+End-to-end demonstration of the `features.py` module on SYNTHETIC data (no
+real video, no data involving minors): generates two plausible COCO-17
+skeletons -- a "child" with an arm performing a repetitive movement (a
+proxy for a motor stereotypy) and a "caregiver" with a more irregular/
+natural reaching movement -- and computes the behavioral features.
 
-Obiettivo: verificare che la pipeline di feature extraction sia corretta e
-produca output sensati, senza dipendere da Ultralytics/torch (pesanti da
-installare in questo ambiente sandbox) né da dati video reali.
+Goal: verify that the feature extraction pipeline is correct and produces
+sensible output, without depending on Ultralytics/torch (heavy to install
+in this sandbox environment) or on real video data.
 
-Esegui con:  python synthetic_demo.py
+Run with:  python synthetic_demo.py
 Output: demo_outputs/features.csv, demo_outputs/*.png
 """
 
@@ -45,11 +45,11 @@ T = np.arange(N_FRAMES) / FPS
 
 
 def main():
-    print("Genero sequenze sintetiche di keypoint (bambino, caregiver)...")
+    print("Generating synthetic keypoint sequences (child, caregiver)...")
     child_seq = make_child_sequence(N_FRAMES, FPS, seed=0)
     caregiver_seq = make_caregiver_sequence(N_FRAMES, FPS, seed=1)
 
-    print("Costruisco le feature per persona...")
+    print("Building per-person features...")
     child_features = build_person_features(child_seq, track_id=1, fps=FPS)
     caregiver_features = build_person_features(caregiver_seq, track_id=2, fps=FPS)
 
@@ -60,7 +60,7 @@ def main():
 
     combined = pd.concat([child_df, caregiver_df], ignore_index=True)
 
-    print("Calcolo simmetria, movimento ripetitivo, prossimità e sincronia...")
+    print("Computing symmetry, repetitive movement, proximity, and synchrony...")
     child_sym = symmetry_index(child_seq, FPS)
     caregiver_sym = symmetry_index(caregiver_seq, FPS)
 
@@ -73,7 +73,7 @@ def main():
     proximity = proximity_series(child_seq, caregiver_seq)
     synchrony = windowed_synchrony(child_features.energy, caregiver_features.energy, window=30, step=10)
 
-    # --- salvataggio output ---
+    # --- save output ---
     combined.to_csv(OUT_DIR / "features.csv", index=False)
     synchrony.to_csv(OUT_DIR / "synchrony.csv", index=False)
 
@@ -83,35 +83,35 @@ def main():
     ])
     summary.to_csv(OUT_DIR / "summary.csv", index=False)
 
-    # --- grafici ---
+    # --- plots ---
     fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=False)
 
-    axes[0].plot(T, child_wrist_speed, label="bambino (polso, media L/R)")
-    axes[0].plot(T, caregiver_wrist_speed, label="caregiver (polso, media L/R)")
-    axes[0].set_title("Velocità del polso nel tempo")
-    axes[0].set_xlabel("tempo (s)")
-    axes[0].set_ylabel("velocità (px/s)")
+    axes[0].plot(T, child_wrist_speed, label="child (wrist, L/R average)")
+    axes[0].plot(T, caregiver_wrist_speed, label="caregiver (wrist, L/R average)")
+    axes[0].set_title("Wrist speed over time")
+    axes[0].set_xlabel("time (s)")
+    axes[0].set_ylabel("speed (px/s)")
     axes[0].legend()
 
     axes[1].plot(T, proximity, color="darkgreen")
-    axes[1].set_title("Prossimità bambino-caregiver (distanza centro-bacino)")
-    axes[1].set_xlabel("tempo (s)")
-    axes[1].set_ylabel("distanza (px)")
+    axes[1].set_title("Child-caregiver proximity (hip-center distance)")
+    axes[1].set_xlabel("time (s)")
+    axes[1].set_ylabel("distance (px)")
 
     valid = synchrony.dropna()
     axes[2].plot((valid["frame_start"] + valid["frame_end"]) / 2 / FPS, valid["synchrony"], color="purple")
     axes[2].axhline(0, color="gray", linewidth=0.8)
-    axes[2].set_title("Sincronia motoria (correlazione finestrata dell'energia di movimento)")
-    axes[2].set_xlabel("tempo (s)")
-    axes[2].set_ylabel("correlazione")
+    axes[2].set_title("Motor synchrony (windowed correlation of movement energy)")
+    axes[2].set_xlabel("time (s)")
+    axes[2].set_ylabel("correlation")
 
     fig.tight_layout()
     fig.savefig(OUT_DIR / "demo_plots.png", dpi=140)
     plt.close(fig)
 
-    print("\n=== Riepilogo ===")
+    print("\n=== Summary ===")
     print(summary.to_string(index=False))
-    print(f"\nOutput salvati in: {OUT_DIR}")
+    print(f"\nOutput saved to: {OUT_DIR}")
 
 
 if __name__ == "__main__":

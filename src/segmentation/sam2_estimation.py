@@ -1,51 +1,50 @@
 """
 sam2_estimation.py
 =====================
-`Sam2Tracker`: backend di segmentazione/tracking basato su SAM2 "vanilla"
-(facebookresearch/sam2). Stessa struttura di `Sam31Tracker`: tutta la
-logica condivisa (chunking, seeding degli id, riconciliazione, persistenza)
-vive in `segmentation/sam_backend.py::ChunkedVideoPredictorBackend`, qui
-solo come costruire il predictor.
+`Sam2Tracker`: segmentation/tracking backend based on "vanilla" SAM2
+(facebookresearch/sam2). Same structure as `Sam31Tracker`: all the shared
+logic (chunking, id seeding, reconciliation, persistence) lives in
+`segmentation/sam_backend.py::ChunkedVideoPredictorBackend`, here it's
+just how to build the predictor.
 
-Perche' SAM2 vanilla e non SAMURAI
+Why vanilla SAM2 and not SAMURAI
 ------------------------------------
-Questo modulo sostituisce `samurai_estimation.py` (rimosso). SAMURAI
-aggiunge sopra SAM2 un filtro di Kalman ("motion-aware mask selection",
-dentro `sam2_base.py::_forward_sam_heads`) scritto e validato SOLO per il
-visual object tracking single-target: i benchmark su cui e' stato provato
-(LaSOT, GOT-10k, TrackingNet) tracciano UN oggetto per video, mai piu' di
-uno insieme.
+This module replaces `samurai_estimation.py` (removed). SAMURAI adds a
+Kalman filter on top of SAM2 ("motion-aware mask selection", inside
+`sam2_base.py::_forward_sam_heads`) written and validated ONLY for
+single-target visual object tracking: the benchmarks it was tested on
+(LaSOT, GOT-10k, TrackingNet) track ONE object per video, never more than
+one together.
 
-Verificato su una macchina CUDA reale: seminando piu' persone nella stessa
-sessione (il caso normale qui -- piu' bambini/terapista in campo insieme),
-SAM2 le raggruppa in un unico batch per l'inferenza, ma il codice Kalman di
-SAMURAI assume un batch di dimensione 1 -- va in crash con
+Verified on a real CUDA machine: seeding several people in the same
+session (the normal case here -- several children/therapist in the scene
+together), SAM2 groups them into a single batch for inference, but
+SAMURAI's Kalman code assumes a batch of size 1 -- it crashes with
 
     RuntimeError: Boolean value of Tensor with more than one value is
     ambiguous
 
-dentro `_forward_sam_heads()` (riga `ious[0][best_iou_inds]`: con piu' di
-un oggetto tracciato, `best_iou_inds` ha una entry per persona invece che
-uno scalare, e l'indicizzazione risultante non e' piu' un singolo valore).
-Farlo funzionare per N persone richiederebbe una sessione SAM separata per
-ciascuna (N volte il costo dell'encoder, la parte piu' pesante di tutta la
-pipeline) -- non ne vale la pena rispetto a SAM2 vanilla, che supporta il
-multi-oggetto batchato NATIVAMENTE (nessuna patch, nessun crash), pur senza
-il motion-modeling attraverso le occlusioni che era il vero valore aggiunto
-di SAMURAI per il single-target tracking.
+inside `_forward_sam_heads()` (line `ious[0][best_iou_inds]`: with more
+than one tracked object, `best_iou_inds` has one entry per person instead
+of a scalar, and the resulting indexing is no longer a single value).
+Making it work for N people would require a separate SAM session for each
+one (N times the encoder cost, the heaviest part of the whole pipeline) --
+not worth it compared to vanilla SAM2, which supports batched multi-object
+NATIVELY (no patch, no crash), even without the motion-modeling through
+occlusions that was SAMURAI's real added value for single-target tracking.
 
-Requisiti: pacchetto `sam2` (facebookresearch/sam2, `git clone` + `pip
-install -e .`), checkpoint PUBBLICI (nessun accesso gated). Il default sotto
-punta al checkpoint DENTRO il checkout `samurai/` (che vendorizza sam2 al
-suo interno) invece che a un clone separato di facebookresearch/sam2: va
-bene riusare lo STESSO file .pt (SAMURAI non riaddestra i pesi di SAM2,
-applica solo il filtro di Kalman a inferenza) -- basta puntare `config`
-alla config SAM2.1 "standard" invece di quella specifica di samurai
-(`configs/samurai/...`), vendorizzata nello stesso checkout. Se in futuro
-preferisci un clone pulito e separato di facebookresearch/sam2, sovrascrivi
-`checkpoint=`/`config=` espliciti al costruttore.
+Requirements: `sam2` package (facebookresearch/sam2, `git clone` + `pip
+install -e .`), PUBLIC checkpoints (no gated access). The default below
+points to the checkpoint INSIDE the `samurai/` checkout (which vendors
+sam2 internally) instead of a separate facebookresearch/sam2 clone: it's
+fine to reuse the SAME .pt file (SAMURAI doesn't retrain SAM2's weights,
+it only applies the Kalman filter at inference time) -- just point
+`config` to the "standard" SAM2.1 config instead of samurai's own
+(`configs/samurai/...`), vendored in the same checkout. If in the future
+you prefer a clean, separate clone of facebookresearch/sam2, override
+`checkpoint=`/`config=` explicitly on the constructor.
 
-Import ritardato, stesso motivo di `Sam31Tracker`.
+Delayed import, same reason as `Sam31Tracker`.
 """
 
 from __future__ import annotations
@@ -54,26 +53,27 @@ from pathlib import Path
 
 from segmentation.sam_backend import ChunkedVideoPredictorBackend
 
-# Stessa convenzione "cartella sorella" gia' usata da samurai_estimation.py
-# (vedi README -- "clonalo fuori da pose-behavior-pipeline"): qui pero' si
-# punta DENTRO il checkout samurai/ gia' presente (samurai/checkpoints/*.pt),
-# non a un clone separato di facebookresearch/sam2 -- il checkpoint e'
-# identico, non serve scaricarlo due volte. Sovrascrivibile passando
-# `checkpoint=` esplicito al costruttore se preferisci un clone sam2/ a se'.
+# Same "sibling folder" convention already used by samurai_estimation.py
+# (see README -- "clone it outside pose-behavior-pipeline"): here though it
+# points INSIDE the already-present samurai/ checkout
+# (samurai/checkpoints/*.pt), not a separate facebookresearch/sam2 clone --
+# the checkpoint is identical, no need to download it twice. Overridable by
+# passing an explicit `checkpoint=` to the constructor if you prefer your
+# own separate sam2/ clone.
 DEFAULT_CHECKPOINT = str(
     Path(__file__).resolve().parents[3] / "samurai" / "checkpoints" / "sam2.1_hiera_base_plus.pt"
 )
 
-# Config SAM2.1 "standard" -- NON quella di samurai (configs/samurai/...):
-# e' questa la differenza che disattiva il filtro di Kalman single-object e
-# abilita il batching multi-oggetto nativo, vedi il docstring del modulo.
+# "Standard" SAM2.1 config -- NOT samurai's own (configs/samurai/...):
+# this is the difference that disables the single-object Kalman filter and
+# enables native multi-object batching, see the module docstring.
 DEFAULT_CONFIG = "configs/sam2.1/sam2.1_hiera_b+.yaml"
 
 
 class Sam2Tracker(ChunkedVideoPredictorBackend):
-    """Vedi il docstring del modulo e di `ChunkedVideoPredictorBackend`.
-    `checkpoint` e `config` seguono la convenzione di sam2 (nome file .pt +
-    config .yaml associato)."""
+    """See the module docstring and `ChunkedVideoPredictorBackend`.
+    `checkpoint` and `config` follow sam2's convention (.pt file name +
+    associated .yaml config)."""
 
     def __init__(self, *, checkpoint: str = DEFAULT_CHECKPOINT,
                  config: str = DEFAULT_CONFIG, **kwargs):
@@ -86,8 +86,8 @@ class Sam2Tracker(ChunkedVideoPredictorBackend):
             from sam2.build_sam import build_sam2_video_predictor
         except ImportError as exc:
             raise ImportError(
-                "Sam2Tracker richiede il pacchetto 'sam2' (non installato). "
-                "Vedi https://github.com/facebookresearch/sam2 -- "
-                "checkpoint pubblici (nessun accesso gated richiesto)."
+                "Sam2Tracker requires the 'sam2' package (not installed). "
+                "See https://github.com/facebookresearch/sam2 -- "
+                "public checkpoints (no gated access required)."
             ) from exc
         return build_sam2_video_predictor(self.config, self.checkpoint, device=self.device)
