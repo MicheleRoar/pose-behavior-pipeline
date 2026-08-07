@@ -4,8 +4,7 @@ Real-time and batch pipeline for extracting quantitative behavioural
 markers from interaction video, using multi-person pose/segmentation
 tracking and time-series feature engineering. Runs on Apple Silicon
 (MPS, no CUDA) as a testing/development platform alongside a
-CUDA/SAM3-based production pipeline for child neurodevelopment research
-— a companion for fast iteration, not a replacement.
+CUDA/SAM3-based production pipeline for child neurodevelopment research.
 
 Exploratory and technical, not validated diagnostic markers. Any
 clinical use requires ethics-committee approval and validation on
@@ -17,7 +16,6 @@ pose model alone produced too many spurious ids on real footage. Plan
 is to reattach pose *inside* the tracked silhouette (see
 `segmentation/seg_estimation.py`). The pose-based pipeline
 (`pipeline.py`, `live_demo.py`, `pose/`) stays in the repo, on hold.
-SAM 3.1 integration is the current priority.
 
 ## Structure
 
@@ -38,9 +36,22 @@ pose-behavior-pipeline/
 │   │   ├── sam31_estimation.py    # SAM 3.1 (needs CUDA, gated HF checkpoint)
 │   │   └── sam2_estimation.py     # SAM2 vanilla (needs CUDA)
 │   ├── pose/                      # ON HOLD library: everything keypoint-based
+│   │   ├── keypoints.py           # COCO-17 index names, skeleton edges
+│   │   ├── geometry.py            # shared angle/vector math
+│   │   ├── pose_estimation.py     # YOLO-pose + ByteTrack wrapper
+│   │   ├── features.py            # angles, velocity, symmetry, repetitiveness, synchrony
+│   │   ├── gaze_head.py           # head pose, mouth/eye/eyebrow signals (MediaPipe)
+│   │   ├── hands.py               # finger-level tracking (MediaPipe HandLandmarker)
+│   │   ├── mediapipe_pose.py      # single-person pose (MediaPipe), applied per tracked mask
+│   │   ├── identity_manager.py    # shared Hungarian batch re-id decision layer
+│   │   ├── reid.py                # re-id after exit/re-entry (body-shape signature + color)
+│   │   ├── appearance_embedding.py # OSNet embedding signal + EMA gallery
+│   │   ├── chuv_features.py       # reference-pipeline feature set, replicated in real time
+│   │   └── anonymize.py           # face blurring
 │   ├── common/                    # shared: device detection, model-path resolution, drawing
 │   └── configs/
-│       └── bytetrack_permissive.yaml  # tuned ByteTrack config for hard scenes
+│       ├── bytetrack.yaml             # Ultralytics' unmodified default, kept for reference
+│       └── bytetrack_permissive.yaml  # tuned variant for hard scenes
 ├── models/                        # auto-downloaded weights — gitignored, not code
 └── tests/                          # camera-free tests for every module above
 ```
@@ -113,7 +124,7 @@ cd src && python live_demo.py --source 0 --fps 30 --out live_session.csv
 `--tracker`/`--conf-threshold`/`--max-people`. See `--help` per script,
 and `reid.py`'s docstring for re-identification details.
 
-## Modules, briefly
+## Modules
 
 - **`pose/features.py`** — joint angles, movement energy, symmetry,
   repetitive-motion score, proximity/synchrony.
