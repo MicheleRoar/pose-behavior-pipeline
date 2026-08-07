@@ -122,6 +122,7 @@ from typing import Iterator
 import cv2
 import numpy as np
 
+from common.yolo_models import resolve_yolo_weights
 from segmentation.chunk_store import save_chunk
 from segmentation.chunking import GlobalIdAllocator, iter_chunk_ranges, polygon_iou
 from segmentation.seg_estimation import SegFrameResult
@@ -574,7 +575,7 @@ class ChunkedVideoPredictorBackend:
         docstring)."""
         if self._detector is None:
             from ultralytics import YOLO
-            self._detector = YOLO(self.prompt_model)
+            self._detector = YOLO(resolve_yolo_weights(self.prompt_model))
             print(f"[{type(self).__name__}] YOLO proposer loaded: model={self.prompt_model!r} "
                   f"device={self.device!r} conf_threshold={self.conf_threshold}")
         result = self._detector.predict(

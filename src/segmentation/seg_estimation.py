@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from common.tracking_common import cap_by_confidence
+from common.yolo_models import resolve_yolo_weights
 
 COCO_PERSON_CLASS_ID = 0
 
@@ -85,7 +86,7 @@ class SegTracker:
         # the package remains testable without ultralytics/torch installed).
         from ultralytics import YOLO
 
-        self.model = YOLO(model_name)
+        self.model = YOLO(resolve_yolo_weights(model_name))
         self.device = device
         self.conf_threshold = conf_threshold
         self.tracker = tracker

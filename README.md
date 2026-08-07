@@ -70,9 +70,13 @@ pose-behavior-pipeline/
 │   ├── common/                    # shared by both pipelines
 │   │   ├── tracking_common.py     # shared max_people per-frame cap logic
 │   │   ├── device.py              # auto-detect cuda/mps/cpu, default for --device everywhere
+│   │   ├── yolo_models.py         # resolves bare YOLO weight names into models/, cwd-independent
+│   │   ├── mediapipe_models.py    # same fix, for MediaPipe Tasks (.task) models
 │   │   └── viz.py                 # overlay drawing
 │   └── configs/
 │       └── bytetrack_permissive.yaml  # tuned ByteTrack config for hard scenes
+├── models/                        # auto-downloaded weights (.pt, .task) — gitignored, not code,
+│                                   # created on first run regardless of the launch cwd
 └── demo/                          # camera-free tests for every module above
 ```
 
@@ -246,6 +250,13 @@ cd src && python segmentation_demo.py --source video.mp4 --fps 15 \
     --model yolo26s-seg.pt --tracker configs/bytetrack_permissive.yaml \
     --conf-threshold 0.1 --max-people 2 --out session_seg.csv
 ```
+
+`--model yolo26s-seg.pt` (and every other bare YOLO weight name used
+throughout this README/the GUIs) auto-downloads on first use into
+`models/` at the repo root, same fix and same motivation as the
+MediaPipe Tasks models below (`common/yolo_models.py`) — cwd-independent,
+no manual placement needed regardless of which folder the command is
+launched from.
 
 Add `--no-window` to skip the live overlay (faster, log + CSV only). Same
 flags as the diagnostic-only `track_stability_check.py`, plus the overlay
