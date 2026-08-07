@@ -29,3 +29,34 @@ pywebview[qt]>=5.0; sys_platform == "linux"
 # tracciato per sessione e va in crash col multi-persona, vedi README.
 # Entrambi richiedono una GPU CUDA -- non installarli per usare solo il
 # backend YOLO di default.
+#
+# Appearance embedding OSNet (opzionale, toggle "Appearance embedding
+# (OSNet)" in Advanced settings -- vedi pose/appearance_embedding.py):
+# segnale di aspetto supplementare per Identity & Re-identification, oltre
+# alle euristiche gia' integrate (proporzioni corporee/colore/posizione per
+# la pose, centroide/colore/forma per la segmentazione). NON elencato come
+# riga pip qui sopra di proposito: 'torch' e' un pacchetto pesante (centinaia
+# di MB) e non necessario per il resto della pipeline. Installare con:
+#   pip install torch torchreid
+# Il primo utilizzo di un model_name noto (es. 'osnet_x1_0') senza un
+# model_path esplicito fa scaricare a torchreid i pesi pre-addestrati dal suo
+# model zoo -- richiede una connessione internet al primo avvio. Nessuna GPU
+# richiesta (default device='cpu', piu' lento ma funziona anche su un Mac
+# senza CUDA); una GPU CUDA disponibile puo' essere passata esplicitamente
+# per velocizzare l'inferenza per-persona.
+#
+# Insidie note di 'pip install torchreid' (verificate, non ipotetiche):
+# - manca la dipendenza 'gdown' (usata per scaricare i pesi): se l'import
+#   fallisce con "ModuleNotFoundError: No module named 'gdown'", installare
+#   anche quello a parte (pip install gdown).
+# - 'pip install torchreid' installa di default "torchreid-pip", un
+#   repackaging PyPI di terzi (non il progetto originale
+#   github.com/KaiyangZhou/deep-person-reid) con un layout dei moduli
+#   diverso: `import torchreid` funziona, ma `torchreid.utils` non e' un
+#   vero sottopacchetto importabile con `from torchreid.utils import ...`
+#   (fallisce con "ModuleNotFoundError: No module named 'torchreid.utils'"
+#   anche a installazione riuscita). Il codice qui (vedi
+#   `pose/appearance_embedding.py::_resolve_feature_extractor`) gestisce
+#   gia' questo caso accedendo per attributo dopo l'import invece che con
+#   un sotto-import diretto -- nessuna azione richiesta, documentato qui
+#   solo per chi indaga un errore di import in questa dipendenza.

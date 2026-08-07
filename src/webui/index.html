@@ -56,23 +56,41 @@
       </section>
 
       <section class="card">
-        <h3>Model</h3>
-        <label class="field-label" for="arch-select">Architecture</label>
-        <select id="arch-select" class="field-input">
-          <option value="yolo">YOLO26 + ByteTrack</option>
+        <h3>Task</h3>
+        <div class="segmented" id="task-segmented">
+          <button type="button" class="seg-btn" data-value="segmentation">Segmentation</button>
+          <button type="button" class="seg-btn" data-value="pose">Pose</button>
+          <button type="button" class="seg-btn active" data-value="both">Both</button>
+        </div>
+      </section>
+
+      <section class="card" id="segmentation-card">
+        <h3>Segmentation</h3>
+        <label class="field-label" for="seg-model-select">Model</label>
+        <select id="seg-model-select" class="field-input">
+          <option value="yolo">YOLO26 Segment</option>
           <option value="sam31">SAM 3.1</option>
           <option value="sam2">SAM2</option>
+          <option value="samurai" disabled title="Not available: its Kalman filter assumes a single tracked object per session and crashes with multiple people (see README).">SAMURAI (unavailable)</option>
         </select>
-        <p id="arch-hint" class="hint hidden">SAM 3.1 / SAM2 need Segmentation or Both mode, and a CUDA GPU on this machine.</p>
+        <p id="seg-guidance-hint" class="hint"></p>
+        <div id="sam31-text-prompt-field" class="hidden">
+          <label class="field-label" for="sam-text-prompt-input">Text prompt <em>(SAM 3.1 only)</em></label>
+          <input id="sam-text-prompt-input" class="field-input" type="text" placeholder="e.g. person">
+        </div>
+        <p id="seg-cuda-hint" class="hint hidden">SAM 3.1 / SAM2 need a CUDA GPU on this machine — staying on YOLO26 Segment.</p>
+      </section>
 
-        <label class="field-label" for="mode-select">Mode</label>
-        <select id="mode-select" class="field-input">
-          <option value="segmentation">Segmentation</option>
-          <option value="pose">Pose estimation</option>
-          <option value="both">Both</option>
+      <section class="card" id="pose-card">
+        <h3>Pose</h3>
+        <label class="field-label" for="pose-model-select">Model</label>
+        <select id="pose-model-select" class="field-input">
+          <option value="yolo">YOLO26 Pose</option>
+          <option value="mediapipe">MediaPipe</option>
         </select>
+        <p id="pose-guidance-hint" class="hint"></p>
 
-        <label class="field-label" for="scale-select">Model size</label>
+        <label class="field-label" for="scale-select">Model size <em>(YOLO models)</em></label>
         <select id="scale-select" class="field-input">
           <option value="n">n (fastest)</option>
           <option value="s" selected>s (balanced)</option>
@@ -80,25 +98,53 @@
         </select>
       </section>
 
-      <section class="card">
-        <h3>Tracking</h3>
-        <div class="inline-field-row">
+      <section class="card card-identity" id="identity-card">
+        <h3>
+          <svg class="card-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2 4 5v6c0 5 3.4 8.7 8 9 4.6-.3 8-4 8-9V5l-8-3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+          Identity &amp; Re-identification
+        </h3>
+
+        <label class="field-label" for="identity-mode-select">Mode</label>
+        <select id="identity-mode-select" class="field-input">
+          <option value="frame_by_frame">Frame-by-frame</option>
+          <option value="tracking_only">Tracking only</option>
+          <option value="tracking_reid" selected>Tracking + Re-identification</option>
+        </select>
+
+        <label class="field-label">Session</label>
+        <div class="segmented" id="session-segmented">
+          <button type="button" class="seg-btn" data-value="single">Single person</button>
+          <button type="button" class="seg-btn active" data-value="multiple">Multiple people</button>
+        </div>
+
+        <div class="inline-field-row" id="max-people-row">
           <label class="field-label-inline" for="max-people-input">Max number of people</label>
           <input id="max-people-input" class="field-input field-input-sm" type="number" min="1" step="1" placeholder="unset">
         </div>
 
         <div class="switch-row">
-          <span>Re-identification</span>
+          <span>Flag uncertain matches</span>
           <label class="switch">
-            <input id="reid-toggle" type="checkbox" checked>
+            <input id="flag-uncertain-toggle" type="checkbox" checked>
             <span class="switch-track"><span class="switch-thumb"></span></span>
           </label>
         </div>
-        <p class="hint">Hard cap on max people. Requires a value above.</p>
+
+        <div class="inline-field-row">
+          <label class="field-label-inline" for="lost-memory-input">Lost identity memory (s)</label>
+          <input id="lost-memory-input" class="field-input field-input-sm" type="number" min="1" step="1" value="180">
+        </div>
+
+        <div class="identity-status">
+          <span id="reid-status-pill" class="pill pill-accent">
+            <span class="pill-dot"></span><span id="reid-status-label">Re-ID active</span>
+          </span>
+        </div>
+        <p class="hint">Reconnects people after exits, occlusions, and lost tracks. Matching stays conservative: an uncertain re-entry is flagged, never silently merged.</p>
       </section>
 
-      <section class="card" id="features-card">
-        <h3>Features <span class="hint-inline">(Pose estimation / Both only)</span></h3>
+      <section class="card" id="outputs-card">
+        <h3>Outputs</h3>
         <div class="switch-row">
           <span>Hands</span>
           <label class="switch">
@@ -106,49 +152,57 @@
             <span class="switch-track"><span class="switch-thumb"></span></span>
           </label>
         </div>
-        <div class="subsection-label">Face</div>
-        <div class="switch-row indent">
-          <span>Eyes <em>(blink rate)</em></span>
-          <label class="switch">
-            <input id="eyes-toggle" type="checkbox">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
-        <div class="switch-row indent">
-          <span>Mouth <em>(opening + repetitiveness)</em></span>
-          <label class="switch">
-            <input id="mouth-toggle" type="checkbox">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
-        <div class="switch-row indent">
-          <span>Eyebrows <em>(raise)</em></span>
-          <label class="switch">
-            <input id="eyebrows-toggle" type="checkbox">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
-        <div class="switch-row indent">
-          <span>Head movement <em>(yaw/pitch, shared attention)</em></span>
-          <label class="switch">
-            <input id="head-movement-toggle" type="checkbox">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
+        <details id="face-details">
+          <summary>Face</summary>
+          <div class="switch-row indent">
+            <span>Eyes <em>(blink rate)</em></span>
+            <label class="switch">
+              <input id="eyes-toggle" type="checkbox">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+          </div>
+          <div class="switch-row indent">
+            <span>Mouth <em>(opening + repetitiveness)</em></span>
+            <label class="switch">
+              <input id="mouth-toggle" type="checkbox">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+          </div>
+          <div class="switch-row indent">
+            <span>Eyebrows <em>(raise)</em></span>
+            <label class="switch">
+              <input id="eyebrows-toggle" type="checkbox">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+          </div>
+          <div class="switch-row indent">
+            <span>Head movement <em>(yaw/pitch, shared attention)</em></span>
+            <label class="switch">
+              <input id="head-movement-toggle" type="checkbox">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+          </div>
+        </details>
+        <p id="outputs-hint" class="hint"></p>
       </section>
 
-      <section class="card" id="seg-extras-card">
-        <h3>Segmentation extras</h3>
-        <div class="switch-row">
-          <span>MediaPipe pose <em>(inside each tracked mask)</em></span>
-          <label class="switch">
-            <input id="mediapipe-pose-toggle" type="checkbox">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
+      <details id="advanced-details" class="card card-advanced">
+        <summary>Advanced settings</summary>
+
+        <div class="inline-field-row">
+          <label class="field-label-inline" for="conf-threshold-input">Confidence threshold</label>
+          <input id="conf-threshold-input" class="field-input field-input-sm" type="number" min="0" max="1" step="0.05" value="0.1">
         </div>
+
+        <label class="field-label" for="tracker-select">Tracking method</label>
+        <select id="tracker-select" class="field-input">
+          <option value="bytetrack.yaml">ByteTrack (default)</option>
+          <option value="configs/bytetrack_permissive.yaml">ByteTrack (permissive — overhead camera, fast motion)</option>
+        </select>
+
         <div id="sam-chunk-fields" class="hidden">
           <div class="inline-field-row">
-            <label class="field-label-inline" for="sam-chunk-size-input">Chunk size (frames)</label>
+            <label class="field-label-inline" for="sam-chunk-size-input">Chunk length (frames)</label>
             <input id="sam-chunk-size-input" class="field-input field-input-sm" type="number" min="10" step="10" value="600">
           </div>
           <div class="inline-field-row">
@@ -159,34 +213,41 @@
             <label class="field-label-inline" for="sam-redetect-every-input">Re-detect every (frames)</label>
             <input id="sam-redetect-every-input" class="field-input field-input-sm" type="number" min="1" step="1" placeholder="off">
           </div>
-          <p class="hint">SAM 3.1/SAM2 process the video in overlapping windows to bound memory use (see README). Only relevant with this backend. "Re-detect every" re-runs YOLO inside the chunk too (not just at its boundary) -- leave empty to keep one detection per chunk.</p>
+          <p class="hint">SAM 3.1/SAM2 process the video in overlapping windows to bound memory use (see README). "Re-detect every" re-runs YOLO inside the chunk too, not just at its boundary — leave empty to keep one detection per chunk.</p>
         </div>
-        <div id="sam31-text-prompt-field" class="hidden">
-          <label class="field-label" for="sam-text-prompt-input">Text prompt <em>(SAM 3.1 only)</em></label>
-          <input id="sam-text-prompt-input" class="field-input" type="text" placeholder="e.g. person">
-          <p class="hint">If set, SAM 3.1 discovers people itself from this concept instead of using YOLO as a proposer (same technique as the CHUV production pipeline). Leave empty to keep the YOLO box-seeding behavior.</p>
+
+        <div class="switch-row">
+          <span>Appearance embedding <em>(OSNet)</em></span>
+          <label class="switch">
+            <input id="appearance-embedding-toggle" type="checkbox">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
         </div>
-      </section>
+        <p class="hint">Adds a deep-learning appearance signal (OSNet) to Identity &amp; Re-identification, on top of the built-in signature/color/position matching — the person's visual "fingerprint" is refined every frame they're visible (like StrongSORT's feature memory), making re-entries after leaving frame more reliable. Only used when Identity mode is "Track + re-identify". Slower per frame; requires the optional 'torch'+'torchreid' packages (see requirements.txt).</p>
+        <p id="embedding-unavailable-hint" class="hint hidden">'torch'/'torchreid' not detected on this machine — install them (see requirements.txt) to enable appearance embedding.</p>
+      </details>
+
+      <div class="summary-panel" id="summary-panel"></div>
 
       <div class="sidebar-actions">
+        <button id="btn-play-analysis" class="btn btn-primary btn-block">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          Run analysis
+        </button>
         <div class="sidebar-actions-row">
-          <button id="btn-play-analysis" class="btn btn-primary">
-            <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-            Play analysis
-          </button>
           <button id="btn-restart" class="btn btn-outline">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             Restart
           </button>
+          <button id="btn-export-csv" class="btn btn-outline">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 4v12M7 11l5 5 5-5M4 20h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Export CSV…
+          </button>
         </div>
-        <button id="btn-export-csv" class="btn btn-outline btn-block">
-          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 4v12M7 11l5 5 5-5M4 20h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          Export CSV…
-        </button>
       </div>
     </aside>
 

@@ -48,7 +48,12 @@ def part1_build_player_kwargs_mirrors_app_py_defaults():
     assert kwargs["with_eyes"] is True
     assert kwargs["with_mouth"] is False
     assert kwargs["max_people"] is None
-    assert kwargs["with_reid"] is False  # nessun max_people -> reid ignorata anche se richiesta
+    # identity_mode default "tracking_reid": il pose-reid (ReIdentifier)
+    # funziona bene SENZA max_people (matching per firma/colore/posizione,
+    # semplicemente niente "forza il match perche' il tetto e' raggiunto")
+    # -- vedi il commento in build_player_kwargs sull'asimmetria con
+    # SegReIdentifier, che invece max_people lo richiede per davvero.
+    assert kwargs["with_reid"] is True
     print("Parte 1: build_player_kwargs applica i default giusti e passa i flag richiesti — OK")
 
 
@@ -79,26 +84,38 @@ def part2_hands_face_ignored_outside_pose_and_both():
 
 
 def part3_mediapipe_pose_only_in_segmentation():
+    # Segmentazione/pose indipendenti (vedi gui/pipeline_runner.py): non
+    # esiste piu' un flag "with_mediapipe_pose" separato mandato da JS --
+    # e' derivato dalla scelta "Pose model" (pose_backend) fatta nella
+    # sezione Pose della sidebar. In modalita' Segmentation,
+    # pose_backend="mediapipe" applica MediaPipe dentro ciascuna maschera
+    # tracciata (con_mediapipe_pose=True); in modalita' Pose da sola,
+    # pose_backend="mediapipe" prende un'altra strada del tutto
+    # (`_iter_pose_mediapipe`, box interni, NON `with_mediapipe_pose`).
     kwargs_seg = build_player_kwargs({
         "mode": "segmentation", "source": "v.mp4", "fps": 15,
-        "with_mediapipe_pose": True,
+        "pose_backend": "mediapipe",
     })
     assert kwargs_seg["with_mediapipe_pose"] is True
 
     kwargs_pose = build_player_kwargs({
         "mode": "pose", "source": "v.mp4", "fps": 15,
-        "with_mediapipe_pose": True,
+        "pose_backend": "mediapipe",
     })
     assert kwargs_pose["with_mediapipe_pose"] is False
+    assert kwargs_pose["pose_backend"] == "mediapipe"  # gestito da _iter_pose_mediapipe, non da questo flag
     print("Parte 3: MediaPipe pose-per-maschera attivabile solo in modalita' segmentation — OK")
 
 
 def part4_reid_requires_max_people_and_right_mode():
-    # reid richiesta ma senza max_people -> ignorata (non solleva errore)
+    # senza max_people: il pose-reid (ReIdentifier) funziona comunque
+    # (non ha bisogno di un tetto per il matching normale), il seg-reid
+    # (SegReIdentifier) resta spento -- richiede max_people per davvero,
+    # vedi il commento in build_player_kwargs sull'asimmetria tra i due.
     kwargs = build_player_kwargs({
-        "mode": "both", "source": "v.mp4", "fps": 15, "reid": True,
+        "mode": "both", "source": "v.mp4", "fps": 15,
     })
-    assert kwargs["with_reid"] is False
+    assert kwargs["with_reid"] is True
     assert kwargs["with_seg_reid"] is False
 
     # reid richiesta con max_people, modalita' "both" -> entrambe le reid attive

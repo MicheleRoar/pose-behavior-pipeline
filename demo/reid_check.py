@@ -279,6 +279,101 @@ def max_people_forces_capacity_reentry():
           "-> ri-associato FORZATO (roster al tetto, unico candidato perso)")
 
 
+class _FakeEmbedder:
+    """Stub di test per il segnale di embedding di aspetto (vedi
+    `pose/appearance_embedding.OSNetEmbedder`, NON usata qui apposta: non
+    richiede 'torch'/'torchreid' nella suite di test, che deve restare
+    eseguibile ovunque). Stessa interfaccia (`embed(frame, bbox)`) --
+    invece di un vero embedding OSNet, legge un marcatore di colore fissato
+    nell'angolo in alto a sinistra del frame sintetico (`make_marked_frame`)
+    e lo mappa su un vettore unitario. Il marcatore e' fisso nell'angolo,
+    INDIPENDENTE dalla posizione della persona nel frame (che qui varia
+    deliberatamente) -- serve a dimostrare che il segnale e' un contributo
+    indipendente da posizione/proporzioni, non solo un modo indiretto di
+    ricodificarle."""
+    _MARKERS = {(255, 0, 0): np.array([1.0, 0.0]), (0, 0, 255): np.array([-1.0, 0.0])}
+
+    def embed(self, frame_bgr, bbox_xyxy, poly=None):
+        marker = tuple(int(v) for v in frame_bgr[0, 0])
+        return self._MARKERS.get(marker)
+
+
+def make_marked_frame(marker: tuple[int, int, int], size: int = 2000) -> np.ndarray:
+    frame = np.zeros((size, size, 3), dtype=np.uint8)
+    frame[0:5, 0:5] = marker
+    return frame
+
+
+def embedding_signal_recovers_reentry_when_signature_and_position_fail():
+    """Scenario in cui NE' la firma (proporzioni troppo distorte) NE' la
+    posizione (rientro lontano dall'ultima posizione nota) basterebbero da
+    sole -- stesso schema del controllo negativo in
+    `position_signal_recovers_in_place_reentry`, qui pero' con un embedding
+    di aspetto (`_FakeEmbedder`) che INVECE recupera il match, perche' il
+    "colore" (il marcatore fisso nel frame) e' coerente con la persona
+    perduta. Controllo negativo: stessa distorsione, stessa distanza, ma
+    marcatore SBAGLIATO (persona diversa) -- non deve scattare nessun match,
+    a riprova che l'embedding sconta ma non forza mai (stessa filosofia di
+    colore/posizione, vedi il docstring di reid.py)."""
+    RED, BLUE = (255, 0, 0), (0, 0, 255)
+
+    def run(*, reentry_marker: tuple[int, int, int]) -> tuple[int, int]:
+        reid = ReIdentifier(max_lost_seconds=60.0, max_signature_dist=0.12,
+                             min_signature_frames=15, color_bonus_weight=0.0,
+                             position_bonus_weight=0.5, embedder=_FakeEmbedder(),
+                             embedding_bonus_weight=0.7)
+        rng = np.random.default_rng(21)
+        frame_t = 0
+        frame_red = make_marked_frame(RED)
+
+        person_id_initial = None
+        for _ in range(20):
+            now = frame_t / FPS
+            kxy = make_skeleton(**PERSON_A, tx=0, ty=0, jitter=0.01, rng=rng)
+            resolved = reid.resolve([(1, kxy, CONF)], now, frame=frame_red)
+            person_id_initial = resolved[0][0]
+            frame_t += 1
+
+        for _ in range(int(FPS * 10)):
+            frame_t += 1  # A fuori dall'inquadratura, nessuna resolve() (come noisy_reentry_recovers_via_retry)
+
+        distorted = dict(PERSON_A)
+        distorted["shoulder_w"] *= 1.6
+        distorted["hip_w"] /= 1.6
+        distorted["upper_arm"] *= 1.6
+        distorted["thigh"] /= 1.6
+        far_tx = 300 + (MAX_POSITION_DIST_TORSOS + 2) * 100
+
+        rng2 = np.random.default_rng(22)
+        frame_reentry = make_marked_frame(reentry_marker)
+        person_id_reentry = None
+        for _ in range(15):
+            now = frame_t / FPS
+            kxy = make_skeleton(**distorted, tx=far_tx, ty=0, jitter=0.01, rng=rng2)
+            resolved = reid.resolve([(2, kxy, CONF)], now, frame=frame_reentry)
+            person_id_reentry = resolved[0][0]
+            frame_t += 1
+
+        return person_id_initial, person_id_reentry
+
+    initial, reentry = run(reentry_marker=RED)
+    assert reentry == initial, (
+        f"marcatore corretto (stessa persona): atteso un match grazie al solo embedding "
+        f"(firma troppo distorta, posizione troppo lontana) -- initial={initial}, reentry={reentry}"
+    )
+    print(f"Rientro con firma+posizione insufficienti, marcatore di aspetto CORRETTO: "
+          f"person_id iniziale={initial}, al rientro={reentry} -> ri-associato grazie al solo embedding")
+
+    initial, reentry = run(reentry_marker=BLUE)
+    assert reentry != initial, (
+        f"controllo negativo fallito: marcatore SBAGLIATO (persona diversa) non deve produrre "
+        f"un match solo perche' firma/posizione sono ambigue -- initial={initial}, reentry={reentry}"
+    )
+    print(f"Controllo negativo (stessa distorsione, marcatore di aspetto SBAGLIATO): "
+          f"person_id iniziale={initial}, al rientro={reentry} -> NON ri-associato (atteso, "
+          "l'embedding sconta ma non forza mai)")
+
+
 def main():
     reid = ReIdentifier(max_lost_seconds=30.0, max_signature_dist=0.12, min_signature_frames=15)
     rng_a = np.random.default_rng(1)
@@ -358,6 +453,7 @@ def main():
     noisy_reentry_recovers_via_retry()
     position_signal_recovers_in_place_reentry()
     max_people_forces_capacity_reentry()
+    embedding_signal_recovers_reentry_when_signature_and_position_fail()
 
     print("\nVerifica completata senza errori: re-identificazione in tempo reale "
           "funziona su un'uscita/rientro simulata, senza confondere una persona estranea.")

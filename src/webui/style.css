@@ -517,3 +517,110 @@ html, body {
 /* ============================================================= disabled */
 .card.disabled { opacity: 0.5; }
 .card.disabled .switch-row { pointer-events: none; }
+
+/* ========================================================= segmented control
+   Task (Segmentation/Pose/Both) and Session (Single/Multiple) use the same
+   pill-group control instead of a <select> -- matches the mock, and reads
+   better for a binary/ternary choice than a dropdown. */
+.segmented {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.seg-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 8px 6px;
+  cursor: pointer;
+}
+.seg-btn:last-child { border-right: none; }
+.seg-btn:hover { background: var(--panel-2); color: var(--text); }
+.seg-btn.active { background: var(--accent); color: #0b0d12; }
+
+/* ================================================== Identity & Re-ID card
+   Kept as a visually distinct, bordered card (never folded into Advanced):
+   it's the actual experimental focus of this project, not a minor knob. */
+.card-identity {
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: rgba(108, 140, 255, 0.06);
+  padding: 12px 12px 14px;
+}
+.card-identity h3 { display: flex; align-items: center; gap: 6px; }
+.card-icon { width: 14px; height: 14px; flex-shrink: 0; }
+
+.identity-status { margin: 10px 0 2px; }
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.pill-accent { background: rgba(108, 140, 255, 0.15); border-color: var(--accent); color: var(--accent); }
+.pill-warn { background: rgba(251, 191, 36, 0.12); border-color: var(--warn); color: var(--warn); }
+.pill-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* Flags a field that's required for the currently-selected combination but
+   still empty (e.g. "Max number of people" with segmentation Re-ID + Session
+   = Multiple) -- see applyIdentityGating() in app.js. */
+.field-input-required { border-color: var(--warn); }
+
+/* ===================================================== collapsible sections
+   Face (inside Outputs) and Advanced settings both use <details>/<summary>
+   instead of always-expanded content -- summary styled like the .card h3
+   label so a collapsed section still reads as a section, not a stray link. */
+details > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  font-weight: 700;
+  padding: 2px 0;
+}
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.12s;
+  color: var(--text-faint);
+}
+details[open] > summary::before { transform: rotate(90deg); }
+
+#face-details { margin-top: 4px; }
+#face-details summary { color: var(--text); text-transform: none; letter-spacing: 0; font-weight: 600; font-size: 12px; }
+#face-details[open] summary { margin-bottom: 4px; }
+
+.card-advanced summary { color: var(--accent); text-transform: uppercase; }
+.card-advanced[open] summary { margin-bottom: 10px; }
+
+/* ================================================================ summary
+   Plain-language recap of the current configuration, right above "Run
+   analysis" -- rebuilt from the live selection, never a fixed placeholder
+   string (see updateSummary() in app.js). */
+.summary-panel {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.summary-panel .summary-line { display: block; }
+.summary-panel .summary-line strong { color: var(--text); font-weight: 600; }
+.summary-panel .summary-warn { color: var(--warn); }

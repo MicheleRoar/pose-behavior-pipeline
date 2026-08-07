@@ -54,8 +54,18 @@ from gui.pipeline_runner import iter_pipeline_frames, RunnerFrame
 from gui.video_player import VideoPlayer
 from common.device import detect_default_device  # solo la funzione: non importa torch
                                                     # finche' non viene CHIAMATA (vedi sotto)
+from pose.identity_manager import IdentityMode, SessionMode, wants_reid_engine
+from pose.appearance_embedding import torchreid_available  # solo il check leggero: non importa torch
 
 MODE_KEYS = {"segmentation", "pose", "both"}
+POSE_BACKEND_KEYS = {"yolo", "mediapipe"}
+IDENTITY_MODE_KEYS = {"frame_by_frame", "tracking_only", "tracking_reid"}
+SESSION_MODE_KEYS = {"single", "multiple"}
+# SAMURAI (yangchris11/samurai) NON e' un backend valido qui: il suo filtro
+# di Kalman assume un solo oggetto tracciato per sessione e va in crash col
+# multi-persona (vedi requirements.txt) -- resta elencato in UI solo come
+# opzione VISIBILMENTE disattivata con il motivo, mai come scelta che
+# arriverebbe fin qui.
 
 
 def probe_video_metadata(path: str) -> dict:
@@ -136,23 +146,93 @@ def build_player_kwargs(params: dict) -> dict:
 
     scale = str(params.get("scale", "s"))[0]
 
+    # -- Pose: modello INDIPENDENTE dalla segmentazione (vedi
+    # pipeline_runner.py) -- "yolo" (default, full-frame + ByteTrack) o
+    # "mediapipe" (guidato da box/maschera, vedi li' per il wiring esatto
+    # per ciascuna combinazione di Task/backend).
+    pose_backend = str(params.get("pose_backend") or "yolo")
+    if pose_backend not in POSE_BACKEND_KEYS:
+        raise ValueError(f"pose_backend sconosciuto: {pose_backend!r} (atteso 'yolo'|'mediapipe')")
+
+    # -- Identity & Re-identification (vedi identity_manager.py) --
+    identity_mode_raw = str(params.get("identity_mode") or "tracking_reid")
+    if identity_mode_raw not in IDENTITY_MODE_KEYS:
+        raise ValueError(f"identity_mode sconosciuto: {identity_mode_raw!r}")
+    identity_mode = IdentityMode(identity_mode_raw)
+
+    session_mode_raw = str(params.get("session_mode") or "multiple")
+    if session_mode_raw not in SESSION_MODE_KEYS:
+        raise ValueError(f"session_mode sconosciuto: {session_mode_raw!r}")
+    session_mode = SessionMode(session_mode_raw)
+
+    flag_uncertain = bool(params.get("flag_uncertain", True))
+    # Si applica solo al percorso basato su keypoint (ReIdentifier): vedi
+    # pipeline_runner.iter_pipeline_frames per il perche' viene ignorato in
+    # modalita' Segmentation-only (SegReIdentifier non ha scadenza per design).
+    reid_max_lost_seconds = float(params.get("lost_identity_memory_s") or 180.0)
+
     pose_capable = mode in ("pose", "both")
-    with_hands = pose_capable and bool(params.get("with_hands"))
-    with_eyes = pose_capable and bool(params.get("with_eyes"))
-    with_mouth = pose_capable and bool(params.get("with_mouth"))
-    with_eyebrows = pose_capable and bool(params.get("with_eyebrows"))
-    with_head_movement = pose_capable and bool(params.get("with_head_movement"))
+    with_hands = pose_capable and pose_backend == "yolo" and bool(params.get("with_hands"))
+    with_eyes = pose_capable and pose_backend == "yolo" and bool(params.get("with_eyes"))
+    with_mouth = pose_capable and pose_backend == "yolo" and bool(params.get("with_mouth"))
+    with_eyebrows = pose_capable and pose_backend == "yolo" and bool(params.get("with_eyebrows"))
+    with_head_movement = pose_capable and pose_backend == "yolo" and bool(params.get("with_head_movement"))
+    # Mani/viso (MediaPipe FaceLandmarker/HandLandmarker aggiuntivi rispetto
+    # allo scheletro) restano cablati SOLO sul percorso pose_backend="yolo"
+    # (vedi live_demo.py): con pose_backend="mediapipe" lo scheletro viene
+    # gia' da MediaPipe Tasks PoseLandmarker, ma mani/viso a livello di
+    # dita/blink non sono ancora collegati su quel percorso (vedi
+    # pipeline_runner._iter_pose_mediapipe per il limite onesto).
 
-    # re-id/seg-reid richiedono un numero di persone noto (tetto rigido):
-    # senza max_people la spunta viene semplicemente ignorata, non fa
-    # fallire l'avvio -- stesso comportamento di app.py.
-    reid_requested = bool(params.get("reid")) and max_people is not None
-    with_reid = reid_requested and mode in ("pose", "both")
-    with_seg_reid = reid_requested and mode in ("segmentation", "both")
+    # -- Identity & Re-identification: "tracking_reid" e' l'unica modalita'
+    # che istanzia ReIdentifier/SegReIdentifier (vedi
+    # identity_manager.wants_reid_engine); "frame_by_frame"/"tracking_only"
+    # usano l'id nativo del tracker sottostante senza recupero dopo una
+    # perdita -- vedi il loro docstring in identity_manager.py per il limite
+    # onesto su "frame_by_frame" (oggi si comporta come "tracking_only": una
+    # vera modalita' senza ALCUNA continuita', nemmeno quella nativa del
+    # tracker, richiederebbe sostituire ByteTrack/SAM, fuori scope qui).
+    # ATTENZIONE, asimmetria reale tra i due motori (causa di un bug gia'
+    # visto: "Re-ID active" mostrato in UI ma nessuna riassociazione
+    # avvenuta davvero, vedi la sessione di debug con gli screenshot di ID
+    # instabili sulle maschere):
+    #   - ReIdentifier (pose, keypoint) funziona SENZA max_people: fa
+    #     comunque matching per firma/colore/posizione, semplicemente non ha
+    #     l'ultima risorsa "forza il match perche' il tetto e' raggiunto".
+    #     Non ha senso spegnerlo del tutto solo perche' l'utente non ha
+    #     compilato un campo che non gli serve.
+    #   - SegReIdentifier (segmentazione, maschera) invece RICHIEDE
+    #     max_people nel costruttore (solleva ValueError altrimenti, vedi
+    #     seg_reid.py): senza un tetto non puo' garantire "mai piu' di N
+    #     identita'", quindi qui il campo resta obbligatorio (session_mode
+    #     "single" lo forza comunque a 1, vedi
+    #     identity_manager.suggested_max_people_policy).
+    # Trattarle allo stesso modo (come prima di questo commento) spegneva
+    # SILENZIOSAMENTE anche il pose-reid quando bastava la sola
+    # segmentazione a richiedere il tetto -- ora sono due condizioni
+    # separate.
+    reid_mode_selected = wants_reid_engine(identity_mode)
+    seg_reid_ready = reid_mode_selected and (max_people is not None or session_mode == SessionMode.SINGLE)
 
-    # Pose per-maschera MediaPipe ha senso solo dove c'e' una maschera, cioe'
-    # solo in modalita' Segmentation -- vedi pipeline_runner.py.
-    with_mediapipe_pose = mode == "segmentation" and bool(params.get("with_mediapipe_pose"))
+    # `with_reid` serve sia a `_iter_pose` (pose_backend="yolo") sia a
+    # `_iter_pose_mediapipe` (pose_backend="mediapipe") -- vedi
+    # pipeline_runner.iter_pipeline_frames, che inoltra lo STESSO valore a
+    # entrambi i rami "pose"; per mode="both" con pose_backend="mediapipe"
+    # questo valore e' semplicemente ignorato (quel ramo usa solo
+    # `with_seg_reid`, vedi li').
+    with_reid = reid_mode_selected and mode in ("pose", "both")
+    with_seg_reid = seg_reid_ready and mode in ("segmentation", "both")
+    # NB: se `mode` include la segmentazione e `seg_reid_ready` e' False
+    # (max_people mancante, session_mode "multiple"), la sidebar deve
+    # segnalarlo PRIMA di arrivare qui -- vedi app.js::applyIdentityGating,
+    # che rispecchia questa stessa condizione lato client per la pillola di
+    # stato, cosi' non serve un giro di andata/ritorno col backend solo per
+    # sapere se un campo e' compilato.
+
+    # Pose dentro la maschera/box, MediaPipe: attiva quando pose_backend e'
+    # "mediapipe" E la modalita' lo prevede (vedi pipeline_runner.py per il
+    # wiring esatto di ciascuna combinazione).
+    with_mediapipe_pose = mode == "segmentation" and pose_backend == "mediapipe"
 
     # Backend di segmentazione (YOLO/SAM 3.1/SAM2): rilevante solo in
     # Segmentation/Both, "yolo" altrove (ignorato da iter_pipeline_frames se
@@ -167,10 +247,27 @@ def build_player_kwargs(params: dict) -> dict:
     sam_redetect_every = int(sam_redetect_every_raw) if sam_redetect_every_raw else None
     sam_text_prompt = params.get("sam_text_prompt") or None
 
+    # -- Advanced settings (nuovi, sezione collassata in UI): prima erano
+    # sempre lasciati al default di `iter_pipeline_frames` perche' non
+    # esposti da nessun controllo -- ora un valore esplicito dell'utente
+    # sovrascrive quel default, invariato se il campo resta vuoto.
+    conf_threshold = float(params.get("conf_threshold") or 0.1)
+    tracker_config = str(params.get("tracker_config") or "bytetrack.yaml")
+
+    # Embedding di aspetto OSNet (nuovo, opzionale -- vedi
+    # pose/appearance_embedding.py e pipeline_runner.iter_pipeline_frames).
+    # Rilevante solo se un motore di re-id e' effettivamente attivo: se ne'
+    # `with_reid` ne' `with_seg_reid` finiscono True, il flag non cambia
+    # nulla (nessun embedder viene mai costruito, vedi
+    # pipeline_runner._build_embedder), ma lo passiamo comunque cosi'
+    # com'e' -- non e' compito di questa funzione pura ricalcolare quella
+    # condizione due volte.
+    use_appearance_embedding = bool(params.get("use_appearance_embedding"))
+
     return dict(
         mode=mode, source=params["source"], fps=fps,
         device=params.get("device") or None,  # None = "auto-rileva a valle", vedi sopra
-        pose_model=f"yolo26{scale}-pose.pt",
+        pose_backend=pose_backend, pose_model=f"yolo26{scale}-pose.pt",
         with_hands=with_hands,
         with_eyes=with_eyes, with_mouth=with_mouth,
         with_eyebrows=with_eyebrows, with_head_movement=with_head_movement,
@@ -178,9 +275,13 @@ def build_player_kwargs(params: dict) -> dict:
         seg_model=f"yolo26{scale}-seg.pt", with_seg_reid=with_seg_reid,
         with_mediapipe_pose=with_mediapipe_pose,
         max_people=max_people,
+        session_mode=session_mode, flag_uncertain=flag_uncertain,
+        reid_max_lost_seconds=reid_max_lost_seconds,
         seg_backend=seg_backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
         sam_chunk_store_dir=sam_chunk_store_dir, sam_redetect_every=sam_redetect_every,
         sam_text_prompt=sam_text_prompt,
+        conf_threshold=conf_threshold, tracker_config=tracker_config,
+        use_appearance_embedding=use_appearance_embedding,
     )
 
 
@@ -291,8 +392,18 @@ class Api:
         (richiedono device='cuda', vedi segmentation/sam_backend.py) --
         `Api.build_player()` fa comunque il controllo definitivo lato
         server, questo e' solo per non far apparire nella UI un'opzione
-        che fallirebbe subito."""
-        return {"device": detect_default_device()}
+        che fallirebbe subito.
+
+        `torchreid_available` (nuovo): stesso schema, ma per il toggle
+        "Appearance embedding (OSNet)" in Advanced settings (vedi
+        pose/appearance_embedding.py) -- 'torch'+'torchreid' sono una
+        dipendenza pesante opzionale, NON garantita installata. Un check
+        leggero (solo un tentativo di import, nessun modello caricato), non
+        il controllo definitivo: se l'utente forza comunque il toggle
+        (impossibile da UI, ma la funzione pura `build_player_kwargs` non lo
+        impedisce), `pipeline_runner._build_embedder` solleva comunque un
+        `ImportError` chiaro dentro il thread di riproduzione."""
+        return {"device": detect_default_device(), "torchreid_available": torchreid_available()}
 
     def set_window(self, window) -> None:
         """Chiamato dal launcher (webui_app.py) subito dopo

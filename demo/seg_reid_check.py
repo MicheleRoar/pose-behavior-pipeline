@@ -202,12 +202,94 @@ def pathological_same_frame_overflow_does_not_crash():
           f"person_id distinti: {sorted(person_ids)} (nessun crash, tetto rispettato) — OK")
 
 
+class _FakeEmbedder:
+    """Stub di test per il segnale di embedding di aspetto (vedi
+    `pose/appearance_embedding.OSNetEmbedder`, NON usata qui apposta: niente
+    'torch'/'torchreid' nella suite di test). Stessa interfaccia
+    (`embed(frame, bbox, poly=None)`) -- legge un marcatore di colore
+    fissato nell'angolo in alto a sinistra del frame sintetico
+    (`make_marked_frame`) invece di un vero embedding OSNet, e lo mappa su
+    un vettore unitario."""
+    _MARKERS = {(255, 0, 0): np.array([1.0, 0.0]), (0, 0, 255): np.array([-1.0, 0.0])}
+
+    def embed(self, frame_bgr, bbox_xyxy, poly=None):
+        marker = tuple(int(v) for v in frame_bgr[0, 0])
+        return self._MARKERS.get(marker)
+
+
+def make_marked_frame(marker: tuple[int, int, int], size: int = 2000) -> np.ndarray:
+    frame = np.zeros((size, size, 3), dtype=np.uint8)
+    frame[0:5, 0:5] = marker
+    return frame
+
+
+def embedding_signal_relinks_reentry_position_cannot_help():
+    """Rientro DELIBERATAMENTE lontano da entrambe le posizioni note (A e
+    B): il segnale di posizione non favorisce nessuno dei due (colore/forma
+    disattivati con peso 0 per isolare l'embedding). Con un marcatore di
+    aspetto (`_FakeEmbedder`) coerente con A, il rientro deve comunque
+    ricollegarsi ad A grazie al solo embedding. Controllo negativo: stessa
+    posizione lontana, marcatore SBAGLIATO -- nessun aggancio (sotto
+    `soft_match_threshold`), si conia una nuova identita' invece di
+    indovinare, a riprova che l'embedding non forza mai un match a vuoto."""
+    RED, BLUE = (255, 0, 0), (0, 0, 255)
+
+    def run(*, reentry_marker: tuple[int, int, int]) -> tuple[int, int, set[int]]:
+        reid = SegReIdentifier(max_people=5, position_weight=0.5, color_weight=0.0,
+                                shape_weight=0.0, embedder=_FakeEmbedder(),
+                                embedding_weight=0.7, soft_match_threshold=0.6)
+        frame_t = 0
+        frame_red = make_marked_frame(RED)
+
+        a_bbox, a_poly = make_person(100, 300)
+        b_bbox, b_poly = make_person(500, 300)
+        resolved = reid.resolve([(1, a_bbox, a_poly, 0.9), (2, b_bbox, b_poly, 0.9)],
+                                 frame_t / FPS, frame=frame_red)
+        person_id_a, person_id_b = resolved[0][0], resolved[1][0]
+        frame_t += 1
+
+        for _ in range(5):
+            now = frame_t / FPS
+            b_bbox, b_poly = make_person(500, 300)
+            reid.resolve([(2, b_bbox, b_poly, 0.9)], now, frame=frame_red)
+            frame_t += 1
+
+        now = frame_t / FPS
+        far_bbox, far_poly = make_person(1500, 300)  # lontano sia da A (100) che da B (500)
+        b_bbox, b_poly = make_person(500, 300)
+        frame_reentry = make_marked_frame(reentry_marker)
+        resolved = reid.resolve([(2, b_bbox, b_poly, 0.9), (3, far_bbox, far_poly, 0.9)],
+                                 now, frame=frame_reentry)
+        by_raw = {2: resolved[0][0], 3: resolved[1][0]}
+        return person_id_a, by_raw[3], set(reid.persons.keys())
+
+    person_id_a, reentry_id, roster = run(reentry_marker=RED)
+    assert reentry_id == person_id_a, (
+        f"marcatore corretto: atteso un aggancio ad A grazie al solo embedding (posizione "
+        f"lontana da entrambi) -- person_id_a={person_id_a}, reentry={reentry_id}"
+    )
+    assert len(roster) == 2, f"nessuna identita' in piu' doveva essere aperta, trovate {len(roster)}"
+    print(f"Rientro lontano da A e B, marcatore di aspetto CORRETTO (A): "
+          f"person_id A={person_id_a}, al rientro={reentry_id} -> ri-associato grazie al solo embedding")
+
+    person_id_a, reentry_id, roster = run(reentry_marker=BLUE)
+    assert reentry_id != person_id_a, (
+        f"controllo negativo fallito: marcatore SBAGLIATO non deve produrre un aggancio "
+        f"(posizione lontana da entrambi, nessun altro segnale) -- person_id_a={person_id_a}, "
+        f"reentry={reentry_id}"
+    )
+    print(f"Controllo negativo (stessa posizione lontana, marcatore di aspetto SBAGLIATO): "
+          f"person_id A={person_id_a}, al rientro={reentry_id} -> nuova identita' aperta (atteso, "
+          "l'embedding sconta ma non forza mai)")
+
+
 def main():
     hard_cap_never_exceeded_under_heavy_churn()
     churned_track_relinks_to_nearest_position()
     soft_match_below_cap_relinks_instead_of_minting_new()
     single_person_session_always_id_one()
     pathological_same_frame_overflow_does_not_crash()
+    embedding_signal_relinks_reentry_position_cannot_help()
     print("\nVerifica completata senza errori: seg_reid.py rispetta sempre il tetto "
           "max_people, anche sotto churn pesante o overflow nello stesso frame.")
 

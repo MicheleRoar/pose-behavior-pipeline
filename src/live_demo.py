@@ -75,6 +75,8 @@ from common.viz import (
 )
 from pose.keypoints import KP
 from pose.reid import ReIdentifier
+from pose.identity_manager import SessionMode
+from pose.appearance_embedding import OSNetEmbedder
 from pose.chuv_features import ChuvFeatureTracker, compute_chuv_features
 
 
@@ -145,7 +147,11 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
                       reid_color_weight: float = 0.5, reid_position_weight: float = 0.5,
                       with_chuv_features: bool = False, conf_threshold: float = 0.1,
                       tracker_config: str = "bytetrack.yaml",
-                      max_people: int | None = None):
+                      max_people: int | None = None,
+                      session_mode: SessionMode = SessionMode.MULTIPLE,
+                      flag_uncertain: bool = True,
+                      use_appearance_embedding: bool = False,
+                      embedding_device: str = "cpu"):
     """Generatore che contiene TUTTA la logica per-frame della pipeline pose
     (tracking, reid, gaze, mani, feature engineering, disegno overlay) in un
     unico punto, condiviso da `run_live()` (CLI, sotto) e da `pipeline_runner.py`
@@ -185,6 +191,15 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
     # sostituisce subito frame_result.people con la versione a person_id
     # stabile, cosi' tutto il resto della funzione (che tratta gia' l'id
     # come una chiave generica) non richiede altre modifiche.
+    # `use_appearance_embedding` (opzionale, richiede 'torch'+'torchreid',
+    # vedi pose/appearance_embedding.py): costruito UNA volta qui, non ad
+    # ogni frame -- se la dipendenza manca, `OSNetEmbedder()` solleva
+    # `ImportError` subito, con un messaggio chiaro (nessun fallback
+    # silenzioso, stesso trattamento di Sam2Tracker/Sam31Tracker).
+    embedder = (
+        OSNetEmbedder(device=embedding_device)
+        if (with_reid and use_appearance_embedding) else None
+    )
     reidentifier = ReIdentifier(
         max_lost_seconds=reid_max_lost_seconds,
         max_signature_dist=reid_max_signature_dist,
@@ -192,6 +207,8 @@ def iter_live_frames(source, fps: float, model_name: str, device: str,
         color_bonus_weight=reid_color_weight,
         position_bonus_weight=reid_position_weight,
         max_people=max_people,
+        session_mode=session_mode, flag_uncertain=flag_uncertain,
+        embedder=embedder,
     ) if with_reid else None
 
     kpt_buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=window_len))

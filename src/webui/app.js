@@ -2,9 +2,19 @@
  * app.js
  * =======
  * Logica del frontend "Behaviour Vision Lab": legge lo stato dei controlli
- * della sidebar, chiama il bridge Python (webui/api.py, esposto come
- * `window.pywebview.api.<metodo>(...)`, ognuno una promise), e aggiorna il
- * DOM (frame video, timeline, status bar) in risposta ai payload ricevuti.
+ * della sidebar (Input / Task / Segmentation / Pose / Identity &
+ * Re-identification / Outputs / Advanced settings), chiama il bridge Python
+ * (webui/api.py, esposto come `window.pywebview.api.<metodo>(...)`, ognuno
+ * una promise), e aggiorna il DOM (frame video, timeline, status bar) in
+ * risposta ai payload ricevuti.
+ *
+ * Segmentazione e pose sono scelte INDIPENDENTI (vedi #segmentation-card e
+ * #pose-card): non piu' un'unica selezione "Architecture" che decideva
+ * entrambe. Il backend (gui/pipeline_runner.py) sceglie il wiring esatto in
+ * base alla combinazione Task/Segmentation-model/Pose-model -- questo file
+ * si limita a mostrare/nascondere i controlli giusti e a spiegare in una
+ * riga (vedi applySegGuidance/applyPoseGuidance) da dove viene l'input per
+ * ciascuna combinazione, cosi' l'utente non deve indovinarlo.
  *
  * Due percorsi diversi per far arrivare un frame sullo schermo:
  *  1. Play: `api.play(fps)` avvia un thread Python in background che spinge
@@ -15,11 +25,6 @@
  *     `onPipelineFrame` invece di aspettare una spinta separata.
  * In entrambi i casi il payload ha la stessa forma {ok, frame, status}, cosi'
  * il rendering ha un solo punto d'ingresso.
- *
- * Due bottoni Play, uno stato solo: "Play analysis" nella sidebar e il
- * pulsante circolare sotto il video controllano LO STESSO play/pause (vedi
- * onPlayPause) e restano sincronizzati -- nel mock sono due controlli
- * distinti ma non c'e' motivo che rappresentino stati diversi.
  */
 
 (() => {
@@ -35,8 +40,11 @@
     lastTimecodeS: 0,
     maxPeople: null,
     detectedDevice: null,  // da Api.detect_device() (vedi init()) -- usato SOLO per
-    // abilitare/disabilitare SAM 3.1/SAM2 nel selettore Architecture, il
+    // abilitare/disabilitare SAM 3.1/SAM2 nel selettore Segmentation model, il
     // controllo definitivo resta lato server in Api.build_player().
+    torchreidAvailable: false,  // idem, ma per il toggle "Appearance embedding (OSNet)"
+    task: "both",       // "segmentation" | "pose" | "both" -- vedi #task-segmented
+    session: "multiple", // "single" | "multiple" -- vedi #session-segmented
   };
 
   // ---------------------------------------------------------------- utils
@@ -88,71 +96,221 @@
     const glyphPause = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>';
     $("btn-play").innerHTML = playing ? glyphPause : glyphPlay;
     $("btn-play-analysis").innerHTML =
-      (playing ? glyphPause : glyphPlay) + (playing ? " Pause" : " Play analysis");
+      (playing ? glyphPause : glyphPlay) + (playing ? " Pause" : " Run analysis");
   }
 
-  // ------------------------------------------------------- feature gating
-  // Stessa regola di gui/app.py::_on_mode_change: mani/viso valgono solo in
-  // Pose estimation / Both, MediaPipe pose-per-maschera solo in Segmentation.
-  function applyModeGating() {
-    const mode = $("mode-select").value;
-    const poseCapable = mode === "pose" || mode === "both";
-    const segOnly = mode === "segmentation";
-
-    const featureToggles = [
-      "hands-toggle", "eyes-toggle", "mouth-toggle", "eyebrows-toggle", "head-movement-toggle",
-    ];
-    featureToggles.forEach((id) => {
-      const el = $(id);
-      el.disabled = !poseCapable;
-      if (!poseCapable) el.checked = false;
+  // ------------------------------------------------------- segmented control
+  // Task (Segmentation/Pose/Both) e Session (Single/Multiple person) usano
+  // lo stesso pattern: un gruppo di bottoni con data-value, una classe
+  // "active" spostata al click, un callback per rifare il gating dipendente.
+  function wireSegmented(containerId, onChange) {
+    const container = $(containerId);
+    container.querySelectorAll(".seg-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        container.querySelectorAll(".seg-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        onChange(btn.dataset.value);
+      });
     });
-    $("features-card").classList.toggle("disabled", !poseCapable);
-
-    $("mediapipe-pose-toggle").disabled = !segOnly;
-    if (!segOnly) $("mediapipe-pose-toggle").checked = false;
-    $("seg-extras-card").classList.toggle("disabled", !segOnly);
-
-    applyArchGating();
-    updatePipelineFlow();
   }
 
-  // Backend di segmentazione (YOLO/SAM 3.1/SAM2, vedi
-  // segmentation/sam_backend.py): SAM 3.1/SAM2 valgono solo in
-  // Segmentation/Both E richiedono una GPU CUDA -- qui si disabilitano le
-  // opzioni non valide e si torna a "yolo" se quella selezionata smette di
-  // esserlo (es. l'utente passa a modalita' Pose). Il controllo DEFINITIVO
-  // resta comunque lato server in Api.build_player() (vedi il suo
-  // docstring): qui e' solo per non mostrare in UI una scelta che
-  // fallirebbe subito.
-  function applyArchGating() {
-    const archSelect = $("arch-select");
-    const mode = $("mode-select").value;
-    const segCapable = mode === "segmentation" || mode === "both";
+  function segmentedValue(containerId) {
+    const active = $(containerId).querySelector(".seg-btn.active");
+    return active ? active.dataset.value : null;
+  }
+
+  // ------------------------------------------------------------- gating
+  // Task -> quali card (Segmentation/Pose) sono visibili, e ricalcola tutto
+  // il resto a cascata (guidance, identity, outputs, summary) -- stesso
+  // ruolo di applyModeGating() nella versione precedente, ma su un albero di
+  // controlli piu' ricco.
+  function applyTaskGating() {
+    const task = state.task;
+    $("segmentation-card").classList.toggle("hidden", task === "pose");
+    $("pose-card").classList.toggle("hidden", task === "segmentation");
+    applySegGuidance();
+    applyPoseGuidance();
+    applyOutputsGating();
+    applyIdentityGating();
+    applyEmbeddingGating();
+    updateSummary();
+  }
+
+  // Segmentation model -> riga di guida sotto il selettore ("Guidance: text
+  // prompt 'person'" ecc., vedi il mock), campo prompt SAM 3.1, gating CUDA
+  // per SAM 3.1/SAM2 (SAMURAI resta SEMPRE disabilitato, vedi l'attributo
+  // "disabled" nell'HTML e il commento li' sul perche': il suo filtro di
+  // Kalman non regge il multi-persona).
+  function applySegGuidance() {
+    const select = $("seg-model-select");
     const cudaAvailable = state.detectedDevice === "cuda";
+    const segCapable = state.task !== "pose";
 
     ["sam31", "sam2"].forEach((value) => {
-      const opt = archSelect.querySelector(`option[value="${value}"]`);
+      const opt = select.querySelector(`option[value="${value}"]`);
       if (opt) opt.disabled = !cudaAvailable;
     });
 
-    const archIsSam = archSelect.value === "sam31" || archSelect.value === "sam2";
-    if (archIsSam && !cudaAvailable) {
-      setStatusPill(`${archSelect.options[archSelect.selectedIndex].text} needs a CUDA GPU — staying on YOLO`, "idle");
-      archSelect.value = "yolo";
-    } else if (archIsSam && !segCapable) {
-      setStatusPill(`${archSelect.options[archSelect.selectedIndex].text} only applies to Segmentation/Both — staying on YOLO`, "idle");
-      archSelect.value = "yolo";
+    const isSam = select.value === "sam31" || select.value === "sam2";
+    if (isSam && !cudaAvailable) {
+      select.value = "yolo";
+    }
+    $("seg-cuda-hint").classList.toggle("hidden", cudaAvailable);
+
+    const guidance = {
+      yolo: "No extra guidance needed — YOLO26 detects people on its own.",
+      sam31: "Guidance: text prompt (e.g. “person”), or auto boxes from YOLO if left empty.",
+      sam2: "Guidance: auto boxes from YOLO (SAM2 has no text-prompt option).",
+    }[select.value] || "";
+    $("seg-guidance-hint").textContent = segCapable ? guidance : "";
+
+    $("sam31-text-prompt-field").classList.toggle("hidden", select.value !== "sam31" || !cudaAvailable);
+
+    const showChunkFields = select.value === "sam31" || select.value === "sam2";
+    $("sam-chunk-fields").classList.toggle("hidden", !showChunkFields);
+  }
+
+  // Pose model -> riga di guida: dipende sia dal modello di pose sia da
+  // COSA sta alimentando MediaPipe in questa combinazione (vedi la tabella
+  // di auto-selezione dell'input nel docstring di
+  // gui/pipeline_runner.iter_pipeline_frames -- questa funzione la
+  // rispecchia in linguaggio naturale, non la reinventa).
+  function applyPoseGuidance() {
+    const poseModel = $("pose-model-select").value;
+    const segActive = state.task !== "pose";
+    let text;
+    if (poseModel === "yolo") {
+      text = "Input: full frame (independent YOLO26 Pose detector + tracker).";
+    } else if (segActive) {
+      text = "Input: tracked person crops (from the segmentation mask/box).";
+    } else {
+      text = "Input: auto-detected person boxes (internal YOLO proposer, no mask shown).";
+    }
+    $("pose-guidance-hint").textContent = text;
+    $("scale-select").parentElement; // no-op, model size applies to any YOLO model in play
+  }
+
+  // Identity & Re-identification: mostra/nasconde il campo "Max people"
+  // (irrilevante con Session=Single, forzato a 1 comunque), abilita/
+  // disabilita "Flag uncertain matches"/"Lost identity memory" (hanno senso
+  // solo con Tracking + Re-identification), aggiorna la pillola di stato.
+  //
+  // La pillola deve rispecchiare ESATTAMENTE la stessa condizione usata lato
+  // server (vedi webui/api.py::build_player_kwargs, variabile
+  // `seg_reid_ready`): il motore di re-id sulla SEGMENTAZIONE
+  // (SegReIdentifier) richiede max_people per costruzione (solleva
+  // ValueError altrimenti), quello sulla POSE (ReIdentifier) invece no. Se
+  // qui la mostrassimo sempre come "Re-ID active" appena e' selezionato il
+  // menu, un utente con Task=Segmentation/Both, Session=Multiple e "Max
+  // number of people" vuoto vedrebbe una pillola verde MENTRE la
+  // segmentazione gira comunque senza nessuna riassociazione -- esattamente
+  // il bug diagnosticato dagli screenshot di ID instabili (296/169/7 sulla
+  // stessa persona): il campo sembrava attivo ma non lo era.
+  function applyIdentityGating() {
+    const mode = $("identity-mode-select").value;
+    const isReid = mode === "tracking_reid";
+    const isSingle = state.session === "single";
+    const segInvolved = state.task !== "pose";
+
+    $("max-people-row").classList.toggle("hidden", isSingle);
+    $("flag-uncertain-toggle").disabled = !isReid;
+    $("lost-memory-input").disabled = !isReid;
+
+    const maxPeopleSet = $("max-people-input").value !== "";
+    const segReidBlocked = isReid && segInvolved && !isSingle && !maxPeopleSet;
+    $("max-people-input").classList.toggle("field-input-required", isReid && segInvolved && !isSingle && !maxPeopleSet);
+
+    const pill = $("reid-status-pill");
+    const label = $("reid-status-label");
+    if (mode === "frame_by_frame") {
+      label.textContent = "Frame-by-frame";
+      pill.className = "pill";
+    } else if (mode === "tracking_only") {
+      label.textContent = "Tracking only";
+      pill.className = "pill";
+    } else if (segReidBlocked) {
+      label.textContent = "Re-ID needs Max people (segmentation)";
+      pill.className = "pill pill-warn";
+    } else {
+      label.textContent = "Re-ID active";
+      pill.className = "pill pill-accent";
+    }
+  }
+
+  // Outputs: mani/viso restano cablati SOLO sul percorso YOLO26 Pose (vedi
+  // webui/api.py::build_player_kwargs) -- con MediaPipe selezionato in Pose
+  // lo scheletro c'e' comunque, ma dita/blink/bocca/sopracciglia non sono
+  // ancora collegati su quel percorso (limite onesto, vedi
+  // pipeline_runner._iter_pose_mediapipe).
+  function applyOutputsGating() {
+    const poseCapable = state.task !== "segmentation";
+    const yoloPose = $("pose-model-select").value === "yolo";
+    const enabled = poseCapable && yoloPose;
+
+    ["hands-toggle", "eyes-toggle", "mouth-toggle", "eyebrows-toggle", "head-movement-toggle"].forEach((id) => {
+      $(id).disabled = !enabled;
+      if (!enabled) $(id).checked = false;
+    });
+    $("outputs-card").classList.toggle("disabled", !poseCapable);
+
+    if (!poseCapable) {
+      $("outputs-hint").textContent = "Segmentation-only: no pose output selected.";
+    } else if (!yoloPose) {
+      $("outputs-hint").textContent = "Hands/face signals need Pose model = YOLO26 Pose.";
+    } else {
+      $("outputs-hint").textContent = "";
+    }
+  }
+
+  // ---------------------------------------------------------------- summary
+  // Riepilogo in linguaggio naturale della configurazione corrente, ricavato
+  // dai controlli reali -- mai un testo fisso, cosi' non puo' disallinearsi
+  // da cosa gira davvero (stesso principio di updatePipelineFlow(), che
+  // resta invariata piu' sotto per lo status bar).
+  function updateSummary() {
+    const scale = $("scale-select").value;
+    const lines = [];
+
+    const segLabel = { yolo: `YOLO26${scale} Segment`, sam31: "SAM 3.1", sam2: "SAM2" }[$("seg-model-select").value];
+    const poseLabel = $("pose-model-select").value === "mediapipe" ? "MediaPipe" : `YOLO26${scale} Pose`;
+
+    if (state.task === "segmentation") {
+      lines.push(`<strong>${segLabel} masks</strong>`);
+    } else if (state.task === "pose") {
+      lines.push(`<strong>${poseLabel} skeletons</strong>`);
+    } else {
+      lines.push(`<strong>${segLabel} masks + ${poseLabel} skeletons</strong>`);
     }
 
-    const showChunkFields = archSelect.value === "sam31" || archSelect.value === "sam2";
-    $("sam-chunk-fields").classList.toggle("hidden", !showChunkFields);
-    $("arch-hint").classList.toggle("hidden", cudaAvailable);
+    const identityMode = $("identity-mode-select").value;
+    const identityText = {
+      frame_by_frame: "no persistent identity (frame-by-frame)",
+      tracking_only: "tracking only, no re-identification",
+      tracking_reid: "tracking with heuristic Re-ID",
+    }[identityMode];
+    lines.push(`Identity: ${identityText}`);
 
-    // Il text-prompt (svincolato da YOLO) esiste solo per SAM 3.1: SAM2 e
-    // SAMURAI non hanno concept-prompting, richiedono sempre un box iniziale.
-    const showTextPrompt = archSelect.value === "sam31" && cudaAvailable && segCapable;
-    $("sam31-text-prompt-field").classList.toggle("hidden", !showTextPrompt);
+    if (identityMode === "tracking_reid" && $("flag-uncertain-toggle").checked) {
+      lines.push("Uncertain matches will be flagged, not auto-merged.");
+    }
+    if (state.session === "single") {
+      lines.push("Session: single person expected.");
+    }
+
+    const warnings = [];
+    if (($("seg-model-select").value === "sam31" || $("seg-model-select").value === "sam2")
+        && state.detectedDevice !== "cuda") {
+      warnings.push("SAM 3.1/SAM2 need a CUDA GPU — will fall back to YOLO26 Segment.");
+    }
+    const segInvolved = state.task !== "pose";
+    const maxPeopleSet = $("max-people-input").value !== "";
+    if (identityMode === "tracking_reid" && segInvolved && state.session !== "single" && !maxPeopleSet) {
+      warnings.push("Segmentation IDs will NOT be re-identified: set “Max number of people” "
+        + "above, or switch Session to Single. Without it, every exit/re-entry gets a brand-new ID.");
+    }
+    warnings.forEach((w) => lines.push(`<span class="summary-warn">${w}</span>`));
+
+    $("summary-panel").innerHTML = lines.map((l) => `<span class="summary-line">${l}</span>`).join("");
   }
 
   const FLOW_ICONS = {
@@ -164,29 +322,24 @@
 
   function updatePipelineFlow() {
     // Diagramma di flusso REALE, costruito dalla configurazione corrente
-    // della sidebar -- non un testo fisso "YOLO26 Segment -> Tracking ->
-    // MediaPipe" come nel mock, che rifletterebbe passi non davvero attivi
-    // se l'utente scegliesse un'altra combinazione.
-    const mode = $("mode-select").value;
+    // della sidebar -- non un testo fisso, cosi' riflette sempre la
+    // combinazione Task/Segmentation-model/Pose-model davvero selezionata.
     const scale = $("scale-select").value;
     const steps = [];
 
-    if (mode === "segmentation" || mode === "both") {
-      const arch = $("arch-select").value;
-      const segLabel = arch === "sam31" ? "SAM 3.1 Segment"
-        : arch === "sam2" ? "SAM2 Segment"
-        : `YOLO26${scale} Segment`;
+    if (state.task !== "pose") {
+      const seg = $("seg-model-select").value;
+      const segLabel = seg === "sam31" ? "SAM 3.1 Segment" : seg === "sam2" ? "SAM2 Segment" : `YOLO26${scale} Segment`;
       steps.push({ label: segLabel, icon: "box", cls: "seg" });
     }
-    if (mode === "pose" || mode === "both") {
-      steps.push({ label: `YOLO26${scale} Pose`, icon: "box", cls: "pose" });
+    if (state.task !== "segmentation") {
+      const poseLabel = $("pose-model-select").value === "mediapipe" ? "MediaPipe Pose" : `YOLO26${scale} Pose`;
+      steps.push({ label: poseLabel, icon: "box", cls: "pose" });
     }
     steps.push({ label: "ByteTrack", icon: "target", cls: "track" });
-    if ($("reid-toggle").checked && $("max-people-input").value) {
+    const identityMode = $("identity-mode-select").value;
+    if (identityMode === "tracking_reid") {
       steps.push({ label: "Re-ID", icon: "link", cls: "reid" });
-    }
-    if (mode === "segmentation" && $("mediapipe-pose-toggle").checked) {
-      steps.push({ label: "MediaPipe Pose", icon: "nodes", cls: "face" });
     }
     if (poseFeaturesActive()) {
       steps.push({ label: "MediaPipe Face/Hands", icon: "nodes", cls: "face" });
@@ -217,29 +370,61 @@
       .some((id) => $(id).checked && !$(id).disabled);
   }
 
+  // Appearance embedding (OSNet, Advanced settings): stesso schema di
+  // applySegGuidance() per SAM 3.1/SAM2 -- disabilita la checkbox e mostra
+  // il motivo se 'torch'/'torchreid' non sono installati (vedi
+  // Api.detect_device()), invece di lasciar scattare un errore solo dopo
+  // "Run analysis". Il controllo definitivo resta comunque lato server
+  // (pose/appearance_embedding.OSNetEmbedder solleva ImportError se forzato
+  // comunque, vedi pipeline_runner._build_embedder).
+  function applyEmbeddingGating() {
+    const toggle = $("appearance-embedding-toggle");
+    if (!state.torchreidAvailable) {
+      toggle.checked = false;
+      toggle.disabled = true;
+    } else {
+      toggle.disabled = false;
+    }
+    $("embedding-unavailable-hint").classList.toggle("hidden", state.torchreidAvailable);
+  }
+
+  function refreshAllGating() {
+    applySegGuidance();
+    applyPoseGuidance();
+    applyOutputsGating();
+    applyIdentityGating();
+    applyEmbeddingGating();
+    updatePipelineFlow();
+    updateSummary();
+  }
+
   // ------------------------------------------------------------- collect
   function collectParams() {
     // Nessun campo "device": lo lasciamo assente cosi' Api.build_player()
-    // lo auto-rileva lato Python (cuda/mps/cpu, vedi common/device.py) --
-    // prima era fisso a "mps" qui, il che rompeva silenziosamente su una
-    // macchina con GPU CUDA e nessun Metal.
+    // lo auto-rileva lato Python (cuda/mps/cpu, vedi common/device.py).
     return {
-      mode: $("mode-select").value,
+      mode: state.task,
       fps: $("fps-input").value,
       scale: $("scale-select").value,
-      max_people: $("max-people-input").value,
-      reid: $("reid-toggle").checked,
+      seg_backend: $("seg-model-select").value,
+      pose_backend: $("pose-model-select").value,
+      identity_mode: $("identity-mode-select").value,
+      session_mode: state.session,
+      flag_uncertain: $("flag-uncertain-toggle").checked,
+      lost_identity_memory_s: $("lost-memory-input").value,
+      max_people: state.session === "single" ? "" : $("max-people-input").value,
       with_hands: $("hands-toggle").checked,
       with_eyes: $("eyes-toggle").checked,
       with_mouth: $("mouth-toggle").checked,
       with_eyebrows: $("eyebrows-toggle").checked,
       with_head_movement: $("head-movement-toggle").checked,
-      with_mediapipe_pose: $("mediapipe-pose-toggle").checked,
-      seg_backend: $("arch-select").value,
       sam_chunk_size: $("sam-chunk-size-input").value,
       sam_overlap: $("sam-overlap-input").value,
       sam_redetect_every: $("sam-redetect-every-input").value,
       sam_text_prompt: $("sam-text-prompt-input").value,
+      conf_threshold: $("conf-threshold-input").value,
+      tracker_config: $("tracker-select").value,
+      use_appearance_embedding: $("appearance-embedding-toggle").checked,
     };
   }
 
@@ -500,42 +685,60 @@
     $("btn-export-csv").addEventListener("click", onExportCsv);
     $("btn-fullscreen").addEventListener("click", onFullscreen);
     $("timeline-track").addEventListener("click", onTimelineClick);
-    $("mode-select").addEventListener("change", applyModeGating);
-    $("arch-select").addEventListener("change", applyArchGating);
+
+    wireSegmented("task-segmented", (value) => { state.task = value; applyTaskGating(); });
+    wireSegmented("session-segmented", (value) => { state.session = value; applyIdentityGating(); updateSummary(); });
+
+    $("seg-model-select").addEventListener("change", () => { applySegGuidance(); refreshAllGating(); });
+    $("pose-model-select").addEventListener("change", () => { applyPoseGuidance(); applyOutputsGating(); refreshAllGating(); });
+    $("identity-mode-select").addEventListener("change", () => { applyIdentityGating(); refreshAllGating(); });
+    $("scale-select").addEventListener("change", refreshAllGating);
+    // "input" (non "change"): la pillola/il bordo rosso devono aggiornarsi
+    // mentre l'utente digita il numero, non solo quando il campo perde il
+    // focus -- altrimenti resterebbe "Re-ID needs Max people" per un
+    // istante dopo che il valore e' gia' stato inserito.
+    $("max-people-input").addEventListener("input", () => { applyIdentityGating(); updateSummary(); });
+
     // qualunque cambio di parametro invalida il player corrente: bisogna
-    // premere "Play analysis"/"Restart" per ricostruirlo (un tracker gia'
+    // premere "Run analysis"/"Restart" per ricostruirlo (un tracker gia'
     // avviato non si puo' riconfigurare a meta' strada, vedi
     // video_player.py) -- qui ci limitiamo a segnalarlo, senza ricostruire
     // da soli ad ogni click.
     const invalidatingIds = [
-      "arch-select", "mode-select", "scale-select", "max-people-input",
-      "reid-toggle", "hands-toggle", "eyes-toggle", "mouth-toggle",
-      "eyebrows-toggle", "head-movement-toggle", "mediapipe-pose-toggle",
-      "sam-chunk-size-input", "sam-overlap-input",
-      "sam-redetect-every-input", "sam-text-prompt-input",
+      "seg-model-select", "pose-model-select", "identity-mode-select", "scale-select",
+      "max-people-input", "flag-uncertain-toggle", "lost-memory-input",
+      "hands-toggle", "eyes-toggle", "mouth-toggle", "eyebrows-toggle", "head-movement-toggle",
+      "sam-chunk-size-input", "sam-overlap-input", "sam-redetect-every-input", "sam-text-prompt-input",
+      "conf-threshold-input", "tracker-select",
     ];
     invalidatingIds.forEach((id) => {
       $(id).addEventListener("change", () => {
         state.hasPlayer = false;
         updatePipelineFlow();
+        updateSummary();
       });
     });
+    $("task-segmented").addEventListener("click", () => { state.hasPlayer = false; });
+    $("session-segmented").addEventListener("click", () => { state.hasPlayer = false; });
   }
 
   async function init() {
     wireEvents();
-    applyModeGating();  // chiama gia' applyArchGating(), vedi sopra
+    applyTaskGating();  // chiama gia' applySegGuidance/applyPoseGuidance/applyOutputsGating/applyIdentityGating
     updateTimeline();
     try {
       const result = await api().detect_device();
       state.detectedDevice = result && result.device;
+      state.torchreidAvailable = !!(result && result.torchreid_available);
     } catch (err) {
       // aperto in un browser normale senza pywebview (vedi api()), o
       // detect_device() ha fallito per qualche motivo: SAM 3.1/SAM2
-      // restano disabilitati per sicurezza (cudaAvailable resta false).
+      // restano disabilitati per sicurezza (cudaAvailable resta false),
+      // idem l'embedding OSNet (torchreidAvailable resta false).
       state.detectedDevice = null;
+      state.torchreidAvailable = false;
     }
-    applyArchGating();
+    refreshAllGating();
   }
 
   if (window.pywebview) {

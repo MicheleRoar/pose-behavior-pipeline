@@ -102,6 +102,23 @@ sommano tra loro -- si prende il PIU' FORTE dei due sconti disponibili,
 non la somma, per evitare che due segnali solo mediocri si accumulino a una
 fiducia che nessuno dei due giustificherebbe da solo.
 
+Segnale opzionale: embedding di aspetto (OSNet)
+--------------------------------------------------
+Terzo sconto possibile, stesso principio "il piu' forte vince, mai la
+somma" di colore/posizione qui sopra -- vedi `pose/appearance_embedding.py`
+per il modulo e il perche' e' un embedding vero (OSNet) e non solo un'altra
+euristica. A differenza di colore/posizione (calcolati una volta sola dal
+buffer mediano al momento del match), l'embedding di una persona ATTIVA
+viene aggiornato ad ogni frame con una media mobile esponenziale
+(`self.embedding_ema`, vedi `appearance_embedding.ema_update`) -- l'idea di
+StrongSORT citata li': piu' a lungo una persona resta visibile, piu' la sua
+firma di aspetto memorizzata si stabilizza, cosi' un rientro successivo puo'
+confrontarsi con una stima consolidata invece che con un singolo frame
+(spesso rumoroso: motion blur, posa, occlusione parziale). Richiede un
+`embedder` (istanza di `OSNetEmbedder`) passato al costruttore -- se
+`None` (default), il segnale e' semplicemente assente, nessun comportamento
+diverso dal resto del modulo.
+
 Segnale opzionale: numero massimo di persone (sessione chiusa)
 ------------------------------------------------------------------
 Quando si conosce a priori quante persone possono comparire nella sessione
@@ -164,6 +181,11 @@ import numpy as np
 
 from pose.keypoints import KP
 from pose.features import torso_length, hip_center
+from pose.identity_manager import (
+    IdentityMode, SessionMode, IdentityManagerConfig, resolve_batch,
+    suggested_max_people_policy,
+)
+from pose.appearance_embedding import OSNetEmbedder, embedding_similarity, ema_update
 
 # ---------------------------------------------------------------------------
 # Firma antropometrica (adattata da reid_signature.py, schema COCO-17)
@@ -335,6 +357,38 @@ def position_similarity(pos_a: np.ndarray, pos_b: np.ndarray, torso_scale: float
 
 
 # ---------------------------------------------------------------------------
+# Embedding di aspetto (segnale opzionale, vedi "Segnale opzionale: embedding
+# di aspetto (OSNet)" nel docstring del modulo)
+# ---------------------------------------------------------------------------
+
+# Frazione di allargamento del bbox derivato dai keypoint: lo scheletro
+# COCO-17 copre giunti, non il contorno dei vestiti (una maglia larga sporge
+# oltre le spalle) -- senza questo margine il crop passato a OSNet
+# taglierebbe sistematicamente ai bordi il capo di vestiario, proprio il
+# segnale che deve catturare.
+_EMBED_BBOX_PAD_FRAC = 0.25
+_EMBED_MIN_VALID_JOINTS = 4
+
+
+def _bbox_from_keypoints(kxy: np.ndarray, pad_frac: float = _EMBED_BBOX_PAD_FRAC) -> np.ndarray | None:
+    """Bbox (x1, y1, x2, y2) che racchiude i keypoint validi, allargato di
+    `pad_frac` per lato -- usato solo per ritagliare la persona da passare a
+    `OSNetEmbedder.embed()`, non per nessun altro scopo (nessuna detection
+    box "vera" e' disponibile in questa pipeline, solo keypoint). `None` se
+    restano troppo pochi keypoint validi per un bbox affidabile."""
+    valid = ~np.isnan(kxy).any(axis=1)
+    if valid.sum() < _EMBED_MIN_VALID_JOINTS:
+        return None
+    pts = kxy[valid]
+    x1, y1 = pts.min(axis=0)
+    x2, y2 = pts.max(axis=0)
+    w, h = x2 - x1, y2 - y1
+    if w < 1e-6 or h < 1e-6:
+        return None
+    return np.array([x1 - pad_frac * w, y1 - pad_frac * h, x2 + pad_frac * w, y2 + pad_frac * h])
+
+
+# ---------------------------------------------------------------------------
 # Stato per persona/traccia
 # ---------------------------------------------------------------------------
 
@@ -345,6 +399,7 @@ class _LostPerson:
     color: np.ndarray | None = None
     position: np.ndarray | None = None    # ultimo centro-bacino noto
     last_torso: float | None = None       # scala per normalizzare la posizione
+    embedding: np.ndarray | None = None   # OSNet, congelato alla perdita (media EMA fino a quel momento)
 
 
 @dataclass
@@ -356,7 +411,25 @@ class _MergeEvent:
     frame_time: float
     color_used: bool = False
     position_used: bool = False
+    embedding_used: bool = False
     forced: bool = False  # match forzato da max_people (vedi docstring del modulo)
+
+
+@dataclass
+class _UncertainEvent:
+    """Candidato in "zona grigia" (vedi identity_manager.resolve_batch):
+    l'algoritmo ungherese lo ha proposto come miglior accoppiamento
+    disponibile, ma la distanza supera `max_signature_dist` pur restando
+    sotto `uncertain_signature_dist` -- NON fuso automaticamente, solo
+    segnalato (policy "meglio frammentare un'identita' che scambiarne due in
+    silenzio"). `raw_track_id` continua a essere ritentato ai frame
+    successivi come qualunque provvisorio in `pending_check`, finche' non
+    scade il retry o trova un match confermato."""
+    raw_track_id: int
+    provisional_person_id: int
+    candidate_person_id: int
+    distance: float
+    frame_time: float
 
 
 class ReIdentifier:
@@ -388,13 +461,53 @@ class ReIdentifier:
                  min_signature_frames: int = 15,
                  color_bonus_weight: float = 0.5,
                  position_bonus_weight: float = 0.5,
-                 max_people: int | None = None):
+                 max_people: int | None = None,
+                 session_mode: SessionMode = SessionMode.MULTIPLE,
+                 flag_uncertain: bool = True,
+                 uncertain_signature_dist: float | None = None,
+                 embedder: OSNetEmbedder | None = None,
+                 embedding_bonus_weight: float = 0.7,
+                 embedding_ema_alpha: float = 0.9):
+        """`session_mode` (nuovo): SINGLE forza `max_people=1` (vedi
+        `identity_manager.suggested_max_people_policy` -- una sola persona
+        attesa, ogni rientro e' per costruzione quella persona, il recupero
+        puo' essere il piu' permissivo possibile), sovrascrivendo
+        `max_people` se in conflitto. MULTIPLE (default) rispetta
+        `max_people` cosi' com'e' passato (puo' restare `None`).
+
+        `flag_uncertain` / `uncertain_signature_dist` (nuovi): con
+        `flag_uncertain=True` (default), un candidato con distanza tra
+        `max_signature_dist` e `uncertain_signature_dist` (default: 1.6x
+        `max_signature_dist` se non specificato) non viene fuso ma
+        registrato in `self.uncertain_log`/`self.last_uncertain` -- vedi
+        `_UncertainEvent`. Con `flag_uncertain=False` il comportamento torna
+        binario come prima di questo modulo (match/non-match a
+        `max_signature_dist`).
+
+        `embedder` (nuovo, opzionale): istanza di `OSNetEmbedder` (vedi
+        `pose/appearance_embedding.py`) -- se passata, ogni frame calcola
+        anche un embedding di aspetto per la persona attiva, mantenuto con
+        una media mobile esponenziale (`embedding_ema_alpha`, l'idea di
+        StrongSORT citata nel docstring del modulo) e usato come terzo
+        possibile sconto (`embedding_bonus_weight`, tipicamente il piu'
+        affidabile dei tre -- peso di default piu' alto di colore/posizione)
+        nello stesso schema "il piu' forte vince" di `_pair_cost`. Se
+        `None` (default), nessun comportamento diverso da prima."""
         self.max_lost_seconds = max_lost_seconds
         self.max_signature_dist = max_signature_dist
         self.min_signature_frames = min_signature_frames
         self.color_bonus_weight = color_bonus_weight
         self.position_bonus_weight = position_bonus_weight
-        self.max_people = max_people
+        self.session_mode = session_mode
+        self.max_people = suggested_max_people_policy(session_mode, max_people)
+        self.flag_uncertain = flag_uncertain
+        self.uncertain_signature_dist = (
+            uncertain_signature_dist if uncertain_signature_dist is not None
+            else max_signature_dist * 1.6
+        )
+        self.embedder = embedder
+        self.embedding_bonus_weight = embedding_bonus_weight
+        self.embedding_ema_alpha = embedding_ema_alpha
 
         self.raw_to_person: dict[int, int] = {}
         self.buffers: dict[int, deque] = {}
@@ -402,8 +515,17 @@ class ReIdentifier:
         self.pending_check: set[int] = set()  # raw_track_id ancora da valutare
         self.pending_since: dict[int, float] = {}  # raw_track_id -> now al primo avvistamento
         self.last_position: dict[int, tuple[np.ndarray, float]] = {}  # person_id -> (hip_xy, torso)
+        self.embedding_ema: dict[int, np.ndarray] = {}  # person_id -> embedding OSNet (media EMA)
         self.lost: dict[int, _LostPerson] = {}
         self.merge_log: list[_MergeEvent] = []
+        self.uncertain_log: list[_UncertainEvent] = []
+        # raw_track_id -> (candidate_person_id, distance) SOLO per il frame
+        # dell'ultima resolve(): un chiamante che vuole aggiungere colonne
+        # tipo "identity_uncertain"/"reid_uncertain_candidate_id" al CSV
+        # puo' leggerlo subito dopo resolve() senza che questo modulo debba
+        # cambiare la forma del valore di ritorno (resta [(person_id, kxy,
+        # kconf), ...], invariata per tutti i chiamanti esistenti).
+        self.last_uncertain: dict[int, tuple[int, float]] = {}
         self._next_person_id = 1
 
     # -- API pubblica ---------------------------------------------------
@@ -423,8 +545,11 @@ class ReIdentifier:
         basata solo sulle proporzioni corporee.
         """
         current_raw_ids = set()
-        out = []
+        self.last_uncertain = {}
 
+        # -- pass 1: bookkeeping per-traccia (identico a prima) + elenco dei
+        # candidati "pronti" per un tentativo di match in questo frame --
+        ready: list[int] = []  # raw_track_id
         for raw_id, kxy, kconf in people:
             current_raw_ids.add(raw_id)
 
@@ -435,51 +560,31 @@ class ReIdentifier:
             self.buffers[person_id].append(compute_signature_frame(kxy))
             if frame is not None:
                 self.color_buffers[person_id].append(compute_color_signature(frame, kxy))
+                if self.embedder is not None:
+                    bbox = _bbox_from_keypoints(kxy)
+                    new_embedding = self.embedder.embed(frame, bbox) if bbox is not None else None
+                    self.embedding_ema[person_id] = ema_update(
+                        self.embedding_ema.get(person_id), new_embedding, self.embedding_ema_alpha)
 
             hip, torso = hip_center(kxy), torso_length(kxy)
             if not np.isnan(hip).any() and not np.isnan(torso) and torso > 1e-6:
                 self.last_position[person_id] = (hip, torso)
 
             if raw_id in self.pending_check and len(self.buffers[person_id]) >= self.min_signature_frames:
-                match = self._find_lost_match(self.buffers[person_id], self.color_buffers[person_id],
-                                               self.pending_since[raw_id], now,
-                                               self.last_position.get(person_id))
-                if match is None and now - self.pending_since[raw_id] > self._PENDING_RETRY_SECONDS:
-                    # rinuncia al match normale: prima di coniare un nuovo
-                    # person_id per sempre, se e' impostato un tetto noto di
-                    # persone e quel tetto e' gia' raggiunto, si prova un
-                    # ultimo tentativo forzato (vedi "Segnale opzionale:
-                    # numero massimo di persone" nel docstring del modulo).
-                    self.pending_check.discard(raw_id)
-                    if self.max_people is not None:
-                        match = self._force_match_at_capacity(
-                            self.buffers[person_id], self.pending_since[raw_id], person_id)
-                if match is not None:
-                    self.pending_check.discard(raw_id)
-                    matched_person_id, dist, color_used, position_used, forced = match
-                    self.merge_log.append(_MergeEvent(
-                        raw_track_id=raw_id, provisional_person_id=person_id,
-                        matched_person_id=matched_person_id, distance=dist, frame_time=now,
-                        color_used=color_used, position_used=position_used, forced=forced,
-                    ))
-                    assist = ", ".join(s for s, used in (("color", color_used), ("position", position_used)) if used)
-                    tag = "FORCED (max_people reached)" if forced else (f'{assist}-assisted' if assist else None)
-                    print(f"[reid] track {raw_id}: provisional person_id {person_id} "
-                          f"re-matched to person_id {matched_person_id} "
-                          f"(distance={dist:.3f}{f', {tag}' if tag else ''})")
-                    del self.lost[matched_person_id]
-                    del self.buffers[person_id]
-                    self.color_buffers.pop(person_id, None)
-                    self.raw_to_person[raw_id] = matched_person_id
-                    person_id = matched_person_id
-                    # buffer nuovo per l'identita' ripristinata: quello
-                    # provvisorio e' stato appena eliminato, ma serve un
-                    # buffer per continuare ad accumulare la firma nel
-                    # caso questa persona sparisca di nuovo piu' avanti.
-                    self.buffers[person_id] = deque(maxlen=self.min_signature_frames)
-                    self.color_buffers[person_id] = deque(maxlen=self.min_signature_frames)
+                ready.append(raw_id)
 
-            out.append((person_id, kxy, kconf))
+        # -- pass 2: risoluzione batch (ungherese, vedi identity_manager.py)
+        # di TUTTI i candidati pronti in questo frame contro TUTTE le
+        # identita' perse in un colpo solo -- invece del loop sequenziale
+        # precedente (un candidato alla volta, che accaparrava la propria
+        # identita' persa preferita senza considerare gli altri candidati
+        # pronti nello stesso frame). --
+        if ready:
+            self._resolve_ready_batch(ready, now)
+
+        # -- pass 3: costruisce l'output con gli id (person_id gia'
+        # eventualmente aggiornato dal match nel pass 2) --
+        out = [(self.raw_to_person[raw_id], kxy, kconf) for raw_id, kxy, kconf in people]
 
         self._retire_disappeared_tracks(current_raw_ids, now)
         self._expire_old_lost_people(now)
@@ -496,59 +601,160 @@ class ReIdentifier:
         self.pending_check.add(raw_id)
         self.pending_since[raw_id] = now
 
-    def _find_lost_match(self, buffer: deque, color_buffer: deque,
-                          pending_since: float, now: float,
-                          current_position: tuple[np.ndarray, float] | None,
-                          ) -> tuple[int, float, bool, bool, bool] | None:
-        median_sig = np.nanmedian(np.array(buffer), axis=0)
-        median_color = np.nanmedian(np.array(color_buffer), axis=0) if color_buffer else None
+    def _pair_cost(self, median_sig: np.ndarray, median_color: np.ndarray | None,
+                    current_position: tuple[np.ndarray, float] | None,
+                    current_embedding: np.ndarray | None,
+                    lost: "_LostPerson", now: float) -> tuple[float | None, bool, bool, bool]:
+        """Costo (distanza) di UNA coppia candidato/identita' persa -- stessa
+        logica di sconto di prima (colore, posizione o embedding di aspetto,
+        il PIU' FORTE dei tre, mai sommati; nessuno puo' MAI alzare la
+        distanza, vedi il docstring del modulo), estratta qui per essere
+        richiamabile sia nella costruzione della matrice di costo batch
+        (`_resolve_ready_batch`) sia, se serve, per un confronto singolo.
+        Non applica la regola di causalita' (fatto dal chiamante, che
+        conosce `pending_since`)."""
+        prop_dist = signature_distance(median_sig, lost.signature)
+        if prop_dist is None:
+            return None, False, False, False
 
-        best_person_id, best_dist = None, self.max_signature_dist
-        best_color_used, best_position_used = False, False
-        for person_id, lost in self.lost.items():
-            if lost.lost_time > pending_since:
-                # causalita': questa persona e' sparita DOPO che il track
-                # in valutazione era gia' apparso -- i due erano quindi
-                # visibili insieme (o il track esisteva gia') sotto due
-                # raw_id diversi, non possono essere la stessa persona.
-                # Evita falsi match tra chi e' presente fin dall'inizio e
-                # chi se ne va molto piu' tardi nella stessa sessione.
+        color_bonus, color_used = 0.0, False
+        if median_color is not None and lost.color is not None:
+            sim = color_similarity(median_color, lost.color)
+            if sim is not None:
+                color_bonus, color_used = self.color_bonus_weight * sim, True
+
+        position_bonus, position_used = 0.0, False
+        if current_position is not None and lost.position is not None:
+            cur_xy, cur_torso = current_position
+            scale = cur_torso if lost.last_torso is None else (cur_torso + lost.last_torso) / 2.0
+            sim = position_similarity(cur_xy, lost.position, scale, now - lost.lost_time)
+            if sim is not None:
+                position_bonus, position_used = self.position_bonus_weight * sim, True
+
+        embedding_bonus, embedding_used = 0.0, False
+        if current_embedding is not None and lost.embedding is not None:
+            sim = embedding_similarity(current_embedding, lost.embedding)
+            if sim is not None:
+                embedding_bonus, embedding_used = self.embedding_bonus_weight * sim, True
+
+        best_bonus = max(color_bonus, position_bonus, embedding_bonus)
+        if best_bonus == 0.0:
+            return prop_dist, False, False, False
+        if best_bonus == embedding_bonus:
+            return prop_dist * (1.0 - embedding_bonus), False, False, embedding_used
+        if best_bonus == color_bonus:
+            return prop_dist * (1.0 - color_bonus), color_used, False, False
+        return prop_dist * (1.0 - position_bonus), False, position_used, False
+
+    def _resolve_ready_batch(self, ready: list[int], now: float) -> None:
+        """Costruisce la matrice di costo candidati-pronti x identita'-perse
+        e la risolve in un colpo solo con `identity_manager.resolve_batch`
+        (algoritmo ungherese + soglie accept/reject/zona-grigia). Applica poi
+        gli esiti: `matched` -> fusione (identico a prima, vedi
+        `_apply_merge`); `uncertain` -> segnalato in `uncertain_log`/
+        `last_uncertain`, NESSUNA fusione, il candidato resta in
+        `pending_check` e verra' ritentato al prossimo frame; `new` -> idem,
+        resta in attesa finche' non scade `_PENDING_RETRY_SECONDS`, a quel
+        punto (se `max_people` e' impostato) si tenta l'ultima forzatura
+        (`_force_match_at_capacity`, invariata -- l'unica eccezione a "mai
+        forzare" del modulo)."""
+        lost_ids = list(self.lost.keys())
+        cost_matrix = np.full((len(ready), max(len(lost_ids), 1)), np.inf)
+        pair_flags: dict[tuple[int, int], tuple[bool, bool, bool]] = {}
+
+        if lost_ids:
+            for i, raw_id in enumerate(ready):
+                person_id = self.raw_to_person[raw_id]
+                median_sig = np.nanmedian(np.array(self.buffers[person_id]), axis=0)
+                color_buffer = self.color_buffers.get(person_id)
+                median_color = (np.nanmedian(np.array(color_buffer), axis=0)
+                                 if color_buffer else None)
+                current_position = self.last_position.get(person_id)
+                current_embedding = self.embedding_ema.get(person_id)
+                pending_since = self.pending_since[raw_id]
+                for j, lost_person_id in enumerate(lost_ids):
+                    lost = self.lost[lost_person_id]
+                    if lost.lost_time > pending_since:
+                        continue  # regola di causalita' -- resta inf
+                    cost, color_used, position_used, embedding_used = self._pair_cost(
+                        median_sig, median_color, current_position, current_embedding, lost, now)
+                    if cost is None:
+                        continue
+                    cost_matrix[i, j] = cost
+                    pair_flags[(i, j)] = (color_used, position_used, embedding_used)
+
+        config = IdentityManagerConfig(
+            max_people=self.max_people, flag_uncertain=self.flag_uncertain,
+            accept_cost=self.max_signature_dist, reject_cost=self.uncertain_signature_dist,
+        )
+        outcomes = resolve_batch(cost_matrix, lost_ids, config)
+
+        still_pending: list[int] = []
+        for i, outcome in enumerate(outcomes):
+            raw_id = ready[i]
+            person_id = self.raw_to_person[raw_id]
+            if outcome.status == "matched":
+                j = lost_ids.index(outcome.matched_lost_id)
+                color_used, position_used, embedding_used = pair_flags.get((i, j), (False, False, False))
+                self._apply_merge(raw_id, person_id, outcome.matched_lost_id, outcome.cost,
+                                   now, color_used, position_used, embedding_used, forced=False)
+            elif outcome.status == "uncertain":
+                self.uncertain_log.append(_UncertainEvent(
+                    raw_track_id=raw_id, provisional_person_id=person_id,
+                    candidate_person_id=outcome.matched_lost_id, distance=outcome.cost, frame_time=now))
+                self.last_uncertain[raw_id] = (outcome.matched_lost_id, outcome.cost)
+                still_pending.append(raw_id)
+            else:  # "new"
+                still_pending.append(raw_id)
+
+        for raw_id in still_pending:
+            if now - self.pending_since[raw_id] <= self._PENDING_RETRY_SECONDS:
+                continue  # si ritenta ancora ai prossimi frame, vedi sopra
+            self.pending_check.discard(raw_id)
+            if self.max_people is None:
                 continue
-            prop_dist = signature_distance(median_sig, lost.signature)
-            if prop_dist is None:
-                continue
+            person_id = self.raw_to_person[raw_id]
+            match = self._force_match_at_capacity(
+                self.buffers[person_id], self.pending_since[raw_id], person_id)
+            if match is not None:
+                matched_person_id, dist, color_used, position_used, forced = match
+                self._apply_merge(raw_id, person_id, matched_person_id, dist,
+                                   now, color_used, position_used, False, forced=forced)
 
-            # Due sconti indipendenti (colore, posizione): si prende il
-            # PIU' FORTE dei due, non si sommano/moltiplicano insieme --
-            # due segnali solo mediocri non devono sommarsi a una fiducia
-            # che nessuno dei due giustificherebbe da solo. Nessuno dei due
-            # puo' MAI alzare la distanza: nel peggiore dei casi (nessun
-            # segnale utilizzabile) il comportamento e' identico alla sola
-            # firma antropometrica.
-            color_bonus, color_used = 0.0, False
-            if median_color is not None and lost.color is not None:
-                sim = color_similarity(median_color, lost.color)
-                if sim is not None:
-                    color_bonus, color_used = self.color_bonus_weight * sim, True
-
-            position_bonus, position_used = 0.0, False
-            if current_position is not None and lost.position is not None:
-                cur_xy, cur_torso = current_position
-                scale = cur_torso if lost.last_torso is None else (cur_torso + lost.last_torso) / 2.0
-                sim = position_similarity(cur_xy, lost.position, scale, now - lost.lost_time)
-                if sim is not None:
-                    position_bonus, position_used = self.position_bonus_weight * sim, True
-
-            if color_bonus >= position_bonus:
-                dist, used_color, used_position = prop_dist * (1.0 - color_bonus), color_used, False
-            else:
-                dist, used_color, used_position = prop_dist * (1.0 - position_bonus), False, position_used
-
-            if dist < best_dist:
-                best_person_id, best_dist = person_id, dist
-                best_color_used, best_position_used = used_color, used_position
-        return ((best_person_id, best_dist, best_color_used, best_position_used, False)
-                if best_person_id is not None else None)
+    def _apply_merge(self, raw_id: int, person_id: int, matched_person_id: int,
+                      dist: float, now: float, color_used: bool, position_used: bool,
+                      embedding_used: bool, forced: bool) -> None:
+        self.pending_check.discard(raw_id)
+        self.merge_log.append(_MergeEvent(
+            raw_track_id=raw_id, provisional_person_id=person_id,
+            matched_person_id=matched_person_id, distance=dist, frame_time=now,
+            color_used=color_used, position_used=position_used,
+            embedding_used=embedding_used, forced=forced,
+        ))
+        assist = ", ".join(s for s, used in (("color", color_used), ("position", position_used),
+                                              ("embedding", embedding_used)) if used)
+        tag = "FORCED (max_people reached)" if forced else (f'{assist}-assisted' if assist else None)
+        print(f"[reid] track {raw_id}: provisional person_id {person_id} "
+              f"re-matched to person_id {matched_person_id} "
+              f"(distance={dist:.3f}{f', {tag}' if tag else ''})")
+        del self.lost[matched_person_id]
+        del self.buffers[person_id]
+        self.color_buffers.pop(person_id, None)
+        self.raw_to_person[raw_id] = matched_person_id
+        # L'embedding EMA continua a evolvere sull'identita' ripristinata:
+        # riparte da quello del provvisorio appena fuso (la stima piu'
+        # recente disponibile), non da quello congelato al momento della
+        # perdita -- coerente con "restare in memoria e affinarsi nel
+        # tempo" (vedi appearance_embedding.ema_update).
+        provisional_embedding = self.embedding_ema.pop(person_id, None)
+        if provisional_embedding is not None:
+            self.embedding_ema[matched_person_id] = provisional_embedding
+        # buffer nuovo per l'identita' ripristinata: quello provvisorio e'
+        # stato appena eliminato, ma serve un buffer per continuare ad
+        # accumulare la firma nel caso questa persona sparisca di nuovo
+        # piu' avanti.
+        self.buffers[matched_person_id] = deque(maxlen=self.min_signature_frames)
+        self.color_buffers[matched_person_id] = deque(maxlen=self.min_signature_frames)
 
     def _force_match_at_capacity(self, buffer: deque, pending_since: float,
                                   pending_person_id: int,
@@ -610,6 +816,11 @@ class ReIdentifier:
             buffer = self.buffers.pop(person_id, None)
             color_buffer = self.color_buffers.pop(person_id, None)
             last_pos = self.last_position.pop(person_id, None)
+            # L'embedding EMA accumulato mentre la persona era attiva viene
+            # "congelato" in _LostPerson.embedding esattamente come
+            # firma/colore/posizione -- rimosso da self.embedding_ema (non
+            # e' piu' una persona attiva da aggiornare frame per frame).
+            last_embedding = self.embedding_ema.pop(person_id, None)
             if buffer and len(buffer) > 0:
                 median_sig = np.nanmedian(np.array(buffer), axis=0)
                 if not np.isnan(median_sig).all():
@@ -621,7 +832,7 @@ class ReIdentifier:
                     position, last_torso = (last_pos if last_pos is not None else (None, None))
                     self.lost[person_id] = _LostPerson(
                         signature=median_sig, lost_time=now, color=median_color,
-                        position=position, last_torso=last_torso)
+                        position=position, last_torso=last_torso, embedding=last_embedding)
 
     def _expire_old_lost_people(self, now: float) -> None:
         expired = [pid for pid, lost in self.lost.items()

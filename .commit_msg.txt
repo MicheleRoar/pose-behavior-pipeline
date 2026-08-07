@@ -1,0 +1,56 @@
+Identity & Re-identification: redesign completo + embedding OSNet
+
+Redesign backend/GUI:
+- Nuovo identity_manager.py: livello condiviso IdentityMode/SessionMode,
+  assegnazione batch globalmente ottima (algoritmo ungherese) invece del
+  loop sequenziale precedente, tre esiti (matched/new/uncertain) con
+  policy "meglio frammentare un'identita' che scambiarne due in silenzio".
+- reid.py (pose) e seg_reid.py (segmentazione) migrati sul nuovo motore,
+  segnali di colore/posizione/forma preservati.
+- seg_reid.py: colore medio Hue/Sat sostituito con istogramma Hue pesato
+  per saturazione (un capo a righe/bicolore non si media piu' in un
+  colore generico indistinguibile).
+- Sidebar webui riprogettata: Task/Segmentation/Pose/Identity &
+  Re-identification/Outputs/Advanced settings, con guida dinamica e
+  gating per combinazione invece di un'unica scelta "Architecture".
+- Fix: with_reid (pose) non richiedeva piu' max_people per funzionare,
+  ma il gating lato api.py/app.js lo trattava come with_seg_reid
+  (che invece lo richiede per costruzione) -- la pillola "Re-ID active"
+  appariva anche quando la segmentazione non stava davvero riassociando
+  nulla. Ora le due condizioni sono separate ovunque.
+
+Embedding di aspetto OSNet (richiesta esplicita: id stabili, persone
+"in memoria" per il rientro, ispirato a OSNet + l'idea di EMA feature
+bank di StrongSORT):
+- Nuovo pose/appearance_embedding.py: wrapper OSNetEmbedder
+  (torchreid.utils.FeatureExtractor, dipendenza pesante opzionale non in
+  requirements.txt, stesso trattamento di SAM 3.1/SAM2), similarity
+  coseno, EMA update.
+- reid.py: embedding come terzo "sconto" sulla distanza di firma
+  (accanto a colore/posizione, stesso schema "il piu' forte vince").
+- seg_reid.py: embedding come quarto termine ADDITIVO nella media pesata
+  (non ha rescalato i pesi esistenti: nessuna regressione per chi non
+  usa l'embedder).
+- Gallery EMA per-persona in entrambi i motori: l'embedding si affina
+  ad ogni frame in cui la persona e' visibile, congelato alla perdita,
+  ripreso (non azzerato) al match successivo.
+- GUI: toggle "Appearance embedding (OSNet)" in Advanced settings,
+  gating su torchreid_available() (stesso schema del gating CUDA per
+  SAM 3.1/SAM2).
+- Fix: torchreid_available()/OSNetEmbedder risolvevano FeatureExtractor
+  con un sotto-import diretto (from torchreid.utils import
+  FeatureExtractor), che fallisce sulla distribuzione PyPI di
+  'pip install torchreid' (repackaging di terzi con layout dei moduli
+  diverso da github.com/KaiyangZhou/deep-person-reid) anche a
+  installazione corretta. Ora si importa torchreid e si accede per
+  attributo (torchreid.utils.FeatureExtractor), compatibile con
+  entrambi i layout. torchreid_available() intercetta anche eccezioni
+  diverse da ImportError, per non far fallire in blocco anche il
+  rilevamento cuda/mps/cpu insieme ad esso.
+
+Test: identity_manager/reid/seg_reid coperti da demo/reid_check.py,
+demo/seg_reid_check.py, demo/reid_color_check.py, nuovo
+demo/appearance_embedding_check.py (funzioni pure, nessun torch
+richiesto) e nuovi scenari con uno stub _FakeEmbedder che dimostrano
+che l'embedding recupera un rientro quando firma/posizione da sole
+fallirebbero, senza mai forzare un match sbagliato.
