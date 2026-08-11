@@ -712,6 +712,18 @@
     }
   }
 
+  async function onCompareRuns() {
+    // Opens the "compare up to 4 runs" second window (Michele, 2026-08)
+    // -- see webui/api.py::Api.open_compare_window()/compare.html. Just
+    // a fire-and-forget call: the new window is self-contained
+    // (compare.js), nothing to wire back here.
+    try {
+      await api().open_compare_window();
+    } catch (err) {
+      setStatusPill(String(err.message || err), "idle");
+    }
+  }
+
   async function onExportVideo() {
     // Saves the annotated video (overlay already drawn on every
     // processed frame) so different runs/parameter choices can be
@@ -747,6 +759,7 @@
     $("btn-back").addEventListener("click", onSkipBack);
     $("btn-export-csv").addEventListener("click", onExportCsv);
     $("btn-export-video").addEventListener("click", onExportVideo);
+    $("btn-compare-runs").addEventListener("click", onCompareRuns);
     $("btn-fullscreen").addEventListener("click", onFullscreen);
     $("timeline-track").addEventListener("click", onTimelineClick);
 

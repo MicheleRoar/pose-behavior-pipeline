@@ -46,6 +46,7 @@ import threading
 import time
 import traceback
 from collections import deque
+from pathlib import Path
 
 import cv2
 import pandas as pd
@@ -56,6 +57,8 @@ from common.device import detect_default_device  # only the function: doesn't im
                                                     # until it's CALLED (see below)
 from pose.identity_manager import IdentityMode, SessionMode, wants_reid_engine
 from pose.appearance_embedding import torchreid_available  # only the lightweight check: doesn't import torch
+
+COMPARE_HTML = Path(__file__).resolve().parent / "compare.html"  # see Api.open_compare_window()
 
 MODE_KEYS = {"segmentation", "pose", "both"}
 POSE_BACKEND_KEYS = {"yolo", "mediapipe"}
@@ -469,6 +472,41 @@ class Api:
             return None
         return result if isinstance(result, str) else result[0]
 
+    def open_compare_window(self) -> dict:
+        """Opens the "compare up to 4 runs" second window (Michele,
+        2026-08: load several already-exported annotated videos --
+        `export_video()` above -- side by side and play them in sync to
+        compare backend/parameter combinations). A plain HTML5 <video>
+        player (compare.html/compare.js), NOT another VideoPlayer/
+        pipeline instance: these are already-finished MP4 files, no
+        inference involved, so there's nothing here to reuse from the
+        main window's playback machinery.
+
+        Uses its OWN `CompareApi` instance (below) as the JS bridge --
+        deliberately NOT `self` (this same `Api` instance): each
+        pywebview window's `js_api` object needs its own `.window`
+        reference for its native file dialogs (see `set_window()`), and
+        reusing `self` here would overwrite THIS window's `self.window`
+        with the new one the moment `set_window()` fires on it, breaking
+        every dialog in the main window afterwards.
+
+        pywebview supports creating additional windows after `start()`
+        has already been called (this is called from a JS-triggered
+        callback, i.e. always after start()) -- see pywebview's
+        multi-window docs."""
+        import webview
+        compare_api = CompareApi()
+        window = webview.create_window(
+            "Behaviour Vision Lab — Compare runs",
+            url=str(COMPARE_HTML),
+            js_api=compare_api,
+            width=1280,
+            height=860,
+            min_size=(900, 600),
+        )
+        compare_api.set_window(window)
+        return {"ok": True}
+
     # -------------------------------------------------------- lifecycle
     def build_player(self, params: dict) -> dict:
         """Builds (or rebuilds) the `VideoPlayer` from a parameter dict
@@ -731,3 +769,36 @@ class Api:
             # because _playing is already False (closed -> pause
             # triggered by JS) or because the player is exhausted.
             pass
+
+
+class CompareApi:
+    """`js_api` bridge for the "compare up to 4 runs" second window (see
+    `Api.open_compare_window()` above and compare.html/compare.js).
+    Deliberately tiny and separate from `Api`: the compare window plays
+    already-exported MP4 files directly via HTML5 `<video>`, no
+    inference/VideoPlayer/playback thread involved -- the only thing
+    Python needs to do for it is the native "pick a video file"
+    dialog, everything else (loading, sync playback, scrubbing) happens
+    entirely in compare.js against the browser's own video decoder."""
+
+    def __init__(self) -> None:
+        self.window = None  # set by Api.open_compare_window() right after create_window()
+
+    def set_window(self, window) -> None:
+        self.window = window
+
+    def pick_video_path(self) -> str | None:
+        """Generic "pick any video file" dialog -- unlike
+        `Api.pick_video_file()`, does NOT probe/return container
+        metadata (frame count/fps/duration): the compare window doesn't
+        need it, playback is handled natively by the <video> element."""
+        import webview
+        if self.window is None:
+            return None
+        result = self.window.create_file_dialog(
+            webview.OPEN_DIALOG,
+            file_types=("Video files (*.mp4;*.mov;*.avi;*.mkv)", "All files (*.*)"),
+        )
+        if not result:
+            return None
+        return result[0] if not isinstance(result, str) else result
