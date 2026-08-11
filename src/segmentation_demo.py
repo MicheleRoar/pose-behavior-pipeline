@@ -49,7 +49,8 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
                     sam_chunk_size: int, sam_overlap: int, sam_chunk_store_dir: str | None,
                     sam_reseed_new_people: bool = True,
                     sam_redetect_every: int | None = None,
-                    sam_text_prompt: str | None = None):
+                    sam_text_prompt: str | None = None,
+                    sam_appearance_fallback: bool = True):
     """Instantiates the right tracker based on `backend` -- the single
     place where the YOLO/SAM 3.1/SAM2 choice translates into a concrete
     class. All three follow the same `SegmentationBackend` protocol (see
@@ -77,7 +78,24 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
     in the chunk instead of relying on YOLO as a proposer -- same
     technique as the CHUV production pipeline (`psifx video tracking sam3
     inference --text_prompt`), see sam31_estimation.py for details and
-    the certainty limits about the real API."""
+    the certainty limits about the real API.
+
+    `sam_appearance_fallback` (sam31/sam2 only, added 2026-08 for the
+    "SAM chunked WITH vs WITHOUT the chunk-boundary helpers" comparison
+    Michele wanted, see benchmark_backends.py): toggles
+    `SegmentationIdentityGallery` (the OSNet appearance-based fallback
+    used when a person can't be geometrically matched across a chunk
+    boundary -- see identity_gallery.py). Note the geometric
+    reconciliation itself (Hungarian assignment + motion compensation,
+    chunking.reconcile_ids_windowed) is NOT separately toggleable: it
+    only ever runs in TEXT-PROMPT mode (`sam_text_prompt` set), because
+    box mode passes each person's global id to SAM directly (no local-id
+    ambiguity to reconcile in the first place, see
+    `ChunkedVideoPredictorBackend._seed_new_chunk`'s docstring). So a
+    true "chunked, zero helpers" baseline means box mode
+    (`sam_text_prompt=None`) + `sam_appearance_fallback=False`; "chunked
+    + helpers" means `sam_text_prompt` set + `sam_appearance_fallback=True`
+    (the default)."""
     if backend == "yolo":
         return SegTracker(model_name=model_name, device=device,
                            conf_threshold=conf_threshold, tracker=tracker_config,
@@ -88,14 +106,16 @@ def build_tracker(backend: str, *, model_name: str, device: str, conf_threshold:
                              chunk_size=sam_chunk_size, overlap=sam_overlap,
                              chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
                              reseed_new_people=sam_reseed_new_people,
-                             redetect_every=sam_redetect_every, text_prompt=sam_text_prompt)
+                             redetect_every=sam_redetect_every, text_prompt=sam_text_prompt,
+                             appearance_fallback=sam_appearance_fallback)
     if backend == "sam2":
         from segmentation.sam2_estimation import Sam2Tracker
         return Sam2Tracker(device=device, conf_threshold=conf_threshold,
                             chunk_size=sam_chunk_size, overlap=sam_overlap,
                             chunk_store_dir=sam_chunk_store_dir, max_people=max_people,
                             reseed_new_people=sam_reseed_new_people,
-                            redetect_every=sam_redetect_every)
+                            redetect_every=sam_redetect_every,
+                            appearance_fallback=sam_appearance_fallback)
     raise ValueError(f"unknown backend: {backend!r} (expected 'yolo'|'sam31'|'sam2')")
 
 

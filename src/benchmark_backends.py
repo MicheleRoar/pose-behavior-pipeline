@@ -79,6 +79,19 @@ Usage:
         --methods yolo,sam31 --sam-text-prompt person \\
         --sam-chunk-size 300,600 --sam-overlap 30,50 \\
         --sam-redetect-every 100,200, --out sweep.csv
+
+    # "yolo vanilla" vs "sam31 chunked, no helpers" vs "sam31 chunked +
+    # helpers" (geometric reconciliation + appearance gallery, only
+    # engaged in text-prompt mode, see build_tracker()'s docstring in
+    # segmentation_demo.py) -- run separately (different --sam-text-prompt/
+    # --sam-appearance-fallback need their own invocation, can't mix
+    # within one --methods list) and compare the resulting CSVs:
+    python benchmark_backends.py --source video.mp4 --fps 15 --methods yolo \\
+        --out run1_yolo.csv
+    python benchmark_backends.py --source video.mp4 --fps 15 --methods sam31 \\
+        --sam-chunk-size 300 --no-sam-appearance-fallback --out run2_sam_nohelpers.csv
+    python benchmark_backends.py --source video.mp4 --fps 15 --methods sam31 \\
+        --sam-chunk-size 300 --sam-text-prompt person --out run3_sam_helpers.csv
 """
 
 from __future__ import annotations
@@ -113,7 +126,8 @@ def run_one_method(method: str, *, source, fps: float, device: str,
                     max_people: int | None = None,
                     sam_chunk_size: int = 600, sam_overlap: int = 50,
                     sam_redetect_every: int | None = None,
-                    sam_text_prompt: str | None = None) -> dict | None:
+                    sam_text_prompt: str | None = None,
+                    sam_appearance_fallback: bool = True) -> dict | None:
     """Runs ONE method on the video and returns a metrics dict, or `None`
     if the method must be skipped (incompatible device or missing
     library -- see the module docstring). Never raises for either of
@@ -135,6 +149,7 @@ def run_one_method(method: str, *, source, fps: float, device: str,
             sam_overlap=sam_overlap, sam_chunk_store_dir=None,
             sam_reseed_new_people=reseed,
             sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
+            sam_appearance_fallback=sam_appearance_fallback,
         )
     except ImportError as exc:
         print(f"[{method}] skipped: {exc}")
@@ -165,6 +180,8 @@ def run_one_method(method: str, *, source, fps: float, device: str,
         "sam_chunk_size": sam_chunk_size if sam_params_relevant else None,
         "sam_overlap": sam_overlap if sam_params_relevant else None,
         "sam_redetect_every": sam_redetect_every if sam_params_relevant else None,
+        "sam_text_prompt": sam_text_prompt if sam_params_relevant else None,
+        "sam_appearance_fallback": sam_appearance_fallback if sam_params_relevant else None,
         "n_frames": n_frames,
         "n_raw_ids": n_ids,
         "lifespan_min_frames": lifespans[0] if lifespans else 0,
@@ -295,6 +312,15 @@ def main():
     parser.add_argument("--sam-text-prompt", default=None,
                          help="Text prompt for people discovery via SAM 3.1 "
                               "(e.g. 'person'), independent from YOLO -- ignored for other methods")
+    parser.add_argument("--sam-appearance-fallback", action=argparse.BooleanOptionalAction, default=True,
+                         help="OSNet appearance-based fallback for people who can't be "
+                              "geometrically matched across a chunk boundary (sam31/sam2 "
+                              "only, see identity_gallery.py). Default: on. Use "
+                              "--no-sam-appearance-fallback together with a run that has NO "
+                              "--sam-text-prompt to get a true 'chunked, zero cross-chunk "
+                              "helpers' baseline -- geometric reconciliation (Hungarian + "
+                              "motion compensation) only runs in text-prompt mode to begin "
+                              "with, see build_tracker()'s docstring in segmentation_demo.py.")
     parser.add_argument("--out", default="benchmark_results.csv")
     args = parser.parse_args()
 
@@ -308,6 +334,7 @@ def main():
         tracker_config=args.tracker, max_people=args.max_people,
         sam_chunk_sizes=sam_chunk_sizes, sam_overlaps=sam_overlaps,
         sam_redetect_everys=sam_redetect_everys, sam_text_prompt=args.sam_text_prompt,
+        sam_appearance_fallback=args.sam_appearance_fallback,
     )
     if df.empty:
         print("No method ran (all skipped) -- nothing to save.")
