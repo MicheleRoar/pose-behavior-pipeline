@@ -366,7 +366,13 @@ class ChunkedVideoPredictorBackend:
             shutil.rmtree(self._current_chunk_tmpdir, ignore_errors=True)
             self._current_chunk_tmpdir = None
 
-    def _add_box_prompt(self, predictor, state, *, frame_idx: int, obj_id: int, box: np.ndarray) -> None:
+    def _add_box_prompt(self, predictor, state, *, frame_idx: int, obj_id: int, box: np.ndarray,
+                         frame_shape: tuple[int, int] | None = None) -> None:
+        """`frame_shape` is accepted for signature parity with
+        `Sam31Tracker`'s override (which needs it to normalize a point
+        prompt to SAM 3.1's real API -- see there for why) but unused
+        here: SAM2's `add_new_points_or_box` takes a pixel-space box
+        directly, no normalization needed."""
         predictor.add_new_points_or_box(state, frame_idx=frame_idx, obj_id=obj_id, box=box)
 
     def _seed_new_chunk(self, predictor, state, *, chunk_frames: list[np.ndarray],
@@ -424,7 +430,8 @@ class ChunkedVideoPredictorBackend:
             seed_boxes = dict(list(seed_boxes.items())[: self.max_people])
 
         for global_id, box in seed_boxes.items():
-            self._add_box_prompt(predictor, state, frame_idx=0, obj_id=global_id, box=box)
+            self._add_box_prompt(predictor, state, frame_idx=0, obj_id=global_id, box=box,
+                                  frame_shape=frame_shape)
         return seed_boxes
 
     def _propagate(self, predictor, state, *, start_frame_idx: int = 0,
@@ -576,7 +583,8 @@ class ChunkedVideoPredictorBackend:
                                 new_id = _resolve_new_person_id(
                                     self._identity_gallery, allocator, chunk_frames[local_idx], box,
                                 )
-                                self._add_box_prompt(predictor, state, frame_idx=local_idx, obj_id=new_id, box=box)
+                                self._add_box_prompt(predictor, state, frame_idx=local_idx, obj_id=new_id, box=box,
+                                                      frame_shape=frame_shape)
                                 known_boxes[new_id] = box
             finally:
                 # the chunk's temporary JPEG folder (see _init_state())

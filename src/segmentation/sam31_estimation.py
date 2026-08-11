@@ -62,12 +62,22 @@ real CUDA machine, 2026-08-06 -- see below for what changed):
   (common convention for detection APIs, not explicitly documented in
   the README) -- see `_xywh_to_xyxy_pixels()` below for the heuristic
   used (and its limitation).
-- `add_prompt` with `box=`/`obj_id=` instead of `text=` (used by
-  box-seeding via YOLO, kept for compatibility with this class's
-  original use) -- STILL NOT confirmed on a real run (in the first test
-  YOLO found no one on the anchor frame, so this path was never
-  executed): remains an extrapolation by analogy with SAM2. First thing
-  to check if a problem shows up here.
+- `add_prompt` with `box=`/`obj_id=` (used by box-seeding via YOLO) --
+  the SAM2-by-analogy guess turned out WRONG, confirmed both by a real
+  crash (Michele, CUDA machine, 2026-08-11, `redetect_every` finally
+  exercising this path for the first time: `AssertionError: at least
+  one type of prompt (text, boxes) must be provided`) and by reading
+  the real source (github.com/facebookresearch/sam3,
+  `sam3/model/sam3_base_predictor.py` + `sam3_video_inference.py`,
+  fetched 2026-08-11): there is no `box` request key at all (boxes are
+  `bounding_boxes`/`bounding_box_labels`), and even those route to the
+  SEMANTIC prompt method, which resets the whole session on every call
+  and ignores a caller-chosen `obj_id`. Now FIXED in `_add_box_prompt()`
+  below by going through the POINT-based tracker API instead
+  (`points=`/`point_labels=`/`obj_id=`, confirmed to respect `obj_id`
+  and NOT reset the session) -- see that method's docstring for the
+  full trail. Not yet re-verified on a real CUDA run after this fix
+  (the source reading is solid, but nothing replaces seeing it work).
 - `propagate_in_video` does NOT go through `handle_request()` --
   CONFIRMED on a real run (Michele, CUDA machine, 2026-08-06): the SAM 3
   dispatcher raised `RuntimeError("invalid request type: propagate_in_video")`.
@@ -200,12 +210,79 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
         ))
         return response["session_id"]
 
-    def _add_box_prompt(self, predictor, state, *, frame_idx: int, obj_id: int, box: np.ndarray) -> None:
-        # NOT confirmed by the README (which only shows the text example)
-        # -- see the "Honesty" note in the module docstring.
+    def _add_box_prompt(self, predictor, state, *, frame_idx: int, obj_id: int, box: np.ndarray,
+                         frame_shape: tuple[int, int] | None = None) -> None:
+        """Registers ONE new tracked object at a caller-chosen `obj_id`,
+        WITHOUT disturbing any object already tracked in this session.
+
+        CORRECTED 2026-08 -- real crash on a CUDA machine (Michele,
+        `redetect_every` mid-chunk): `AssertionError: at least one type
+        of prompt (text, boxes) must be provided`. The previous version
+        sent `box=`/`obj_id=` in the request dict, assuming SAM 3.1 would
+        behave like SAM2's `add_new_points_or_box` (per-object box
+        prompt, caller-chosen id) -- the "Honesty" note above used to
+        flag this path as literally never exercised on a real run.
+
+        Read the real source (github.com/facebookresearch/sam3,
+        confirmed against `sam3/model/sam3_base_predictor.py` and
+        `sam3/model/sam3_video_inference.py`, both fetched 2026-08) to
+        find the actual cause and the correct fix:
+        - `Sam3BasePredictor.add_prompt()` (the `handle_request()`
+          dispatch target for `type="add_prompt"`) has NO `box` request
+          key at all -- boxes are named `bounding_boxes`/
+          `bounding_box_labels`. Our old `box=` key was silently dropped,
+          `text`/`bounding_boxes` both stayed `None`, hence the crash.
+        - Even the CORRECT box key (`bounding_boxes`) would only route
+          to `Sam3VideoInference.add_prompt()` (`sam3_video_inference.py:843`),
+          the SEMANTIC (text/box discovery) method: it calls
+          `self.reset_state(...)` UNCONDITIONALLY on every call -- wiping
+          out every object already tracked in the session -- and its
+          `obj_id` argument is silently dropped for the box branch: ids
+          are assigned by SAM, not chosen by the caller. Fine for
+          text-prompt discovery (we already reconcile SAM's own ids
+          ourselves, see `_seed_new_chunk`/`chunking.reconcile_ids_windowed`),
+          but wrong for "add exactly this one already-identified person
+          back, keep everyone else": it would silently un-track everyone
+          else in the session on every single call -- a worse bug than
+          the crash, just quieter (see chunking.py's own admission of a
+          previously-unknown-unknown here).
+        - The primitive that DOES respect a caller-chosen `obj_id` and
+          does NOT reset the session is the POINT-based tracker path
+          (`Sam3VideoInferenceWithInstanceInteractivity.add_prompt()` ->
+          `add_tracker_new_points()`, `sam3_video_inference.py:1364-1401`):
+          reached by sending `points=`/`point_labels=` (NOT
+          `bounding_boxes=`) together with `obj_id=`.
+
+        Converts the YOLO/redetect box to its CENTROID as a single
+        positive point, normalized to 0..1 (`rel_coordinates=True` is
+        the real API's default for points -- same normalization already
+        confirmed for `out_boxes_xywh`, see `_xywh_to_xyxy_pixels`).
+        Coarser than a full box (SAM infers the object's extent from one
+        click instead of being told its boundary) -- trades a possibly
+        less precise FIRST-frame mask for correctness (right id, no
+        session wipe); propagation over the following frames typically
+        recovers precision. Worth watching in crowded/overlapping scenes
+        (dancing-tracks test) -- if the initial mask consistently bleeds
+        into a neighbor, a second (negative) point on the neighbor is the
+        natural next refinement, now possible precisely because this
+        path doesn't reset the session either.
+
+        `frame_shape` is REQUIRED here (unlike the base class's version,
+        which doesn't need it) to normalize the point -- raises
+        `ValueError` instead of silently sending an unnormalized/wrong
+        point if a caller forgets it."""
+        if frame_shape is None:
+            raise ValueError(
+                "Sam31Tracker._add_box_prompt requires frame_shape (needed to "
+                "normalize the point prompt to the 0..1 range the real SAM 3.1 "
+                "API expects, see this method's docstring)"
+            )
+        height, width = frame_shape
+        cx = float((box[0] + box[2]) / 2.0) / width
+        cy = float((box[1] + box[3]) / 2.0) / height
         predictor.handle_request(request=dict(
             type="add_prompt", session_id=state, frame_index=frame_idx,
-            box=box, obj_id=obj_id,
+            points=[[cx, cy]], point_labels=[1], obj_id=obj_id,
         ))
 
     def _add_text_prompt(self, predictor, state, *, frame_idx: int, text: str,

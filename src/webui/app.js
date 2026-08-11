@@ -168,6 +168,16 @@
 
     const showChunkFields = select.value === "sam31" || select.value === "sam2";
     $("sam-chunk-fields").classList.toggle("hidden", !showChunkFields);
+
+    // "Tracking method" (ByteTrack config) only affects the YOLO26
+    // Segment backend (fed into Ultralytics' model.track(tracker=...),
+    // see segmentation_demo.py::build_tracker) -- SAM 3.1/SAM2 never
+    // read this value (their own chunked video propagation + id
+    // reconciliation handles temporal continuity instead), so showing
+    // an apparently-live selector there was misleading (2026-08 bug,
+    // found by Michele). Hidden for those two backends, matching how
+    // sam-chunk-fields/sam31-text-prompt-field already toggle above.
+    $("tracker-select-field").classList.toggle("hidden", isSam);
   }
 
   // Pose model -> guidance line: depends both on the pose model and on
@@ -328,8 +338,9 @@
     const scale = $("scale-select").value;
     const steps = [];
 
+    const seg = $("seg-model-select").value;
+    const segIsSam = state.task !== "pose" && (seg === "sam31" || seg === "sam2");
     if (state.task !== "pose") {
-      const seg = $("seg-model-select").value;
       const segLabel = seg === "sam31" ? "SAM 3.1 Segment" : seg === "sam2" ? "SAM2 Segment" : `YOLO26${scale} Segment`;
       steps.push({ label: segLabel, icon: "box", cls: "seg" });
     }
@@ -337,7 +348,17 @@
       const poseLabel = $("pose-model-select").value === "mediapipe" ? "MediaPipe Pose" : `YOLO26${scale} Pose`;
       steps.push({ label: poseLabel, icon: "box", cls: "pose" });
     }
-    steps.push({ label: "ByteTrack", icon: "target", cls: "track" });
+    // ByteTrack only runs for the YOLO26 Segment backend (Ultralytics
+    // model.track()) -- SAM 3.1/SAM2 handle temporal continuity
+    // themselves via chunked video propagation + id reconciliation
+    // (segmentation/chunking.py), no ByteTrack involved. Showing
+    // "ByteTrack" unconditionally here was misleading (2026-08 bug,
+    // found by Michele: the label appeared even with SAM selected).
+    if (segIsSam) {
+      steps.push({ label: "SAM tracking (chunked)", icon: "target", cls: "track" });
+    } else {
+      steps.push({ label: "ByteTrack", icon: "target", cls: "track" });
+    }
     const identityMode = $("identity-mode-select").value;
     if (identityMode === "tracking_reid") {
       steps.push({ label: "Re-ID", icon: "link", cls: "reid" });

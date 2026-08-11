@@ -194,11 +194,16 @@
           <input id="conf-threshold-input" class="field-input field-input-sm" type="number" min="0" max="1" step="0.05" value="0.1">
         </div>
 
-        <label class="field-label" for="tracker-select">Tracking method</label>
-        <select id="tracker-select" class="field-input">
-          <option value="bytetrack.yaml">ByteTrack (default)</option>
-          <option value="configs/bytetrack_permissive.yaml">ByteTrack (permissive — overhead camera, fast motion)</option>
-        </select>
+        <div id="tracker-select-field">
+          <label class="field-label" for="tracker-select">Tracking method</label>
+          <select id="tracker-select" class="field-input">
+            <option value="bytetrack.yaml">ByteTrack (default)</option>
+            <option value="configs/bytetrack_permissive.yaml">ByteTrack (permissive — overhead camera, fast motion)</option>
+          </select>
+          <p class="hint">Only used by the YOLO26 Segment backend (Ultralytics' <code>model.track()</code>).
+            SAM 3.1/SAM2 track people on their own (chunked video propagation + id reconciliation,
+            see README) — this choice has no effect for those backends, hence hidden when selected.</p>
+        </div>
 
         <div id="sam-chunk-fields" class="hidden">
           <div class="inline-field-row">

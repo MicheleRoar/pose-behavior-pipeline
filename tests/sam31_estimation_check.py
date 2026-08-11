@@ -66,7 +66,11 @@ class _FakeSam3Predictor:
     expected call) and responds with the REAL shape confirmed on a CUDA
     machine (out_obj_ids/out_boxes_xywh/out_binary_masks, not
     boxes/object_ids as initially assumed), `add_prompt` with
-    `box=`/`obj_id=` registers a known seed. `handle_request()` REJECTS
+    `points=`/`point_labels=`/`obj_id=` (the REAL per-object tracker
+    API, see `sam31_estimation.py::Sam31Tracker._add_box_prompt`'s
+    docstring for the 2026-08 correction -- the old `box=`/`obj_id=`
+    request this fake used to simulate doesn't exist in the real API)
+    registers a known seed. `handle_request()` REJECTS
     "propagate_in_video" (like the real SAM 3 dispatcher, confirmed on a
     CUDA machine) -- propagation goes through `handle_stream_request()`,
     a GENERATOR that returns the static masks for the current obj_ids,
@@ -115,7 +119,15 @@ class _FakeSam3Predictor:
                         "out_binary_masks": [_box_to_mask(discovered[oid], self.frame_shape) for oid in obj_ids],
                     },
                 }
-            session["seeds"][request["obj_id"]] = request["box"]
+            # Per-object registration via the POINT-based tracker API --
+            # reconstructs a small fixed-size box around the (normalized)
+            # point purely so _box_to_mask has something to rasterize;
+            # the real API doesn't hand a box back either, only masks.
+            cx, cy = request["points"][0]
+            height, width = self.frame_shape
+            px, py = cx * width, cy * height
+            half = 3.0
+            session["seeds"][request["obj_id"]] = np.array([px - half, py - half, px + half, py + half])
             return {"outputs": {}}
 
         # CONFIRMED on a real run (see the docstring of the module under
@@ -230,9 +242,55 @@ def part2_text_prompt_reconciles_continuing_person_and_assigns_new_id_to_strange
         shutil.rmtree(tmp_dir)
 
 
+def part3_redetect_every_adds_new_person_via_points_without_resetting_others():
+    # Regression test for the real crash (Michele, CUDA machine,
+    # 2026-08-11): with text_prompt set, redetect_every calls
+    # _add_box_prompt() MID-CHUNK for a newly-detected person -- this is
+    # the exact path that used to send a request the real SAM 3.1 API
+    # doesn't recognize ("AssertionError: at least one type of prompt
+    # (text, boxes) must be provided", see _add_box_prompt's docstring
+    # for the full trail). Verifies the fixed points-based request
+    # doesn't raise AND that the already-tracked person (A, seeded via
+    # the text prompt at chunk 0) is still present after B is added --
+    # not silently wiped out.
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        video_path = os.path.join(tmp_dir, "synthetic.mp4")
+        _make_synthetic_video(video_path)
+        fake_predictor = _FakeSam3Predictor(FRAME_SHAPE, discover_schedule=[{0: BOX_A}])
+        # Built directly (not via _make_tracker, which hardcodes
+        # chunk_size/overlap): a single chunk covering the whole video,
+        # so the mid-chunk redetect at frame 5 is isolated from any
+        # chunk-boundary reconciliation.
+        tracker = Sam31Tracker(device="cuda", chunk_size=TOTAL_FRAMES, overlap=1,
+                                text_prompt="person", redetect_every=5)
+        tracker._build_predictor = lambda: fake_predictor
+        detect_calls = {"n": 0}
+
+        def _fake_detect(frame):
+            detect_calls["n"] += 1
+            return [BOX_B] if detect_calls["n"] == 1 else []
+
+        tracker._detect_people = _fake_detect
+
+        results = list(tracker.run(video_path))  # must not raise
+        ids_per_frame = {r.frame_index: {p[0] for p in r.people} for r in results}
+
+        assert all(len(ids_per_frame[f]) == 1 for f in range(0, 5)), \
+            "before the mid-chunk redetect at frame 5, only A should be present"
+        assert all(len(ids_per_frame[f]) == 2 for f in range(5, TOTAL_FRAMES)), (
+            "from frame 5 onward (mid-chunk redetect via the fixed points-based "
+            "_add_box_prompt), both A and B should be present -- A must not be wiped out"
+        )
+        print("PASS part3_redetect_every_adds_new_person_via_points_without_resetting_others")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
 def main():
     part1_box_mode_via_handle_request_matches_original_behaviour()
     part2_text_prompt_reconciles_continuing_person_and_assigns_new_id_to_stranger()
+    part3_redetect_every_adds_new_person_via_points_without_resetting_others()
     print("\nAll sam31_estimation.py tests (with a fake SAM 3 predictor) passed.")
 
 
