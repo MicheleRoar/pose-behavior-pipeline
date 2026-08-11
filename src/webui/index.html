@@ -218,7 +218,8 @@
             <label class="field-label-inline" for="sam-redetect-every-input">Re-detect every (frames)</label>
             <input id="sam-redetect-every-input" class="field-input field-input-sm" type="number" min="1" step="1" placeholder="off">
           </div>
-          <p class="hint">SAM 3.1/SAM2 process the video in overlapping windows to bound memory use (see README). "Re-detect every" re-runs YOLO inside the chunk too, not just at its boundary — leave empty to keep one detection per chunk.</p>
+          <p class="hint">SAM 3.1/SAM2 process the video in overlapping windows to bound memory use (see README). "Re-detect every" re-runs YOLO inside the chunk too, not just at its boundary — leave empty to keep one detection per chunk.
+            <strong>With a SAM 3.1 text prompt set, avoid combining this with a low "Re-detect every" value</strong> — injecting a person mid-chunk can make already-tracked people flicker (SAM 3.1's internal confirmation state is session-wide, see sam31_estimation.py). Prefer a smaller "Chunk length" instead.</p>
         </div>
 
         <div class="switch-row">

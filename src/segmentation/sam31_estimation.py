@@ -119,12 +119,20 @@ is minted. If `text_prompt` is
 unchanged -- `Sam31Tracker()` with no arguments behaves exactly as
 before this change.
 
-`redetect_every` (see sam_backend.py) stays compatible with
-`text_prompt`: periodic re-detection inside the chunk still uses
-YOLO/box (not a new text prompt, to avoid having to reconcile twice
-mid-chunk), but the box-prompts pass an `obj_id` chosen by US (a global
-id) -- being already a global id it needs no translation, `_propagate()`
-passes it through unchanged (see `_local_to_global` below).
+`redetect_every` (see sam_backend.py) technically RUNS alongside
+`text_prompt` (periodic re-detection inside the chunk still uses
+YOLO/box -- not a new text prompt, to avoid having to reconcile twice
+mid-chunk -- and passes an `obj_id` chosen by US, a global id, needing
+no translation: `_propagate()` passes it through unchanged, see
+`_local_to_global` below), but the COMBINATION is NOT recommended as of
+2026-08 (dancing-tracks test, Michele): injecting a person mid-chunk
+via `_add_box_prompt` perturbs SAM 3.1's own session-wide "masklet
+confirmation" bookkeeping (see `Sam31Tracker.__init__`'s warning for the
+full explanation) -- observed to make ALREADY-tracked people flicker in
+and out, not just cleanly add the new one. Prefer a smaller `chunk_size`
+over `redetect_every` when using `text_prompt`: more frequent full text
+re-discovery, always through a clean new session, already reconciled by
+`chunking.reconcile_ids_windowed` + the appearance gallery.
 """
 
 from __future__ import annotations
@@ -178,6 +186,43 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
         # None/empty in box mode (the local ids ARE already the global
         # ids, having been chosen by us).
         self._local_to_global: dict[int, int] = {}
+
+        if self.text_prompt and self.redetect_every:
+            # 2026-08 finding (Michele, dancing-tracks test): with
+            # text_prompt set, `redetect_every` injects a new tracked
+            # object MID-PROPAGATION via the points-based tracker API
+            # (`_add_box_prompt`, see its docstring). Reading the real
+            # source (sam3_video_inference.py::propagate_in_video)
+            # revealed SAM 3.1 runs its OWN internal "masklet
+            # confirmation" state machine during propagation (an object
+            # must be detected `masklet_confirmation_consecutive_det_thresh`
+            # consecutive frames before being "confirmed" and shown;
+            # `hotstart_delay` buffers frames while this resolves;
+            # `suppressed_obj_ids`/`removed_obj_ids`/`unconfirmed_obj_ids`
+            # hide objects that don't pass) -- this bookkeeping is
+            # session-wide, not isolated per object. Observed symptom:
+            # injecting a person mid-chunk made ALREADY-tracked people
+            # flicker/disappear in alternation, not just the new one --
+            # consistent with the injection perturbing that shared
+            # confirmation state, not (only) a point-vs-box precision
+            # issue. No known way to inject an object mid-propagation
+            # without touching this state, so the two are NOT safely
+            # combinable yet -- use a smaller `chunk_size` instead to
+            # get more frequent (but always clean, full-session) text
+            # re-discovery, which already goes through the tested
+            # Hungarian + multi-frame + appearance-gallery reconciliation
+            # in chunking.py/identity_gallery.py. Logged, not raised: the
+            # combination doesn't crash and might be fine on a calmer
+            # (less crowded/occluded) video -- this is a quality warning,
+            # not a hard incompatibility.
+            print(f"[{type(self).__name__}] warning: text_prompt + redetect_every are set "
+                  f"together -- SAM 3.1's internal masklet-confirmation state during "
+                  f"propagation is session-wide, so injecting a new person mid-chunk can "
+                  f"make ALREADY-tracked people flicker/disappear too (observed on the "
+                  f"dancing-tracks test, 2026-08). Recommended instead: leave redetect_every "
+                  f"unset and use a smaller chunk_size so full text re-discovery (already "
+                  f"reconciled via chunking.reconcile_ids_windowed + the appearance gallery) "
+                  f"happens more often.")
 
     def _build_predictor(self):
         # Delayed import: raises ImportError with a clear message if the
