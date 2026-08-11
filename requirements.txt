@@ -50,6 +50,14 @@ pywebview[qt]>=5.0; sys_platform == "linux"
 # - manca la dipendenza 'gdown' (usata per scaricare i pesi): se l'import
 #   fallisce con "ModuleNotFoundError: No module named 'gdown'", installare
 #   anche quello a parte (pip install gdown).
+# - manca anche 'tensorboard': 'torchreid.reid.engine' (importato gia'
+#   a livello di package init, anche se si usa solo FeatureExtractor per
+#   inferenza) fa 'from torch.utils.tensorboard import SummaryWriter',
+#   che fallisce con "ModuleNotFoundError: No module named 'tensorboard'"
+#   se non e' installato a parte (pip install tensorboard).
+# - UserWarning "Cython evaluation ... unavailable" all'import: benigno,
+#   riguarda solo il modulo di evaluation CMC/mAP (rank_cy), non usato da
+#   FeatureExtractor -- si puo' ignorare.
 # - 'pip install torchreid' installa di default "torchreid-pip", un
 #   repackaging PyPI di terzi (non il progetto originale
 #   github.com/KaiyangZhou/deep-person-reid) con un layout dei moduli
