@@ -5,16 +5,25 @@ Verifies the PURE logic of `webui/api.py` -- no pywebview, no real
 window, no real video/tracker (same spirit as video_player_check.py for
 gui/video_player.py). Covers the four functions/classes deliberately
 isolated to be testable without a window: `build_player_kwargs`,
-`encode_frame_jpeg_b64`, `_LatencyTracker`, `build_status`. Doesn't touch
-the `Api` class itself (that requires pywebview/a real window -- verified
-by hand on the Mac, like the GUI's other features).
+`encode_frame_jpeg_b64`, `_LatencyTracker`, `build_status`. Mostly doesn't
+touch the `Api` class itself (real playback/window wiring requires
+pywebview -- verified by hand on the Mac, like the GUI's other features),
+EXCEPT part14/part15/part15b below, which instantiate a bare `Api()` (no
+window needed for that) with a synthetic `VideoPlayer`: part14 reproduces
+and verifies the fix for a real concurrency crash (rapid timeline
+scrubbing, 2026-08); part15/part15b cover `export_video()` (saving the
+annotated video at the end of a run, also 2026-08).
 
 Run with: python webui_api_check.py
 """
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -22,8 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import numpy as np
 
 from gui.pipeline_runner import RunnerFrame
+from gui.video_player import VideoPlayer
 from webui.api import (
-    build_player_kwargs, encode_frame_jpeg_b64, _LatencyTracker, build_status,
+    Api, build_player_kwargs, encode_frame_jpeg_b64, _LatencyTracker, build_status,
     probe_video_metadata,
 )
 
@@ -294,6 +304,125 @@ def part13_sam_redetect_every_and_text_prompt_defaults_and_passthrough():
           "unchanged when specified (empty string == not set) — OK")
 
 
+def part14_concurrent_seek_and_step_forward_do_not_crash():
+    # Reproduces the real bug (Michele, 2026-08): dragging/clicking the
+    # timeline several times fast fired overlapping seek()/step_forward()
+    # calls into the SAME underlying VideoPlayer, which wraps a single
+    # plain Python generator (gui/video_player.py) -- calling next() on
+    # it from two threads at once raises "ValueError: generator already
+    # executing". IMPORTANT: `Api._advance()` already catches
+    # `Exception` and turns it into a `{"ok": False, "error": ...}` dict
+    # (see its docstring) instead of letting it propagate -- so the bug
+    # does NOT surface here as a raised exception, but as that error
+    # dict coming back from step_forward()/seek() (and, in the real
+    # app, as the frontend's catch-up while-loop spinning forever on it
+    # without the cache ever growing -- the perceived "crash"/freeze).
+    # A tiny time.sleep() in the fake generator widens the race window
+    # so the bug reproduces reliably pre-fix (verified: this test DID
+    # fail -- assertion below -- before the `with self._lock:` fix
+    # around the player calls in Api._advance()/seek()/_play_loop()).
+    def slow_generator_factory():
+        def gen():
+            for i in range(400):
+                time.sleep(0.0005)
+                frame = np.full((2, 2, 3), i % 256, dtype=np.uint8)
+                yield RunnerFrame(frame=frame, rows=[{"frame_idx": i}], now=float(i), mode="test")
+        return gen()
+
+    api = Api()
+    api.player = VideoPlayer(generator_factory=slow_generator_factory)
+    api._device = "cpu"
+    api._mode = "segmentation"
+
+    results: list[dict] = []
+    lock = threading.Lock()
+
+    def hammer_step_forward():
+        for _ in range(40):
+            r = api.step_forward()
+            with lock:
+                results.append(r)
+
+    def hammer_seek():
+        for i in range(40):
+            r = api.seek(i)
+            with lock:
+                results.append(r)
+
+    threads = [threading.Thread(target=hammer_step_forward) for _ in range(4)]
+    threads += [threading.Thread(target=hammer_seek) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    race_errors = [r for r in results if r.get("ok") is False and "already executing" in str(r.get("error", ""))]
+    assert not race_errors, (
+        f"expected zero 'generator already executing' races from concurrent access, "
+        f"got {len(race_errors)}/{len(results)}: {race_errors[:3]!r}"
+    )
+    # sanity: the cache is internally consistent (cursor within bounds,
+    # no gap/duplication from a corrupted generator hand-off)
+    assert 0 <= api.player.cursor < api.player.cached_frame_count
+    print("Part 14: concurrent seek()/step_forward() calls (simulating rapid timeline "
+          "clicks) no longer race on the shared generator — OK")
+
+
+def part15_export_video_writes_every_cached_frame():
+    # Michele, 2026-08: wanted the annotated video (overlay already
+    # drawn on every processed frame, see RunnerFrame) saved at the end
+    # of a run, to compare different runs/parameter choices side by
+    # side later. Verifies Api.export_video() actually produces a
+    # playable file with the right frame count and fps -- not just
+    # that it returns {"ok": True}.
+    import cv2
+
+    def fake_generator_factory():
+        def gen():
+            for i in range(12):
+                frame = np.full((16, 16, 3), i % 256, dtype=np.uint8)
+                yield RunnerFrame(frame=frame, rows=[{"frame_idx": i}], now=float(i), mode="test")
+        return gen()
+
+    api = Api()
+    api.player = VideoPlayer(generator_factory=fake_generator_factory)
+    api._device = "cpu"
+    api._mode = "segmentation"
+    api._source_fps = 12.0
+    for _ in range(12):
+        api.player.step_forward()
+
+    out_path = tempfile.mktemp(suffix=".mp4")
+    try:
+        result = api.export_video(out_path)
+        assert result["ok"] is True, result
+        assert result["frames"] == 12, result
+        assert os.path.exists(out_path) and os.path.getsize(out_path) > 0, "expected a non-empty video file"
+
+        cap = cv2.VideoCapture(out_path)
+        try:
+            written_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            written_fps = cap.get(cv2.CAP_PROP_FPS)
+        finally:
+            cap.release()
+        assert written_count == 12, f"expected 12 frames written, container reports {written_count}"
+        assert abs(written_fps - 12.0) < 0.5, f"expected ~12 fps (the run's configured fps), found {written_fps}"
+    finally:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+    print("Part 15: export_video() writes every cached annotated frame to a playable video "
+          "at the run's configured fps — OK")
+
+
+def part15b_export_video_before_any_frame_is_processed_is_a_clean_error():
+    api = Api()
+    api.player = VideoPlayer(generator_factory=lambda: iter([]))
+    result = api.export_video(tempfile.mktemp(suffix=".mp4"))
+    assert result == {"ok": False, "error": "Nothing processed yet."}, result
+    print("Part 15b: export_video() with nothing processed yet fails cleanly instead of "
+          "writing an empty/corrupt file — OK")
+
+
 if __name__ == "__main__":
     part1_build_player_kwargs_mirrors_app_py_defaults()
     part1b_explicit_device_passes_through_unchanged()
@@ -310,6 +439,9 @@ if __name__ == "__main__":
     part13_sam_redetect_every_and_text_prompt_defaults_and_passthrough()
     part11_build_status_carries_totals_and_max_people_for_the_timeline()
     part12_seg_backend_defaults_to_yolo_and_passes_through()
+    part14_concurrent_seek_and_step_forward_do_not_crash()
+    part15_export_video_writes_every_cached_frame()
+    part15b_export_video_before_any_frame_is_processed_is_a_clean_error()
     print("\nVerification completed with no errors: webui/api.py's pure logic (parameters, frame "
           "encoding, metrics, video metadata) behaves as expected, without needing pywebview or "
           "a real window.")

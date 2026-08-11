@@ -127,6 +127,15 @@ class VideoPlayer:
             rows.extend(f.rows)
         return rows
 
+    def all_frames(self):
+        """All annotated frames (overlay already drawn, see
+        `RunnerFrame`) accumulated so far in the cache, in frame order
+        -- mirrors `all_rows()`, used to export the analyzed video (see
+        `webui/api.py::Api.export_video`) so different runs/parameter
+        choices can be compared side by side outside the app, not just
+        live in the player."""
+        return [f.frame for f in self._cache]
+
     def reset(self) -> None:
         """Starts over: new inference session, cache cleared. Necessary
         whenever the parameters change (model, features, --max-people,

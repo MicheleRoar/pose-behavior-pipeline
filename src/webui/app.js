@@ -46,6 +46,12 @@
     torchreidAvailable: false,  // same idea, but for the "Appearance embedding (OSNet)" toggle
     task: "both",       // "segmentation" | "pose" | "both" -- see #task-segmented
     session: "multiple", // "single" | "multiple" -- see #session-segmented
+    seekToken: 0,  // bumped on every seekOrCatchUp() call -- lets an older, still
+    // in-flight catch-up loop notice it's been superseded and bail out instead of
+    // continuing to fire step_forward() and painting stale frames over a newer
+    // seek (see seekOrCatchUp; the backend itself is now race-safe too, see
+    // webui/api.py's _advance()/seek() docstrings -- this is a UX/waste fix on
+    // top of that, not a substitute for it).
   };
 
   // ---------------------------------------------------------------- utils
@@ -67,6 +73,20 @@
     // "kind" is "live" (playing, dot lit) or "idle" (dot off).
     $("status-label").textContent = text;
     $("dot-status").className = "status-dot " + (kind === "live" ? "status-dot-live" : "status-dot-idle");
+  }
+
+  function updateDeviceIndicator(device) {
+    // BUG (Michele, 2026-08): the badge text was hardcoded "GPU" in
+    // index.html and NEVER updated -- always showed "GPU" even on a
+    // Mac with no CUDA (mps/cpu). Now driven by the real device string
+    // from detect_device()/status.device ("cuda"|"mps"|"cpu", see
+    // common/device.py), both at startup and once a run is actually
+    // configured.
+    if (!device) return;
+    const label = device === "cuda" ? "GPU" : device === "mps" ? "MPS" : "CPU";
+    $("gpu-indicator-label").textContent = label;
+    $("gpu-indicator").title = `Configured device: ${device}`;
+    $("dot-device").className = "status-dot " + (device === "cuda" ? "status-dot-live" : "status-dot-idle");
   }
 
   function formatTimecode(seconds) {
@@ -498,7 +518,7 @@
       $("dot-tracks-active").className = "status-dot " + (status.people_count > 0 ? "status-dot-live" : "status-dot-idle");
     }
     if (status.device) {
-      $("gpu-indicator").title = `Configured device: ${status.device}`;
+      updateDeviceIndicator(status.device);
     }
     if (status.is_finished) {
       state.playing = false;
@@ -631,14 +651,18 @@
     // otherwise processes sequentially until reaching it (no impossible
     // forward jump) -- same logic reused by timeline/skip.
     targetIndex = Math.max(0, targetIndex);
+    const myToken = ++state.seekToken;
     state.playing = false;
     setPlayIcon(false);
     try {
       const payload = await api().seek(targetIndex);
+      if (state.seekToken !== myToken) return;  // a newer seek/click already took over
       if (payload.ok === false) {
         setStatusPill("Catching up…", "idle");
         while (state.cachedFrameCount <= targetIndex) {
+          if (state.seekToken !== myToken) return;
           const step = await api().step_forward();
+          if (state.seekToken !== myToken) return;  // superseded while awaiting
           window.onPipelineFrame(step);
           if (step.status && step.status.is_finished) break;
         }
@@ -646,7 +670,7 @@
         window.onPipelineFrame(payload);
       }
     } catch (err) {
-      setStatusPill(String(err.message || err), "idle");
+      if (state.seekToken === myToken) setStatusPill(String(err.message || err), "idle");
     }
   }
 
@@ -688,6 +712,22 @@
     }
   }
 
+  async function onExportVideo() {
+    // Saves the annotated video (overlay already drawn on every
+    // processed frame) so different runs/parameter choices can be
+    // compared side by side later -- same pick-then-save pattern as
+    // onExportCsv, see webui/api.py::Api.export_video.
+    try {
+      const path = await api().pick_save_video_path();
+      if (!path) return;
+      setStatusPill("Saving video…", "idle");
+      const result = await api().export_video(path);
+      setStatusPill(result.ok ? `Saved ${result.frames} frames` : (result.error || "Save failed"), "idle");
+    } catch (err) {
+      setStatusPill(String(err.message || err), "idle");
+    }
+  }
+
   function onFullscreen() {
     const wrap = $("video-frame-wrap");
     if (!document.fullscreenElement) {
@@ -706,6 +746,7 @@
     $("btn-forward").addEventListener("click", onSkipForward);
     $("btn-back").addEventListener("click", onSkipBack);
     $("btn-export-csv").addEventListener("click", onExportCsv);
+    $("btn-export-video").addEventListener("click", onExportVideo);
     $("btn-fullscreen").addEventListener("click", onFullscreen);
     $("timeline-track").addEventListener("click", onTimelineClick);
 
@@ -753,6 +794,7 @@
       const result = await api().detect_device();
       state.detectedDevice = result && result.device;
       state.torchreidAvailable = !!(result && result.torchreid_available);
+      updateDeviceIndicator(state.detectedDevice);
     } catch (err) {
       // opened in a regular browser without pywebview (see api()), or
       // detect_device() failed for some reason: SAM 3.1/SAM2 stay

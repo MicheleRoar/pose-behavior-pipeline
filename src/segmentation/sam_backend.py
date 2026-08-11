@@ -117,6 +117,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 from typing import Iterator
 
 import cv2
@@ -473,6 +474,7 @@ class ChunkedVideoPredictorBackend:
         prev_anchor_polys_history: dict[int, dict[int, np.ndarray]] = {}
 
         for chunk_index, (start, end) in enumerate(iter_chunk_ranges(total_frames, self.chunk_size, self.overlap)):
+            chunk_start_time = time.time()
             chunk_frames = _read_frame_range(source, start, end)
             if not chunk_frames:
                 break
@@ -649,6 +651,12 @@ class ChunkedVideoPredictorBackend:
             skip = 0 if chunk_index == 0 else self.overlap
             for r in chunk_results[skip:]:
                 yield r
+
+            n_ids = len({obj_id for polys in polys_by_local_frame.values() for obj_id in polys})
+            elapsed = time.time() - chunk_start_time
+            print(f"[{type(self).__name__}] chunk {chunk_index} done -- frames "
+                  f"[{start},{end}) ({end - start} frames), {n_ids} id(s) tracked, "
+                  f"{elapsed:.1f}s")
 
     # --------------------------------------------------------------- YOLO
     def _detect_people(self, frame: np.ndarray) -> list[np.ndarray]:

@@ -375,6 +375,10 @@ class Api:
         self._mode = "segmentation"
         self._max_people: int | None = None
         self._playback_fps = 15.0
+        self._source_fps: float | None = None  # set in build_player() -- the fps the
+        # RUN was configured with, used by export_video() so the saved file plays at
+        # the original speed (NOT self._playback_fps, which is only the live-preview
+        # speed and can be changed independently via the speed selector, see play())
         self._latency = _LatencyTracker()
         self._playing = False
         self._play_thread: threading.Thread | None = None
@@ -448,6 +452,23 @@ class Api:
         # return a string or a one-element tuple
         return result if isinstance(result, str) else result[0]
 
+    def pick_save_video_path(self) -> str | None:
+        """Same idea as `pick_save_csv_path()`, for `export_video()`
+        (Michele, 2026-08: wanted the annotated video saved at the end
+        of a run to compare different runs/parameter choices side by
+        side, not just re-watch them live in the player one at a
+        time)."""
+        import webview
+        if self.window is None:
+            return None
+        result = self.window.create_file_dialog(
+            webview.SAVE_DIALOG, save_filename="annotated_session.mp4",
+            file_types=("MP4 video (*.mp4)",),
+        )
+        if not result:
+            return None
+        return result if isinstance(result, str) else result[0]
+
     # -------------------------------------------------------- lifecycle
     def build_player(self, params: dict) -> dict:
         """Builds (or rebuilds) the `VideoPlayer` from a parameter dict
@@ -487,6 +508,7 @@ class Api:
             self._device = kwargs["device"]
             self._mode = kwargs["mode"]
             self._max_people = kwargs["max_people"]
+            self._source_fps = kwargs["fps"]
             self._latency = _LatencyTracker()
             self.player = VideoPlayer(generator_factory=lambda: iter_pipeline_frames(**kwargs))
         return {"ok": True}
@@ -527,12 +549,17 @@ class Api:
         from here: the frontend, if the user clicks past the cache
         prefix, must instead repeatedly call step_forward()/play(), so
         the user sees the catch-up progress instead of being stuck
-        waiting for a jump that can't be instant)."""
+        waiting for a jump that can't be instant).
+
+        The `self.player.seek()` call itself is now INSIDE `self._lock`
+        (bug fix, Michele 2026-08: dragging/clicking the timeline
+        several times fast crashed the whole app) -- see `_advance()`'s
+        docstring for why."""
         if self.player is None:
             return {"ok": False, "error": "No player built yet."}
         with self._lock:
             self._playing = False
-        frame = self.player.seek(int(index))
+            frame = self.player.seek(int(index))
         if frame is None:
             return {"ok": False, "error": "Index not yet processed."}
         return self._frame_payload(frame)
@@ -540,17 +567,68 @@ class Api:
     def export_csv(self, path: str) -> dict:
         if self.player is None or self.player.cached_frame_count == 0:
             return {"ok": False, "error": "Nothing processed yet."}
-        df = pd.DataFrame(self.player.all_rows())
+        with self._lock:  # snapshot the cache while nothing else can append to it, see _advance()
+            if self.player.cached_frame_count == 0:
+                return {"ok": False, "error": "Nothing processed yet."}
+            rows = self.player.all_rows()
+        df = pd.DataFrame(rows)
         df.to_csv(path, index=False)
         return {"ok": True, "rows": len(df)}
 
+    def export_video(self, path: str) -> dict:
+        """Writes every already-processed frame (overlay already drawn,
+        see `RunnerFrame`/`gui/pipeline_runner.py`) to an MP4 file, in
+        order, at the fps the run was actually configured with
+        (`self._source_fps`, see `build_player()`). Lets Michele save
+        each run's annotated output to compare parameter choices
+        side by side later, not just live in the player -- can be
+        called any time after at least one frame has been processed
+        (doesn't require the run to have reached the end of the
+        video)."""
+        if self.player is None or self.player.cached_frame_count == 0:
+            return {"ok": False, "error": "Nothing processed yet."}
+        with self._lock:  # snapshot the cache, see export_csv()/_advance()
+            if self.player.cached_frame_count == 0:
+                return {"ok": False, "error": "Nothing processed yet."}
+            frames = self.player.all_frames()
+        height, width = frames[0].shape[:2]
+        fps = self._source_fps or 15.0
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            return {"ok": False, "error": f"Could not open '{path}' for writing "
+                                           f"(unsupported codec/container for this platform?)."}
+        try:
+            for frame in frames:
+                writer.write(frame)
+        finally:
+            writer.release()
+        return {"ok": True, "frames": len(frames)}
+
     # ------------------------------------------------------------ internal
     def _advance(self, *, back: bool) -> dict:
+        """BUG FIX (Michele, 2026-08): dragging/clicking the video
+        timeline repeatedly in quick succession used to crash the app.
+        Root cause: `VideoPlayer` wraps a single, plain (non-reentrant)
+        Python generator (see gui/video_player.py) -- `self._lock` was
+        only ever held around the `self._playing` flag, NOT around the
+        actual `self.player.step_forward()`/`step_back()`/`seek()`
+        calls, so two overlapping calls (e.g. two rapid timeline clicks
+        each starting their own catch-up loop, or a click landing while
+        the background `_play_loop` thread was mid-frame) could call
+        `next(self._generator)` from two threads AT THE SAME TIME --
+        `ValueError: generator already executing`, or worse, silent
+        `self._cache`/`self._cursor` corruption. Now the player call
+        itself is inside `self._lock` here, in `seek()`, and in
+        `_play_loop()`, fully serializing every access to the shared
+        player -- a second caller simply waits its turn instead of
+        racing."""
         if self.player is None:
             return {"ok": False, "error": "No player built yet."}
         t0 = time.time()
         try:
-            frame = self.player.step_back() if back else self.player.step_forward()
+            with self._lock:
+                frame = self.player.step_back() if back else self.player.step_forward()
         except Exception as exc:
             # An exception here is almost always a real bug in the
             # segmentation/pose backend (e.g. a missing model, an
@@ -593,7 +671,8 @@ class Api:
                 fps = self._playback_fps
             t0 = time.time()
             try:
-                frame = self.player.step_forward()
+                with self._lock:
+                    frame = self.player.step_forward()
             except Exception as exc:
                 # BEFORE, this exception silently killed the daemon
                 # thread: no error in the GUI, just a traceback in the

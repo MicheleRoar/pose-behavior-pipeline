@@ -19,7 +19,7 @@
     </div>
     <div class="top-bar-right">
       <span class="status-item"><span id="dot-status" class="status-dot status-dot-idle"></span><span id="status-label">Idle</span></span>
-      <span id="gpu-indicator" class="status-item" title="Configured device (see Model card)"><span id="dot-device" class="status-dot status-dot-live"></span>GPU</span>
+      <span id="gpu-indicator" class="status-item" title="Configured device (see Model card)"><span id="dot-device" class="status-dot status-dot-live"></span><span id="gpu-indicator-label">…</span></span>
       <button id="btn-settings" class="icon-btn" title="Settings (not wired to anything yet)">
         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/>
@@ -252,6 +252,13 @@
               <path d="M12 4v12M7 11l5 5 5-5M4 20h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             Export CSV…
+          </button>
+          <button id="btn-export-video" class="btn btn-outline">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M3 6h13v12H3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+              <path d="M16 10l5-3v10l-5-3" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+            </svg>
+            Export video…
           </button>
         </div>
       </div>

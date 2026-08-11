@@ -137,6 +137,21 @@ def part5_all_rows_matches_cached_frames_in_order():
     print("Part 5: all_rows() concatenates the rows of every cached frame, in the right order — OK")
 
 
+def part5b_all_frames_matches_cached_frames_in_order():
+    # Mirrors part5, for all_frames() (added 2026-08 for
+    # webui/api.py::Api.export_video -- saving the annotated video at
+    # the end of a run, Michele).
+    counter: dict = {}
+    player = VideoPlayer(generator_factory=make_generator_factory(4, counter))
+    for _ in range(4):
+        player.step_forward()
+
+    frames = player.all_frames()  # raw ndarrays (RunnerFrame.frame), not RunnerFrame objects
+    indices = [int(f[0, 0, 0]) for f in frames]
+    assert indices == [0, 1, 2, 3], f"expected one frame per cached entry in order 0..3, found {indices}"
+    print("Part 5b: all_frames() returns every cached (already-annotated) frame, in the right order — OK")
+
+
 def part6_seek_jumps_within_cache_without_reprocessing():
     counter: dict = {}
     player = VideoPlayer(generator_factory=make_generator_factory(5, counter))
@@ -169,6 +184,7 @@ def main():
     part3_forward_after_back_resumes_from_cache_then_live()
     part4_reset_starts_a_fresh_generator()
     part5_all_rows_matches_cached_frames_in_order()
+    part5b_all_frames_matches_cached_frames_in_order()
     part6_seek_jumps_within_cache_without_reprocessing()
     print("\nVerification completed with no errors: VideoPlayer advances/generates new frames only "
           "when truly needed, never regenerates an already-seen frame when going back, and "
