@@ -58,6 +58,25 @@ whole history -- someone who's been occluded for an entire chunk (no
 polygon anywhere in the window) can't be recovered by geometry no
 matter how good the matcher is; that's what the appearance gallery
 (`identity_gallery.py`) is for.
+
+2026-08 addition -- motion compensation (`estimate_velocities()`,
+used by `reconcile_ids_windowed()`): motivated directly by the
+DanceTrack benchmark's own oracle analysis (dancetrack.github.io,
+CVPR 2022) -- with ground-truth boxes, a simple constant-velocity
+motion model already beats naive static-position IoU by a wide margin
+once people move fast between frames, which is exactly the
+dancing-tracks failure mode `reconcile_ids_windowed` exists for.
+Per-id velocity is estimated from the trailing history itself (no
+extra dependency, no Kalman filter yet -- see the function's docstring
+for why a plain first-difference was chosen first) and used to
+translate an older polygon to where the person is PREDICTED to be at
+the comparison frame, before computing IoU. Always compared ALONGSIDE
+the un-shifted (static) IoU, keeping the max of the two per pair: a
+bad/noisy velocity estimate (e.g. derived across a degenerate frame)
+can therefore only ever be a no-op, never worse than the previous
+static-only behavior -- see
+`tests/chunking_check.py::part5e_reconcile_ids_windowed_motion_compensation_recovers_fast_linear_motion`
+for a case static IoU alone misses entirely.
 """
 
 from __future__ import annotations
@@ -105,6 +124,62 @@ def polygon_iou(poly_a: np.ndarray, poly_b: np.ndarray, frame_shape: tuple[int, 
     intersection = int(np.logical_and(mask_a, mask_b).sum())
     union = int(np.logical_or(mask_a, mask_b).sum())
     return float(intersection / union) if union > 0 else 0.0
+
+
+def _centroid(poly: np.ndarray) -> np.ndarray | None:
+    """Mean of the polygon's points, or `None` if degenerate (< 3
+    points) -- same "no made-up signal" convention as `polygon_iou`."""
+    if poly.shape[0] < 3:
+        return None
+    return poly.mean(axis=0)
+
+
+def estimate_velocities(polys_by_frame: dict[int, dict[int, np.ndarray]]) -> dict[int, np.ndarray]:
+    """Per-id centroid velocity (dx, dy PER FRAME STEP), estimated from
+    `polys_by_frame` (`{frame_offset: {id: polygon}}`, same shape as
+    `reconcile_ids_windowed`'s `prev_polys_by_frame`) -- used to predict
+    where a person should be by the comparison frame instead of
+    assuming they didn't move, see the module docstring's 2026-08
+    motion-compensation note for why.
+
+    Deliberately a plain first-difference between consecutive
+    observations (median across steps if there are more than two), NOT
+    a Kalman filter or anything fitted -- the DanceTrack oracle finding
+    this is based on already showed a SIMPLE motion estimate closes
+    most of the gap versus static IoU; a full filter is a natural next
+    step if this turns out not to be enough in practice, not a
+    prerequisite to try the idea at all.
+
+    Ids seen in fewer than 2 frames (nothing to estimate a velocity
+    from) are simply absent from the returned dict -- callers must
+    treat a missing id as "no motion known" and fall back to comparing
+    the raw (un-shifted) polygon, not as an error."""
+    tracks: dict[int, list[tuple[int, np.ndarray]]] = {}
+    for frame_offset, polys in polys_by_frame.items():
+        for obj_id, poly in polys.items():
+            centroid = _centroid(poly)
+            if centroid is not None:
+                tracks.setdefault(obj_id, []).append((frame_offset, centroid))
+
+    velocities: dict[int, np.ndarray] = {}
+    for obj_id, observations in tracks.items():
+        if len(observations) < 2:
+            continue
+        observations.sort(key=lambda o: o[0])
+        steps = []
+        for (f_prev, c_prev), (f_next, c_next) in zip(observations, observations[1:]):
+            gap = f_next - f_prev
+            if gap != 0:
+                steps.append((c_next - c_prev) / gap)
+        if steps:
+            velocities[obj_id] = np.median(np.stack(steps), axis=0)
+    return velocities
+
+
+def _shift_polygon(poly: np.ndarray, velocity: np.ndarray, num_frames: float) -> np.ndarray:
+    """Translates `poly` by `velocity * num_frames` -- constant-velocity
+    extrapolation forward (or backward) in time."""
+    return poly + velocity * num_frames
 
 
 def reconcile_ids(
@@ -192,7 +267,18 @@ def reconcile_ids_windowed(
     good geometric agreement is needed to trust the match. A pair with
     no frame in common where both ids appear naturally scores 0.0 (and
     is therefore excluded once compared against `iou_threshold`, same
-    as `reconcile_ids`)."""
+    as `reconcile_ids`).
+
+    Motion compensation (2026-08 addition, see module docstring): if an
+    old id has at least two observations in `prev_polys_by_frame`, its
+    constant-velocity estimate (`estimate_velocities`) is used to
+    predict where its polygon would be at each new frame offset before
+    comparing IoU, and that shifted-IoU is combined with the static
+    (un-shifted) IoU via `max()`. This can only ever RAISE a pair's
+    score, never lower it -- a fast-moving person whose static overlap
+    falls below `iou_threshold` still gets a chance to match via their
+    predicted position, while a stationary person is unaffected
+    (shifted polygon == original polygon when velocity is ~0)."""
     old_ids: set[int] = set()
     new_ids: set[int] = set()
     for polys in prev_polys_by_frame.values():
@@ -203,16 +289,23 @@ def reconcile_ids_windowed(
     if not old_ids_list or not new_ids_list:
         return {}
 
+    velocities = estimate_velocities(prev_polys_by_frame)
+
     old_pos = {old_id: i for i, old_id in enumerate(old_ids_list)}
     new_pos = {new_id: j for j, new_id in enumerate(new_ids_list)}
     iou_matrix = np.zeros((len(old_ids_list), len(new_ids_list)))
-    for prev_polys in prev_polys_by_frame.values():
-        for new_polys in new_polys_by_frame.values():
+    for prev_frame_offset, prev_polys in prev_polys_by_frame.items():
+        for new_frame_offset, new_polys in new_polys_by_frame.items():
             for old_id, old_poly in prev_polys.items():
                 i = old_pos[old_id]
+                velocity = velocities.get(old_id)
                 for new_id, new_poly in new_polys.items():
                     j = new_pos[new_id]
                     iou = polygon_iou(old_poly, new_poly, frame_shape)
+                    if velocity is not None:
+                        num_frames = new_frame_offset - prev_frame_offset
+                        shifted = _shift_polygon(old_poly, velocity, num_frames)
+                        iou = max(iou, polygon_iou(shifted, new_poly, frame_shape))
                     if iou > iou_matrix[i, j]:
                         iou_matrix[i, j] = iou
 

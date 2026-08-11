@@ -18,7 +18,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from segmentation.chunking import (  # noqa: E402
-    GlobalIdAllocator, iter_chunk_ranges, polygon_iou, reconcile_ids, reconcile_ids_windowed,
+    GlobalIdAllocator, estimate_velocities, iter_chunk_ranges, polygon_iou, reconcile_ids,
+    reconcile_ids_windowed,
 )
 
 
@@ -189,6 +190,35 @@ def part5d_reconcile_ids_windowed_recovers_from_degenerate_anchor_frame():
     print("PASS part5d_reconcile_ids_windowed_recovers_from_degenerate_anchor_frame")
 
 
+def part5e_reconcile_ids_windowed_motion_compensation_recovers_fast_linear_motion():
+    # A person moving fast and linearly (+20px/frame in x and y) across
+    # the chunk boundary: by the time the new chunk's discovery frame
+    # sees them, their STATIC position is far enough from where they
+    # were at the previous chunk's last observed frame that IoU alone
+    # falls below threshold -- but their trajectory (from two trailing
+    # observations) predicts the new position exactly.
+    shape = (200, 200)
+    prev_by_frame = {
+        -2: {10: _square(0, 0)},
+        -1: {10: _square(20, 20)},  # moving +20/frame in x and y
+    }
+    new_by_frame = {0: {5: _square(40, 40)}}  # continues the same linear motion
+
+    velocities = estimate_velocities(prev_by_frame)
+    assert np.allclose(velocities[10], [20.0, 20.0]), velocities
+
+    without_motion = reconcile_ids_windowed(
+        {-1: prev_by_frame[-1]}, new_by_frame, shape, iou_threshold=0.3,
+    )
+    assert without_motion == {}, "sanity check: static position alone must NOT match (iou below threshold)"
+
+    with_motion = reconcile_ids_windowed(prev_by_frame, new_by_frame, shape, iou_threshold=0.3)
+    assert with_motion == {5: 10}, (
+        f"expected motion compensation (using the -2/-1 velocity) to recover the match, got {with_motion}"
+    )
+    print("PASS part5e_reconcile_ids_windowed_motion_compensation_recovers_fast_linear_motion")
+
+
 def part8_global_id_allocator_never_repeats():
     allocator = GlobalIdAllocator()
     ids = [allocator.next_id() for _ in range(5)]
@@ -205,6 +235,7 @@ def main():
     part5b_hungarian_beats_greedy_on_close_by_people()
     part5c_reconcile_ids_windowed_matches_single_frame_case()
     part5d_reconcile_ids_windowed_recovers_from_degenerate_anchor_frame()
+    part5e_reconcile_ids_windowed_motion_compensation_recovers_fast_linear_motion()
     part6_reconcile_ids_unmatched_local_id_gets_no_mapping()
     part7_reconcile_ids_never_double_assigns()
     part8_global_id_allocator_never_repeats()
