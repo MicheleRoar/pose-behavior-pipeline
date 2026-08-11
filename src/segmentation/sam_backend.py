@@ -125,11 +125,19 @@ import numpy as np
 from common.yolo_models import resolve_yolo_weights
 from segmentation.chunk_store import save_chunk
 from segmentation.chunking import GlobalIdAllocator, iter_chunk_ranges, polygon_iou
+from segmentation.identity_gallery import SegmentationIdentityGallery
 from segmentation.seg_estimation import SegFrameResult
 
 COCO_PERSON_CLASS_ID = 0
 NEW_PERSON_IOU_THRESHOLD = 0.2  # below this threshold a YOLO detection on
 # the anchor frame is considered a NEW person (not already seeded)
+
+RECONCILE_HISTORY_FRAMES = 5  # how many trailing frames of the just-finished
+# chunk's overlap window are kept as extra "recent evidence" for the NEXT
+# chunk's reconciliation (see chunking.reconcile_ids_windowed, used by
+# Sam31Tracker in text-prompt mode) -- not used by the base class's own
+# box-mode seeding, which reuses global ids deterministically and never
+# needs geometric reconciliation in the first place.
 
 
 def _probe_video(source) -> tuple[int, tuple[int, int]]:
@@ -256,7 +264,11 @@ class ChunkedVideoPredictorBackend:
                  chunk_store_dir: str | None = None,
                  max_people: int | None = None,
                  reseed_new_people: bool = True,
-                 redetect_every: int | None = None):
+                 redetect_every: int | None = None,
+                 appearance_fallback: bool = True,
+                 appearance_device: str = "cpu",
+                 identity_similarity_threshold: float | None = None,
+                 identity_max_lost_age_chunks: int | None = None):
         if device != "cuda":
             # SAM 3.1/SAM2 don't declare mps/cpu support (see the
             # research cited in the README) -- better to fail
@@ -311,6 +323,24 @@ class ChunkedVideoPredictorBackend:
         self._detector = None  # YOLO lazily loaded in _detect_people()
         self._current_chunk_tmpdir: str | None = None  # see _init_state()/run()
 
+        # Appearance-based fallback (see segmentation/identity_gallery.py)
+        # for detections that find no geometric match at a chunk boundary
+        # or during periodic re-detection -- tries an OSNet embedding
+        # match against RECENTLY LOST global ids before minting a brand
+        # new one. Gracefully becomes a no-op (every lookup returns None)
+        # if torch/torchreid aren't installed, same as everywhere else
+        # OSNet is used in this project -- appearance_fallback=True
+        # (default) never raises just because the optional dependency is
+        # missing; set it to False explicitly to skip trying altogether.
+        gallery_kwargs = {}
+        if identity_similarity_threshold is not None:
+            gallery_kwargs["similarity_threshold"] = identity_similarity_threshold
+        if identity_max_lost_age_chunks is not None:
+            gallery_kwargs["max_lost_age_chunks"] = identity_max_lost_age_chunks
+        self._identity_gallery = SegmentationIdentityGallery(
+            device=appearance_device, enabled=appearance_fallback, **gallery_kwargs,
+        )
+
     # -------------------------------------------------- to implement
     def _build_predictor(self):
         raise NotImplementedError
@@ -342,7 +372,10 @@ class ChunkedVideoPredictorBackend:
     def _seed_new_chunk(self, predictor, state, *, chunk_frames: list[np.ndarray],
                          chunk_index: int, frame_shape: tuple[int, int],
                          prev_anchor_polys: dict[int, np.ndarray],
-                         allocator: GlobalIdAllocator) -> dict[int, np.ndarray]:
+                         allocator: GlobalIdAllocator,
+                         prev_anchor_polys_history: dict[int, dict[int, np.ndarray]] | None = None,
+                         identity_gallery: SegmentationIdentityGallery | None = None,
+                         ) -> dict[int, np.ndarray]:
         """Decides who to follow in this chunk, REGISTERS the prompts
         with the predictor (side effect, not left to the caller: see
         `Sam31Tracker._seed_new_chunk()` for why -- in text-prompt mode
@@ -351,7 +384,18 @@ class ChunkedVideoPredictorBackend:
         `{global_id: box}` for whoever is currently known.
 
         Default (used by `Sam2Tracker` and by `Sam31Tracker` in box
-        mode): YOLO proposes the boxes, see the module docstring."""
+        mode): YOLO proposes the boxes, see the module docstring.
+        `prev_anchor_polys_history` is accepted for signature parity
+        with `Sam31Tracker`'s override (which DOES use it, via
+        `chunking.reconcile_ids_windowed`) but ignored here: box mode
+        never runs geometric reconciliation in the first place -- an
+        already-known person's global id is reused directly as the SAM
+        `obj_id`, no ambiguity to resolve. `identity_gallery`, however,
+        IS used here: a YOLO detection that doesn't overlap anyone
+        already seeded is first tried against the appearance gallery
+        (see `identity_gallery.py`) before minting a brand-new id --
+        catches the case of someone occluded across an entire chunk who
+        would otherwise resurface under a new identity."""
         seed_boxes: dict[int, np.ndarray] = {}
         if chunk_index == 0:
             for box in self._detect_people(chunk_frames[0]):
@@ -362,7 +406,10 @@ class ChunkedVideoPredictorBackend:
             if self.reseed_new_people:
                 for box in self._detect_people(chunk_frames[0]):
                     if not _overlaps_any(box, seed_boxes.values(), frame_shape, NEW_PERSON_IOU_THRESHOLD):
-                        seed_boxes[allocator.next_id()] = box  # new person, never seen before
+                        global_id = _resolve_new_person_id(
+                            identity_gallery, allocator, chunk_frames[0], box,
+                        )
+                        seed_boxes[global_id] = box  # new (or re-identified) person
             # if reseed_new_people is False: no call to YOLO here,
             # SAM/SAM2 continues ONLY the already-known tracks (or finds
             # none left if everyone has left the frame) -- this is the
@@ -410,6 +457,13 @@ class ChunkedVideoPredictorBackend:
         predictor = self._build_predictor()
         allocator = GlobalIdAllocator()
         prev_anchor_polys: dict[int, np.ndarray] = {}
+        # Short trailing history of {local_frame: {global_id: poly}} from
+        # the END of the previous chunk (see RECONCILE_HISTORY_FRAMES) --
+        # extra evidence for Sam31Tracker's text-prompt reconciliation
+        # (chunking.reconcile_ids_windowed), unused by box mode. Kept
+        # separate from prev_anchor_polys (still the single frame used
+        # for the direct obj_id reuse / consistency check below).
+        prev_anchor_polys_history: dict[int, dict[int, np.ndarray]] = {}
 
         for chunk_index, (start, end) in enumerate(iter_chunk_ranges(total_frames, self.chunk_size, self.overlap)):
             chunk_frames = _read_frame_range(source, start, end)
@@ -425,6 +479,7 @@ class ChunkedVideoPredictorBackend:
             seed_boxes = self._seed_new_chunk(
                 predictor, state, chunk_frames=chunk_frames, chunk_index=chunk_index,
                 frame_shape=frame_shape, prev_anchor_polys=prev_anchor_polys, allocator=allocator,
+                prev_anchor_polys_history=prev_anchor_polys_history, identity_gallery=self._identity_gallery,
             )
 
             chunk_results: list[SegFrameResult] = []
@@ -518,7 +573,9 @@ class ChunkedVideoPredictorBackend:
                         # on its own, no need to reseed them.
                         for box in self._detect_people(chunk_frames[local_idx]):
                             if not _overlaps_any(box, known_boxes.values(), frame_shape, NEW_PERSON_IOU_THRESHOLD):
-                                new_id = allocator.next_id()
+                                new_id = _resolve_new_person_id(
+                                    self._identity_gallery, allocator, chunk_frames[local_idx], box,
+                                )
                                 self._add_box_prompt(predictor, state, frame_idx=local_idx, obj_id=new_id, box=box)
                                 known_boxes[new_id] = box
             finally:
@@ -550,7 +607,33 @@ class ChunkedVideoPredictorBackend:
             # anchor frame for the NEXT chunk: the last frame of this
             # chunk that falls within the overlap window with the next one
             next_anchor_local = len(chunk_frames) - self.overlap
-            prev_anchor_polys = polys_by_local_frame.get(next_anchor_local, {})
+            new_prev_anchor_polys = polys_by_local_frame.get(next_anchor_local, {})
+
+            # Appearance gallery bookkeeping (see identity_gallery.py):
+            # refresh the embedding of everyone still active at the new
+            # anchor, mark as "lost" anyone who WAS known coming into
+            # this chunk but isn't anymore (didn't survive
+            # reconciliation, or SAM/YOLO lost them mid-chunk), and
+            # forget identities lost for too long. A no-op loop if
+            # appearance_fallback=False or torchreid isn't installed
+            # (SegmentationIdentityGallery.enabled is False in that
+            # case -- observe()/mark_lost() themselves are no-ops).
+            history_start = max(0, next_anchor_local - RECONCILE_HISTORY_FRAMES + 1)
+            prev_anchor_polys_history = {
+                local_idx: polys_by_local_frame[local_idx]
+                for local_idx in range(history_start, next_anchor_local + 1)
+                if local_idx in polys_by_local_frame
+            }
+            if self._identity_gallery.enabled and 0 <= next_anchor_local < len(chunk_frames):
+                anchor_frame_img = chunk_frames[next_anchor_local]
+                for global_id, poly in new_prev_anchor_polys.items():
+                    self._identity_gallery.observe(global_id, anchor_frame_img, _polygon_to_box(poly), poly=poly)
+                for global_id in prev_anchor_polys:
+                    if global_id not in new_prev_anchor_polys:
+                        self._identity_gallery.mark_lost(global_id, chunk_index)
+                self._identity_gallery.forget_stale(chunk_index)
+
+            prev_anchor_polys = new_prev_anchor_polys
 
             # avoids re-emitting the overlap window's frames twice
             # (already emitted by the previous chunk, except for the
@@ -611,3 +694,25 @@ def _overlaps_any(box: np.ndarray, existing_boxes, frame_shape: tuple[int, int],
         if polygon_iou(box_poly, other_poly, frame_shape) >= threshold:
             return True
     return False
+
+
+def _resolve_new_person_id(identity_gallery: SegmentationIdentityGallery | None,
+                            allocator: GlobalIdAllocator, frame_bgr: np.ndarray,
+                            box: np.ndarray, poly: np.ndarray | None = None) -> int:
+    """Single decision point shared by every place in this module (and
+    in `sam31_estimation.py`) that's about to mint a brand-new global id
+    for a detection with no geometric match: tries the appearance
+    gallery first (see `identity_gallery.py`) -- a confident match means
+    this is someone who was already known and got lost (occlusion,
+    left and re-entered frame), not a genuinely new person. Falls back
+    to `allocator.next_id()` whenever the gallery is disabled/absent or
+    finds nothing (never raises: `SegmentationIdentityGallery` itself is
+    a documented no-op when torch/torchreid aren't installed)."""
+    if identity_gallery is not None:
+        matched = identity_gallery.match_or_none(frame_bgr, box, poly=poly)
+        if matched is not None:
+            identity_gallery.revive(matched)
+            print(f"[identity_gallery] re-identified global id {matched} by appearance "
+                  f"(no geometric match this chunk) -- reused instead of a new id")
+            return matched
+    return allocator.next_id()

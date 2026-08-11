@@ -23,13 +23,41 @@ chunk and the next) and the geometric reconciliation below: the masks
 produced by the two chunks are compared on the SAME frames (the shared
 ones) and a stable global id is reconstructed.
 
-Known limitation of this first version: reconciliation only uses
-geometric IoU on the anchor frame (the last overlap frame). Works well
-if people haven't swapped positions within the overlap window; in
-crowded scenes with occlusions right at the chunk boundary it can get
-it wrong -- natural extension, if needed: add an appearance similarity
-score (color/texture, as `segmentation/seg_reid.py` already does for
-ByteTrack) alongside the IoU.
+2026-08 revision (dancing-tracks test, reported by Michele): the
+original version matched old/new ids GREEDILY (highest IoU pair first,
+then the next-highest among what's left, ...). Greedy is only correct
+when the single best pair is always part of SOME globally-optimal
+assignment -- not guaranteed in general. Concrete failure observed:
+two already-known people close together (A, B) near a chunk boundary;
+a new detection happens to overlap A's OLD polygon slightly more than
+B's own (moved) polygon does. Greedy grabs that pair first (highest
+single IoU), "stealing" A's global id for what's actually B's
+continuation -- B, now unmatched, gets a brand-new id, even though a
+strictly better assignment existed (matching each new detection to
+its TRUE previous id would have covered both people, with a higher
+TOTAL iou). `reconcile_ids()` below now solves the assignment
+GLOBALLY with the Hungarian algorithm
+(`scipy.optimize.linear_sum_assignment`, maximizing the sum of IoU
+over the whole set at once) instead of greedily -- see
+`tests/chunking_check.py::part5b_hungarian_beats_greedy_on_close_by_people`
+for a worked-out reproduction of the old bug and the fixed assignment.
+This does NOT solve every ambiguous case (two people who genuinely
+crossed paths, ending up with SAM's discovered geometry more similar
+to swapped identities than to the true ones -- no purely-geometric
+algorithm, greedy or optimal, can resolve that from IoU alone): it
+only removes the additional, avoidable error of picking a
+sum-suboptimal assignment. See `reconcile_ids_windowed()` and
+`segmentation/identity_gallery.py` for the two further mitigations
+(multi-frame evidence instead of trusting a single anchor frame, and
+an appearance-based fallback for detections that still find no
+geometric match) built on top of this.
+
+Known limitation still present: reconciliation only compares polygons
+across a SHORT window around the chunk boundary, not the person's
+whole history -- someone who's been occluded for an entire chunk (no
+polygon anywhere in the window) can't be recovered by geometry no
+matter how good the matcher is; that's what the appearance gallery
+(`identity_gallery.py`) is for.
 """
 
 from __future__ import annotations
@@ -39,6 +67,7 @@ from typing import Iterator
 
 import cv2
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 
 def iter_chunk_ranges(total_frames: int, chunk_size: int, overlap: int) -> Iterator[tuple[int, int]]:
@@ -94,30 +123,105 @@ def reconcile_ids(
     found a match above `iou_threshold`. A local id absent from the dict
     is a "new" person for the caller (entered the frame during the
     chunk, or the match was too uncertain to be sure) -- the caller will
-    assign it a global id never used before (see `GlobalIdAllocator`).
+    assign it a global id never used before (see `GlobalIdAllocator`),
+    or try the appearance-based fallback in `identity_gallery.py`.
 
-    Greedy matching by decreasing IoU: each id (old or new) is used at
-    most once, so two nearby people are never both matched to the same
-    id."""
-    candidates: list[tuple[float, int, int]] = []
-    for old_id, old_poly in prev_polys_at_anchor.items():
-        for new_id, new_poly in new_polys_at_anchor.items():
-            iou = polygon_iou(old_poly, new_poly, frame_shape)
-            if iou > 0.0:
-                candidates.append((iou, old_id, new_id))
-    candidates.sort(key=lambda c: c[0], reverse=True)
+    Matching via the Hungarian algorithm (`scipy.optimize.linear_sum_assignment`),
+    maximizing the TOTAL IoU across the whole assignment at once rather
+    than greedily taking the single best pair first -- see the module
+    docstring's 2026-08 revision note for the concrete bug this fixes.
+    Each id (old or new) is used at most once, so two nearby people are
+    never both matched to the same id."""
+    old_ids = list(prev_polys_at_anchor.keys())
+    new_ids = list(new_polys_at_anchor.keys())
+    if not old_ids or not new_ids:
+        return {}
+
+    iou_matrix = np.zeros((len(old_ids), len(new_ids)))
+    for i, old_id in enumerate(old_ids):
+        old_poly = prev_polys_at_anchor[old_id]
+        for j, new_id in enumerate(new_ids):
+            iou_matrix[i, j] = polygon_iou(old_poly, new_polys_at_anchor[new_id], frame_shape)
+
+    # linear_sum_assignment MINIMIZES total cost -- maximizing total IoU
+    # is the same problem with cost = 1 - iou. Works fine on a
+    # rectangular matrix too (more old ids than new, or vice versa):
+    # returns min(len(old_ids), len(new_ids)) pairs, exactly the correct
+    # "everyone who CAN be matched, is" semantics needed here.
+    row_idx, col_idx = linear_sum_assignment(1.0 - iou_matrix)
 
     mapping: dict[int, int] = {}
-    used_old: set[int] = set()
-    used_new: set[int] = set()
-    for iou, old_id, new_id in candidates:
-        if iou < iou_threshold:
-            break  # sorted by decreasing iou: everything else is below threshold
-        if old_id in used_old or new_id in used_new:
-            continue
-        mapping[new_id] = old_id
-        used_old.add(old_id)
-        used_new.add(new_id)
+    for r, c in zip(row_idx, col_idx):
+        iou = iou_matrix[r, c]
+        if iou >= iou_threshold:
+            mapping[new_ids[c]] = old_ids[r]
+    return mapping
+
+
+def reconcile_ids_windowed(
+    prev_polys_by_frame: dict[int, dict[int, np.ndarray]],
+    new_polys_by_frame: dict[int, dict[int, np.ndarray]],
+    frame_shape: tuple[int, int],
+    iou_threshold: float = 0.3,
+) -> dict[int, int]:
+    """Like `reconcile_ids`, but instead of trusting a single anchor
+    frame on each side, aggregates evidence across several frames
+    (`prev_polys_by_frame`/`new_polys_by_frame`, each `{frame_key:
+    {id: polygon}}` -- the frame keys are caller-defined and don't need
+    to refer to the SAME real video frame on the two sides, see below)
+    before running the Hungarian assignment once, on the aggregated
+    matrix.
+
+    Motivation (2026-08, dancing-tracks test): a single degenerate frame
+    right at the chunk boundary (motion blur, partial occlusion, a
+    contour-finding artifact on a barely-visible person) can make
+    `reconcile_ids` see a spuriously low IoU for the person who is
+    ACTUALLY still there, sending them to a brand-new id even though
+    they were clearly identifiable a few frames earlier/later. Giving
+    the matcher more than one frame to look at removes that single
+    point of failure.
+
+    Aggregation: for each (old_id, new_id) pair, the score is the MAX
+    IoU observed over every (prev_frame, new_frame) combination where
+    BOTH ids have a polygon -- deliberately MAX, not mean: the two
+    sides are typically NOT the same real video frame (e.g. a short
+    trailing history from the end of the previous chunk vs. a single
+    discovery frame at the start of the new one, see
+    `sam31_estimation.py`), so there's no reason to expect every
+    combination to agree with each other -- only ONE frame pair with
+    good geometric agreement is needed to trust the match. A pair with
+    no frame in common where both ids appear naturally scores 0.0 (and
+    is therefore excluded once compared against `iou_threshold`, same
+    as `reconcile_ids`)."""
+    old_ids: set[int] = set()
+    new_ids: set[int] = set()
+    for polys in prev_polys_by_frame.values():
+        old_ids.update(polys.keys())
+    for polys in new_polys_by_frame.values():
+        new_ids.update(polys.keys())
+    old_ids_list, new_ids_list = sorted(old_ids), sorted(new_ids)
+    if not old_ids_list or not new_ids_list:
+        return {}
+
+    old_pos = {old_id: i for i, old_id in enumerate(old_ids_list)}
+    new_pos = {new_id: j for j, new_id in enumerate(new_ids_list)}
+    iou_matrix = np.zeros((len(old_ids_list), len(new_ids_list)))
+    for prev_polys in prev_polys_by_frame.values():
+        for new_polys in new_polys_by_frame.values():
+            for old_id, old_poly in prev_polys.items():
+                i = old_pos[old_id]
+                for new_id, new_poly in new_polys.items():
+                    j = new_pos[new_id]
+                    iou = polygon_iou(old_poly, new_poly, frame_shape)
+                    if iou > iou_matrix[i, j]:
+                        iou_matrix[i, j] = iou
+
+    row_idx, col_idx = linear_sum_assignment(1.0 - iou_matrix)
+    mapping: dict[int, int] = {}
+    for r, c in zip(row_idx, col_idx):
+        iou = iou_matrix[r, c]
+        if iou >= iou_threshold:
+            mapping[new_ids_list[c]] = old_ids_list[r]
     return mapping
 
 

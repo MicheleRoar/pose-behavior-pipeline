@@ -96,10 +96,15 @@ without needing YOLO as a proposer. When `text_prompt` is set,
 instead of YOLO: SAM 3, HOWEVER, assigns its own LOCAL ids to the
 discovered instances (we can't ask it to reuse one of our global ids,
 unlike with the box-prompt) -- they are therefore reconciled by geometry
-with the previous chunk's global ids using `chunking.reconcile_ids()`
-(the same IoU-matching utility already written for the coherence check
-in `ChunkedVideoPredictorBackend.run()`, reused here as the PRIMARY
-matching mechanism instead of just for logging). If `text_prompt` is
+with the previous chunk's global ids using `chunking.reconcile_ids_windowed()`
+(Hungarian assignment over a short multi-frame window, see chunking.py
+for the 2026-08 revision -- this used to be a single-anchor-frame
+greedy match, `chunking.reconcile_ids()`, which could steal an
+already-known id for a nearby new detection; see the module docstring
+of chunking.py for the concrete bug and the fix). A local id that finds
+no geometric match anywhere in the window is tried against the
+appearance gallery (`identity_gallery.py`) before a brand-new global id
+is minted. If `text_prompt` is
 `None` (default), behavior stays the original box-via-YOLO one,
 unchanged -- `Sam31Tracker()` with no arguments behaves exactly as
 before this change.
@@ -120,8 +125,11 @@ import tempfile
 import cv2
 import numpy as np
 
-from segmentation.chunking import GlobalIdAllocator, reconcile_ids
-from segmentation.sam_backend import ChunkedVideoPredictorBackend, _box_to_polygon, _to_boolean_mask
+from segmentation.chunking import GlobalIdAllocator, reconcile_ids_windowed
+from segmentation.identity_gallery import SegmentationIdentityGallery
+from segmentation.sam_backend import (
+    ChunkedVideoPredictorBackend, _box_to_polygon, _resolve_new_person_id, _to_boolean_mask,
+)
 
 DEFAULT_CHECKPOINT = "facebook/sam3.1"
 
@@ -289,12 +297,16 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
     def _seed_new_chunk(self, predictor, state, *, chunk_frames: list[np.ndarray],
                          chunk_index: int, frame_shape: tuple[int, int],
                          prev_anchor_polys: dict[int, np.ndarray],
-                         allocator: GlobalIdAllocator) -> dict[int, np.ndarray]:
+                         allocator: GlobalIdAllocator,
+                         prev_anchor_polys_history: dict[int, dict[int, np.ndarray]] | None = None,
+                         identity_gallery: SegmentationIdentityGallery | None = None,
+                         ) -> dict[int, np.ndarray]:
         if not self.text_prompt:
             self._local_to_global = {}
             return super()._seed_new_chunk(
                 predictor, state, chunk_frames=chunk_frames, chunk_index=chunk_index,
                 frame_shape=frame_shape, prev_anchor_polys=prev_anchor_polys, allocator=allocator,
+                prev_anchor_polys_history=prev_anchor_polys_history, identity_gallery=identity_gallery,
             )
 
         discovered = self._add_text_prompt(
@@ -310,12 +322,25 @@ class Sam31Tracker(ChunkedVideoPredictorBackend):
                 seed_boxes[global_id] = box
         else:
             discovered_polys = {local_id: _box_to_polygon(box) for local_id, box in discovered.items()}
-            mapping = reconcile_ids(prev_anchor_polys, discovered_polys, frame_shape,
-                                     iou_threshold=self.iou_threshold)
+            # Reconciles against a short trailing HISTORY of the
+            # previous chunk (not just its single last anchor frame,
+            # see chunking.reconcile_ids_windowed's docstring for why:
+            # a degenerate polygon exactly at the boundary frame
+            # shouldn't be the only chance a continuing person gets to
+            # be recognized). Falls back to the single-frame dict if no
+            # history was passed (e.g. an older caller/test).
+            prev_by_frame = prev_anchor_polys_history or {0: prev_anchor_polys}
+            mapping = reconcile_ids_windowed(prev_by_frame, {0: discovered_polys}, frame_shape,
+                                              iou_threshold=self.iou_threshold)
             for local_id, box in discovered.items():
                 global_id = mapping.get(local_id)
                 if global_id is None:
-                    global_id = allocator.next_id()  # new person, never seen before
+                    # No geometric match anywhere in the window: try the
+                    # appearance gallery before minting a brand-new id
+                    # (see identity_gallery.py) -- this is the case of
+                    # someone occluded across the WHOLE previous chunk,
+                    # geometry alone can never recover them.
+                    global_id = _resolve_new_person_id(identity_gallery, allocator, chunk_frames[0], box)
                 local_to_global[local_id] = global_id
                 seed_boxes[global_id] = box
 
