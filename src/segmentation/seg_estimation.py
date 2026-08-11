@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from common.tracking_common import cap_by_confidence
-from common.yolo_models import resolve_yolo_weights
+from common.yolo_models import resolve_tracker_config, resolve_yolo_weights
 
 COCO_PERSON_CLASS_ID = 0
 
@@ -89,7 +89,7 @@ class SegTracker:
         self.model = YOLO(resolve_yolo_weights(model_name))
         self.device = device
         self.conf_threshold = conf_threshold
-        self.tracker = tracker
+        self.tracker = resolve_tracker_config(tracker)
         self.max_people = max_people
 
     def run(self, source, stream: bool = True):

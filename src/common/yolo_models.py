@@ -38,6 +38,11 @@ from pathlib import Path
 # MODELS_CACHE_DIR in mediapipe_models.py.
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
 
+# .../src/common/yolo_models.py -> parents[1] is `src/` -- the tracker
+# YAMLs live at `src/configs/`, one level up from models/ (project
+# root), NOT two -- see resolve_tracker_config() below.
+CONFIGS_DIR = Path(__file__).resolve().parents[1] / "configs"
+
 
 def resolve_yolo_weights(model_name: str) -> str:
     """If `model_name` already exists as a file (an explicit path,
@@ -56,3 +61,40 @@ def resolve_yolo_weights(model_name: str) -> str:
         return model_name
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     return str(MODELS_DIR / model_name)
+
+
+def resolve_tracker_config(tracker: str) -> str:
+    """Same fix, same motivation as `resolve_yolo_weights()` above,
+    applied to Ultralytics tracker YAML configs instead of model
+    weights.
+
+    BUG (Michele, 2026-08, real run on his Linux/CUDA machine):
+    "bytetrack_permissive.yaml does not exist". The GUI passes the
+    literal string "configs/bytetrack_permissive.yaml" straight
+    through to `model.track(tracker=...)` (see webui/index.html's
+    `<option value="configs/bytetrack_permissive.yaml">`) -- Ultralytics
+    resolves a relative path like that against the CURRENT WORKING
+    DIRECTORY at launch time, not against this project's own
+    `src/configs/` folder. It only worked when the app happened to be
+    launched with `src/` as the cwd (as webui_app.py's docstring says
+    it must be); it breaks the moment it's launched any other way (a
+    desktop shortcut, a different terminal cwd, an IDE run
+    configuration, a systemd unit, ...).
+
+    A BARE name Ultralytics already knows on its own ("bytetrack.yaml",
+    "botsort.yaml" -- no directory component: these resolve fine by
+    themselves, Ultralytics ships them inside its own package) is
+    returned unchanged, same as an explicit path that already resolves
+    from the current cwd. Only a "configs/<file>.yaml"-shaped value
+    that does NOT already resolve gets redirected to this project's
+    real `src/configs/` folder, independent of the cwd."""
+    if os.path.isfile(tracker):
+        return tracker
+    if not os.path.dirname(tracker):
+        # bare name, e.g. "bytetrack.yaml" -- Ultralytics resolves
+        # these against its OWN bundled configs, leave untouched.
+        return tracker
+    candidate = CONFIGS_DIR / os.path.basename(tracker)
+    if candidate.is_file():
+        return str(candidate)
+    return tracker  # unresolvable either way -- let Ultralytics raise its own clear error

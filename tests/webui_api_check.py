@@ -423,6 +423,65 @@ def part15b_export_video_before_any_frame_is_processed_is_a_clean_error():
           "writing an empty/corrupt file — OK")
 
 
+def part16_total_duration_self_corrects_when_metadata_underestimates():
+    # Reproduces the real bug (Michele, 2026-08): a real ~1:17 video was
+    # reported as 0:59 total in the GUI -- the container's declared
+    # metadata (probe_video_metadata, read ONCE at file-pick time)
+    # underestimated the real length (variable frame rate / re-muxed
+    # file), but actual processing reads the real stream until it truly
+    # ends, so it kept going right past the displayed "end". Here: 5
+    # frames declared, but the (fake) source actually has 8.
+    def fake_generator_factory():
+        def gen():
+            for i in range(8):
+                frame = np.full((2, 2, 3), i, dtype=np.uint8)
+                yield RunnerFrame(frame=frame, rows=[], now=float(i), mode="test", people_count=0)
+        return gen()
+
+    api = Api()
+    api.player = VideoPlayer(generator_factory=fake_generator_factory)
+    api._device = "cpu"
+    api._mode = "segmentation"
+    api._total_frame_count = 5   # WRONG: container under-declared
+    api._total_duration_s = 4.0  # WRONG: container under-declared
+
+    last_status = None
+    for _ in range(8):
+        result = api.step_forward()
+        assert result["ok"] is True, result
+        last_status = result["status"]
+
+    assert last_status["total_frame_count"] == 8, last_status
+    assert last_status["total_duration_s"] == 7.0, last_status
+    print("Part 16: total_frame_count/total_duration_s self-correct upward once real "
+          "decoding proves the container's declared metadata was an underestimate — OK")
+
+
+def part16b_total_duration_left_untouched_when_metadata_was_already_accurate():
+    def fake_generator_factory():
+        def gen():
+            for i in range(5):
+                frame = np.full((2, 2, 3), i, dtype=np.uint8)
+                yield RunnerFrame(frame=frame, rows=[], now=float(i), mode="test", people_count=0)
+        return gen()
+
+    api = Api()
+    api.player = VideoPlayer(generator_factory=fake_generator_factory)
+    api._device = "cpu"
+    api._mode = "segmentation"
+    api._total_frame_count = 10   # correctly an OVER-estimate this time (never reached)
+    api._total_duration_s = 20.0
+
+    last_status = None
+    for _ in range(5):
+        result = api.step_forward()
+        last_status = result["status"]
+
+    assert last_status["total_frame_count"] == 10, last_status
+    assert last_status["total_duration_s"] == 20.0, last_status
+    print("Part 16b: an already-accurate (or over-estimated) total is left untouched — OK")
+
+
 if __name__ == "__main__":
     part1_build_player_kwargs_mirrors_app_py_defaults()
     part1b_explicit_device_passes_through_unchanged()
@@ -442,6 +501,8 @@ if __name__ == "__main__":
     part14_concurrent_seek_and_step_forward_do_not_crash()
     part15_export_video_writes_every_cached_frame()
     part15b_export_video_before_any_frame_is_processed_is_a_clean_error()
+    part16_total_duration_self_corrects_when_metadata_underestimates()
+    part16b_total_duration_left_untouched_when_metadata_was_already_accurate()
     print("\nVerification completed with no errors: webui/api.py's pure logic (parameters, frame "
           "encoding, metrics, video metadata) behaves as expected, without needing pywebview or "
           "a real window.")

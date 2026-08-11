@@ -685,6 +685,28 @@ class Api:
         return self._frame_payload(frame)
 
     def _frame_payload(self, frame: RunnerFrame) -> dict:
+        # Self-correct the known "total" if the container's declared
+        # metadata (probe_video_metadata, read ONCE when the file was
+        # picked) turns out to have UNDERESTIMATED the real length.
+        # BUG (Michele, 2026-08): a real ~1:17 video was reported as
+        # 0:59 total -- some containers/codecs (variable frame rate,
+        # re-muxed/edited files) declare a frame_count/fps in their
+        # header that doesn't match what's actually decodable, so
+        # processing (which reads the real stream until it truly ends,
+        # NOT bounded by this metadata) kept going right past the
+        # displayed "end", leaving the timeline stuck at 100% and the
+        # "current / total" timecode showing current > total. The
+        # moment we've actually decoded past what the metadata claimed,
+        # that's proof the estimate was wrong -- bump it up to match
+        # reality. Only ever grows, never shrinks below what's
+        # confirmed real, and does nothing if metadata was already
+        # accurate (or unknown, i.e. None).
+        if self.player is not None:
+            cached = self.player.cached_frame_count
+            if self._total_frame_count is not None and cached > self._total_frame_count:
+                self._total_frame_count = cached
+            if self._total_duration_s is not None and frame.now > self._total_duration_s:
+                self._total_duration_s = frame.now
         status = build_status(
             runner_frame=frame, cached_frame_count=self.player.cached_frame_count,
             latency=self._latency, device=self._device, mode=self._mode,
