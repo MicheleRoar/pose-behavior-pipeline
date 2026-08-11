@@ -130,7 +130,8 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
                               sam_chunk_store_dir: str | None = None,
                               sam_reseed_new_people: bool = True,
                               sam_redetect_every: int | None = None,
-                              sam_text_prompt: str | None = None):
+                              sam_text_prompt: str | None = None,
+                              sam_appearance_fallback: bool = True):
     """Generator holding ALL the per-frame logic of the segmentation
     pipeline (tracking, optional re-id, optional per-mask pose, overlay
     drawing), shared by `run_segmentation()` (CLI, below) and by
@@ -167,6 +168,7 @@ def iter_segmentation_frames(source, fps: float, model_name: str = "yolo26s-seg.
         sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
         sam_chunk_store_dir=sam_chunk_store_dir, sam_reseed_new_people=sam_reseed_new_people,
         sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
+        sam_appearance_fallback=sam_appearance_fallback,
     )
 
     for frame_result in tracker.run(source=source):

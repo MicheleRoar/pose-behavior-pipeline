@@ -120,6 +120,7 @@ def iter_pipeline_frames(
     seg_backend: str = "yolo", sam_chunk_size: int = 600, sam_overlap: int = 50,
     sam_chunk_store_dir: str | None = None,
     sam_redetect_every: int | None = None, sam_text_prompt: str | None = None,
+    sam_appearance_fallback: bool = True,
     # -- pose inside the mask/box, MediaPipe (used if `pose_backend` is
     # "mediapipe" -- see pose/mediapipe_pose.py and _iter_segmentation /
     # _iter_pose_mediapipe) --
@@ -213,6 +214,7 @@ def iter_pipeline_frames(
             seg_backend=seg_backend, sam_chunk_size=sam_chunk_size,
             sam_overlap=sam_overlap, sam_chunk_store_dir=sam_chunk_store_dir,
             sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
+            sam_appearance_fallback=sam_appearance_fallback,
             session_mode=session_mode, flag_uncertain=flag_uncertain,
             use_appearance_embedding=use_appearance_embedding,
             embedding_device=embedding_device,
@@ -242,7 +244,7 @@ def iter_pipeline_frames(
                 mediapipe_pose_estimator=mediapipe_pose_estimator,
                 backend=seg_backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
                 sam_chunk_store_dir=sam_chunk_store_dir, sam_redetect_every=sam_redetect_every,
-                sam_text_prompt=sam_text_prompt,
+                sam_text_prompt=sam_text_prompt, sam_appearance_fallback=sam_appearance_fallback,
             ):
                 yield RunnerFrame(frame=vis, rows=rows, now=now, mode="both", people_count=len(rows))
         else:
@@ -259,6 +261,7 @@ def iter_pipeline_frames(
                 seg_backend=seg_backend, sam_chunk_size=sam_chunk_size,
                 sam_overlap=sam_overlap, sam_chunk_store_dir=sam_chunk_store_dir,
                 sam_redetect_every=sam_redetect_every, sam_text_prompt=sam_text_prompt,
+                sam_appearance_fallback=sam_appearance_fallback,
                 session_mode=session_mode, flag_uncertain=flag_uncertain,
                 use_appearance_embedding=use_appearance_embedding,
                 embedding_device=embedding_device,
@@ -362,7 +365,7 @@ def _iter_segmentation(*, source, fps, device, seg_model, max_people,
                         conf_threshold, tracker_config,
                         seg_backend="yolo", sam_chunk_size=600, sam_overlap=50,
                         sam_chunk_store_dir=None, sam_redetect_every=None,
-                        sam_text_prompt=None,
+                        sam_text_prompt=None, sam_appearance_fallback=True,
                         session_mode: SessionMode = SessionMode.MULTIPLE,
                         flag_uncertain: bool = True,
                         use_appearance_embedding: bool = False,
@@ -386,7 +389,7 @@ def _iter_segmentation(*, source, fps, device, seg_model, max_people,
         mediapipe_pose_estimator=mediapipe_pose_estimator,
         backend=seg_backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
         sam_chunk_store_dir=sam_chunk_store_dir, sam_redetect_every=sam_redetect_every,
-        sam_text_prompt=sam_text_prompt,
+        sam_text_prompt=sam_text_prompt, sam_appearance_fallback=sam_appearance_fallback,
     ):
         # In segmentation there's no sliding window: one row per tracked
         # person per frame, so len(rows) is already the exact count.
@@ -401,6 +404,7 @@ def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
                tracker_config, seg_backend="yolo", sam_chunk_size=600,
                sam_overlap=50, sam_chunk_store_dir=None,
                sam_redetect_every=None, sam_text_prompt=None,
+               sam_appearance_fallback=True,
                session_mode: SessionMode = SessionMode.MULTIPLE,
                flag_uncertain: bool = True,
                reid_max_lost_seconds: float = 180.0,
@@ -457,7 +461,7 @@ def _iter_both(*, source, fps, device, pose_model, with_hands, hand_model,
         max_people=max_people, seg_reidentifier=seg_reidentifier,
         backend=seg_backend, sam_chunk_size=sam_chunk_size, sam_overlap=sam_overlap,
         sam_chunk_store_dir=sam_chunk_store_dir, sam_redetect_every=sam_redetect_every,
-        sam_text_prompt=sam_text_prompt,
+        sam_text_prompt=sam_text_prompt, sam_appearance_fallback=sam_appearance_fallback,
     )
 
     # zip() (not zip_longest): if the two independent sources were to
