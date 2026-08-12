@@ -56,6 +56,7 @@ from gui.video_player import VideoPlayer
 from common.device import detect_default_device  # only the function: doesn't import torch
                                                     # until it's CALLED (see below)
 from webui.local_media_server import LocalMediaServer
+from common.video_writer import open_annotated_video_writer
 from pose.identity_manager import IdentityMode, SessionMode, wants_reid_engine
 from pose.appearance_embedding import torchreid_available  # only the lightweight check: doesn't import torch
 
@@ -632,17 +633,27 @@ class Api:
             frames = self.player.all_frames()
         height, width = frames[0].shape[:2]
         fps = self._source_fps or 15.0
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
-        if not writer.isOpened():
-            return {"ok": False, "error": f"Could not open '{path}' for writing "
-                                           f"(unsupported codec/container for this platform?)."}
+        try:
+            writer, codec = open_annotated_video_writer(path, fps, width, height)
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc)}
         try:
             for frame in frames:
                 writer.write(frame)
         finally:
             writer.release()
-        return {"ok": True, "frames": len(frames)}
+        result = {"ok": True, "frames": len(frames), "codec": codec}
+        if codec == "mpeg4":
+            # See common/video_writer.py: opened fine, but this file will
+            # likely not play back in the Compare runs window on Linux --
+            # tell the user now instead of them discovering a silent
+            # black box later.
+            result["warning"] = (
+                "Saved, but this machine has no H.264 encoder available -- "
+                "the file was written with an older codec that may not play "
+                "in the 'Compare runs' window on Linux."
+            )
+        return result
 
     # ------------------------------------------------------------ internal
     def _advance(self, *, back: bool) -> dict:

@@ -82,9 +82,8 @@ import argparse
 import os
 import time
 
-import cv2
-
 from common.device import detect_default_device
+from common.video_writer import open_annotated_video_writer
 from gui.pipeline_runner import iter_pipeline_frames
 
 CONFIGS = [
@@ -139,6 +138,7 @@ def export_one(config: dict, *, source, fps: float, device: str,
     print(f"    -> {out_path}")
 
     writer = None
+    codec = None
     n_frames = 0
     t_start = time.time()
     try:
@@ -155,13 +155,7 @@ def export_one(config: dict, *, source, fps: float, device: str,
         ):
             if writer is None:
                 height, width = frame.frame.shape[:2]
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
-                if not writer.isOpened():
-                    raise RuntimeError(
-                        f"could not open {out_path!r} for writing (unsupported "
-                        f"codec/container for this platform?)"
-                    )
+                writer, codec = open_annotated_video_writer(out_path, fps, width, height)
             writer.write(frame.frame)
             n_frames += 1
             if n_frames % 150 == 0:
@@ -173,7 +167,7 @@ def export_one(config: dict, *, source, fps: float, device: str,
     elapsed = time.time() - t_start
     fps_processed = n_frames / elapsed if elapsed > 0 else 0.0
     print(f"    done: {n_frames} frames written ({elapsed:.1f}s wall-clock, "
-          f"{fps_processed:.1f} fps)")
+          f"{fps_processed:.1f} fps, codec={codec})")
     return out_path
 
 

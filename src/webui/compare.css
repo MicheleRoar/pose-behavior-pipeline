@@ -80,8 +80,21 @@ html, body { overflow: auto; }
   position: absolute;
   color: var(--text-faint);
   font-size: 12.5px;
+  text-align: center;
+  max-width: 90%;
 }
 .compare-video-wrap.has-video .compare-video-placeholder { display: none; }
+
+/* Shown instead of "has-video" when a video's src was set but it never
+   actually became playable (wrong codec, 404, etc. -- see compare.js's
+   `error` listener). Deliberately kept VISIBLE even though a video may
+   technically be "loaded" in the sense that state.loaded[slot] is true
+   (src assigned) -- that flag only means "a file was picked", not "it
+   plays", see the loaded-vs-playable distinction in compare.js. */
+.compare-video-placeholder.is-error {
+  display: block;
+  color: var(--danger);
+}
 
 .compare-transport { flex-shrink: 0; }
 

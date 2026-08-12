@@ -734,7 +734,10 @@
       if (!path) return;
       setStatusPill("Saving video…", "idle");
       const result = await api().export_video(path);
-      setStatusPill(result.ok ? `Saved ${result.frames} frames` : (result.error || "Save failed"), "idle");
+      const message = result.ok
+        ? (result.warning || `Saved ${result.frames} frames`)
+        : (result.error || "Save failed");
+      setStatusPill(message, "idle");
     } catch (err) {
       setStatusPill(String(err.message || err), "idle");
     }
