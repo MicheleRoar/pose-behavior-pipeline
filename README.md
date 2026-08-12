@@ -23,14 +23,15 @@ This repo actually holds **two separate efforts** sharing one `src/`:
    `psifx_eval/`) — the behavioural-marker pipeline described in the
    rest of this README.
 2. **`src/psifx_eval/`** — unrelated to the pipeline above. A separate
-   evaluation framework built to reproduce and measure
-   [psifx](https://github.com/psifx/psifx)'s real SAM3 cross-chunk ID
-   persistence behaviour (the CHUV production toolkit), against a
-   continuous "oracle" run, plus an overlapping-chunks alternative
-   stitching strategy. Not runnable in this dev sandbox (needs the
-   real `psifx` package, CUDA, gated SAM3 checkpoint access) — see
-   that package's own module docstrings, in particular
-   `run_baseline_vs_oracle.py`, for the full methodology.
+   evaluation framework measuring cross-chunk ID persistence: real
+   psifx+SAM3 (the CHUV production toolkit) against a continuous
+   "oracle" run, this repo's own native SAM 3.1 tracker
+   (`segmentation/sam31_estimation.py`, with/without OSNet appearance
+   fallback) against that same oracle, plus an overlapping-chunks
+   alternative stitching strategy for psifx's own SAM3 path. Not
+   runnable in this dev sandbox (needs the real `psifx` package or
+   `sam3` package, CUDA, gated SAM3 checkpoint access) — see each
+   script's own module docstring for its exact methodology.
 
 ## Structure
 
@@ -43,7 +44,6 @@ pose-behavior-pipeline/
 │   ├── pipeline.py                # batch CLI (pose-based, on hold)
 │   ├── live_demo.py               # real-time CLI (pose-based, on hold)
 │   ├── benchmark_backends.py      # compares tracking backends side by side
-│   ├── export_backend_comparisons.py # batch-exports the 4 SAM ablation configs
 │   ├── gui/                       # shared player/dispatch logic behind the GUI
 │   ├── webui/                     # "Behaviour Vision Lab" GUI (pywebview + HTML/CSS/JS)
 │   ├── segmentation/              # ACTIVE library: silhouettes only, no keypoints
@@ -66,11 +66,12 @@ pose-behavior-pipeline/
 │   │   ├── chuv_features.py       # reference-pipeline feature set, replicated in real time
 │   │   └── anonymize.py           # face blurring
 │   ├── psifx_eval/                 # SEPARATE effort — see note above, not part of the pipeline
-│   │   ├── run_baseline_vs_oracle.py     # Experiment 1: real psifx vs continuous oracle
-│   │   ├── compare_sam3_checkpoints.py   # SAM3 vs SAM3.1 checkpoint comparison
-│   │   ├── run_overlap_experiment.py     # Experiment 2: vanilla psifx vs overlap strategy
+│   │   ├── run_sam31_native.py           # SAM 3.1 native tracker vs the oracle (with/without OSNet)
+│   │   ├── run_overlap_experiment.py     # vanilla psifx vs overlapping-chunks stitching strategy
 │   │   ├── overlap_tracking.py           # real SAM3 glue for the overlap strategy
 │   │   ├── overlap_strategy.py           # pure algorithmic core (unit-testable, no psifx/GPU)
+│   │   ├── visualize_masks.py            # renders MaskDir overlays for the GUI's Compare runs window
+│   │   ├── video_probe.py                # shared video-metadata helper
 │   │   ├── id_metrics.py                 # cross-chunk ID persistence metrics
 │   │   └── mask_io.py                    # MaskDir (psifx output format) I/O
 │   ├── common/                    # shared: device detection, model-path resolution, drawing

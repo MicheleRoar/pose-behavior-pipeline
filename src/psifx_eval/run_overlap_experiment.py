@@ -43,7 +43,7 @@ import json
 import os
 from pathlib import Path
 
-from psifx_eval.run_baseline_vs_oracle import _probe_total_frames
+from psifx_eval.video_probe import probe_total_frames
 
 
 def run_overlap_experiment(
@@ -71,7 +71,7 @@ def run_overlap_experiment(
     overlap_mask_dir = out_dir_path / "overlap_strategy" / "MaskDir"
 
     if oracle_chunk_size is None:
-        total_frames = _probe_total_frames(video_path)
+        total_frames = probe_total_frames(video_path)
         oracle_chunk_size = total_frames + 1
         print(f"[run_overlap_experiment] auto-detected {total_frames} frames -> "
               f"oracle chunk_size={oracle_chunk_size}")

@@ -87,9 +87,9 @@ def run_sam31_and_write_maskdir(
     video length, matching real psifx's own invariant (see module
     docstring) that `mask_io.load_mask_dir()` depends on."""
     from segmentation.sam31_estimation import Sam31Tracker
-    from psifx_eval.run_baseline_vs_oracle import _probe_total_frames
+    from psifx_eval.video_probe import probe_total_frames
 
-    total_frames = _probe_total_frames(video_path)
+    total_frames = probe_total_frames(video_path)
 
     cap = cv2.VideoCapture(video_path)
     try:
