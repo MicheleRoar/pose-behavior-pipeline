@@ -28,7 +28,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 from segmentation.chunk_store import load_chunk  # noqa: E402
 from segmentation.sam_backend import ChunkedVideoPredictorBackend, _to_boolean_mask  # noqa: E402

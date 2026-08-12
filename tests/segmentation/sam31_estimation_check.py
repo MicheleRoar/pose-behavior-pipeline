@@ -29,7 +29,7 @@ import tempfile
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 from segmentation.sam31_estimation import Sam31Tracker  # noqa: E402
 

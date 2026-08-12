@@ -15,7 +15,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 from segmentation.chunking import (  # noqa: E402
     GlobalIdAllocator, estimate_velocities, iter_chunk_ranges, polygon_iou, reconcile_ids,

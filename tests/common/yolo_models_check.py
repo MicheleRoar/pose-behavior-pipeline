@@ -13,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 
 from common.yolo_models import CONFIGS_DIR, resolve_tracker_config, resolve_yolo_weights
 

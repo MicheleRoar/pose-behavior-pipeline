@@ -15,7 +15,7 @@ import tempfile
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 from segmentation.chunk_store import load_chunk, save_chunk  # noqa: E402
 from segmentation.seg_estimation import SegFrameResult  # noqa: E402

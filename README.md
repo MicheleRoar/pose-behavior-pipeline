@@ -17,6 +17,21 @@ is to reattach pose *inside* the tracked silhouette (see
 `segmentation/seg_estimation.py`). The pose-based pipeline
 (`pipeline.py`, `live_demo.py`, `pose/`) stays in the repo, on hold.
 
+This repo actually holds **two separate efforts** sharing one `src/`:
+
+1. **The pose/segmentation pipeline** (everything below except
+   `psifx_eval/`) — the behavioural-marker pipeline described in the
+   rest of this README.
+2. **`src/psifx_eval/`** — unrelated to the pipeline above. A separate
+   evaluation framework built to reproduce and measure
+   [psifx](https://github.com/psifx/psifx)'s real SAM3 cross-chunk ID
+   persistence behaviour (the CHUV production toolkit), against a
+   continuous "oracle" run, plus an overlapping-chunks alternative
+   stitching strategy. Not runnable in this dev sandbox (needs the
+   real `psifx` package, CUDA, gated SAM3 checkpoint access) — see
+   that package's own module docstrings, in particular
+   `run_baseline_vs_oracle.py`, for the full methodology.
+
 ## Structure
 
 ```
@@ -27,6 +42,8 @@ pose-behavior-pipeline/
 │   ├── track_stability_check.py   # ACTIVE diagnostic: id count/lifespan
 │   ├── pipeline.py                # batch CLI (pose-based, on hold)
 │   ├── live_demo.py               # real-time CLI (pose-based, on hold)
+│   ├── benchmark_backends.py      # compares tracking backends side by side
+│   ├── export_backend_comparisons.py # batch-exports the 4 SAM ablation configs
 │   ├── gui/                       # shared player/dispatch logic behind the GUI
 │   ├── webui/                     # "Behaviour Vision Lab" GUI (pywebview + HTML/CSS/JS)
 │   ├── segmentation/              # ACTIVE library: silhouettes only, no keypoints
@@ -48,12 +65,27 @@ pose-behavior-pipeline/
 │   │   ├── appearance_embedding.py # OSNet embedding signal + EMA gallery
 │   │   ├── chuv_features.py       # reference-pipeline feature set, replicated in real time
 │   │   └── anonymize.py           # face blurring
+│   ├── psifx_eval/                 # SEPARATE effort — see note above, not part of the pipeline
+│   │   ├── run_baseline_vs_oracle.py     # Experiment 1: real psifx vs continuous oracle
+│   │   ├── compare_sam3_checkpoints.py   # SAM3 vs SAM3.1 checkpoint comparison
+│   │   ├── run_overlap_experiment.py     # Experiment 2: vanilla psifx vs overlap strategy
+│   │   ├── overlap_tracking.py           # real SAM3 glue for the overlap strategy
+│   │   ├── overlap_strategy.py           # pure algorithmic core (unit-testable, no psifx/GPU)
+│   │   ├── id_metrics.py                 # cross-chunk ID persistence metrics
+│   │   └── mask_io.py                    # MaskDir (psifx output format) I/O
 │   ├── common/                    # shared: device detection, model-path resolution, drawing
 │   └── configs/
 │       ├── bytetrack.yaml             # Ultralytics' unmodified default, kept for reference
 │       └── bytetrack_permissive.yaml  # tuned variant for hard scenes
 ├── models/                        # auto-downloaded weights — gitignored, not code
-└── tests/                          # camera-free tests for every module above
+└── tests/                          # camera-free tests, mirrors src/'s package layout
+    ├── pose/                       # pose/ tests
+    ├── segmentation/               # segmentation/ tests
+    ├── psifx_eval/                 # psifx_eval/ tests (algorithmic core only, no psifx/GPU)
+    ├── common/                     # common/ tests
+    ├── gui/                        # gui/ tests
+    ├── webui/                      # webui/ tests
+    └── pipeline/                   # top-level script tests (benchmark_backends.py, etc.)
 ```
 
 ## Setup
@@ -90,7 +122,7 @@ why SAMURAI was dropped for vanilla SAM2.
 
 Not yet run against the real `sam3`/`sam2` API in this environment (no
 CUDA here) — verified against a fake predictor only
-(`demo/sam_backend_check.py`). Check `_init_state()` /
+(`tests/segmentation/sam_backend_check.py`). Check `_init_state()` /
 `_add_box_prompt()` / `_propagate()` against the real API before
 relying on it.
 

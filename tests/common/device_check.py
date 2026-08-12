@@ -22,7 +22,7 @@ import sys
 import types
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 
 
 def _install_fake_torch(*, cuda_available: bool, mps_available: bool | None):

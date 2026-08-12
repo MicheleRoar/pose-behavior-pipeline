@@ -18,7 +18,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 import benchmark_backends as bb  # noqa: E402
 from segmentation.seg_estimation import SegFrameResult  # noqa: E402
