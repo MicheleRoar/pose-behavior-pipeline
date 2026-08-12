@@ -55,6 +55,7 @@ from gui.pipeline_runner import iter_pipeline_frames, RunnerFrame
 from gui.video_player import VideoPlayer
 from common.device import detect_default_device  # only the function: doesn't import torch
                                                     # until it's CALLED (see below)
+from webui.local_media_server import LocalMediaServer
 from pose.identity_manager import IdentityMode, SessionMode, wants_reid_engine
 from pose.appearance_embedding import torchreid_available  # only the lightweight check: doesn't import torch
 
@@ -799,21 +800,33 @@ class CompareApi:
     Deliberately tiny and separate from `Api`: the compare window plays
     already-exported MP4 files directly via HTML5 `<video>`, no
     inference/VideoPlayer/playback thread involved -- the only thing
-    Python needs to do for it is the native "pick a video file"
-    dialog, everything else (loading, sync playback, scrubbing) happens
-    entirely in compare.js against the browser's own video decoder."""
+    Python needs to do for it is the native "pick a video file" dialog
+    and serving the picked file over a local HTTP server (see
+    `local_media_server.py` for why a plain `file://` src doesn't work
+    on every platform -- BUG, Michele 2026-08, Linux/CUDA machine:
+    "Not allowed to load local resource"), everything else (loading,
+    sync playback, scrubbing) happens entirely in compare.js against the
+    browser's own video decoder."""
 
     def __init__(self) -> None:
         self.window = None  # set by Api.open_compare_window() right after create_window()
+        self._media_server: LocalMediaServer | None = None
 
     def set_window(self, window) -> None:
         self.window = window
 
-    def pick_video_path(self) -> str | None:
+    def pick_video_path(self) -> dict | None:
         """Generic "pick any video file" dialog -- unlike
         `Api.pick_video_file()`, does NOT probe/return container
         metadata (frame count/fps/duration): the compare window doesn't
-        need it, playback is handled natively by the <video> element."""
+        need it, playback is handled natively by the <video> element.
+
+        Returns `{"path": <real filesystem path>, "url": <http://127.0.0.1:.../...
+        the <video> element should actually use as its src>}` -- the
+        server is created lazily (once per CompareApi/window, reused
+        across multiple pick_video_path() calls for the 4 slots) so
+        opening the compare window with no intention of loading a video
+        never spins up a server for nothing."""
         import webview
         if self.window is None:
             return None
@@ -823,4 +836,7 @@ class CompareApi:
         )
         if not result:
             return None
-        return result[0] if not isinstance(result, str) else result
+        path = result[0] if not isinstance(result, str) else result
+        if self._media_server is None:
+            self._media_server = LocalMediaServer()
+        return {"path": path, "url": self._media_server.url_for(path)}

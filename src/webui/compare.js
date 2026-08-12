@@ -160,21 +160,20 @@
     }
   }
 
-  // Turns a filesystem path (as returned by the native file dialog) into
-  // a file:// URL a <video> element can load. Assumes forward-slash
-  // paths (macOS/Linux, consistent with the rest of this project's
-  // target platforms, see README) -- would need adjusting for Windows
-  // backslash paths.
-  function pathToFileUrl(path) {
-    return "file://" + path.split("/").map(encodeURIComponent).join("/");
-  }
-
   async function loadIntoSlot(slot) {
     try {
-      const path = await api().pick_video_path();
-      if (!path) return;
+      // pick_video_path() returns {"path": ..., "url": "http://127.0.0.1:.../..."}
+      // -- NOT a plain file:// URL (BUG, Michele 2026-08, real Linux
+      // machine: "Not allowed to load local resource" -- WebKitGTK/Qt,
+      // pywebview's Linux backends, refuse to load a file:// resource
+      // from a page itself served over file://, unlike macOS's
+      // WKWebView). Python serves the picked file over a tiny local
+      // HTTP server instead (see webui/local_media_server.py), which
+      // works identically on every platform/backend.
+      const result = await api().pick_video_path();
+      if (!result) return;
       const el = videoEl(slot);
-      el.src = pathToFileUrl(path);
+      el.src = result.url;
       state.loaded[slot] = true;
       wrapEl(slot).classList.add("has-video");
       updateStatus();
