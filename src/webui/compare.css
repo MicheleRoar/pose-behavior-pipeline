@@ -90,8 +90,16 @@ html, body { overflow: auto; }
    `error` listener). Deliberately kept VISIBLE even though a video may
    technically be "loaded" in the sense that state.loaded[slot] is true
    (src assigned) -- that flag only means "a file was picked", not "it
-   plays", see the loaded-vs-playable distinction in compare.js. */
-.compare-video-placeholder.is-error {
+   plays", see the loaded-vs-playable distinction in compare.js.
+
+   BUG (Michele, 2026-08): this rule alone never actually appeared --
+   `.compare-video-wrap.has-video .compare-video-placeholder` above has
+   HIGHER specificity (3 classes vs. 2), so its `display: none` silently
+   won even when `is-error` was applied. Repeating the `.has-video`
+   ancestor here (4 classes) beats it deterministically instead of
+   relying on source order (fragile, breaks the next time either rule
+   is touched). */
+.compare-video-wrap.has-video .compare-video-placeholder.is-error {
   display: block;
   color: var(--danger);
 }
