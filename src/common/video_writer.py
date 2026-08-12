@@ -1,8 +1,8 @@
 """
 common/video_writer.py
 ========================
-Opens a `cv2.VideoWriter` for annotated-output MP4s, preferring a real
-H.264 encoder ('avc1' fourcc) over OpenCV's default 'mp4v'.
+Opens a `cv2.VideoWriter` for annotated-output videos, preferring VP9/
+WebM over H.264/MP4 or the old MPEG-4 Part 2 'mp4v' default.
 
 Why this exists (Michele, 2026-08): the Compare runs window's videos
 loaded fine on Linux once compare.js was switched from file:// to a
@@ -10,61 +10,90 @@ local HTTP server (see local_media_server.py), but pressing Play did
 nothing -- no error anywhere, just a black box. Root cause, confirmed
 with `ffprobe` on a file exported by `Api.export_video()`:
 `cv2.VideoWriter_fourcc(*"mp4v")` does NOT produce H.264 -- it produces
-`codec_name=mpeg4` (old MPEG-4 Part 2 / DivX-era). No mainstream browser
-engine's <video> tag decodes that codec; Chromium/WebKit only support
-H.264/H.265/VP8/VP9/AV1. This silently "worked" on macOS because
-WKWebView plays video through AVFoundation, which still has legacy
-MPEG-4 Part 2 decode support built into the OS -- Linux's GStreamer-based
-decoders (used by both WebKitGTK and QtWebEngine) generally don't, so the
-file loaded (no permission error) but simply couldn't be decoded, and
-`el.play()` failed silently (see compare.js's `.catch(() => {})`).
+`codec_name=mpeg4` (old MPEG-4 Part 2 / DivX-era), which no mainstream
+browser engine's <video> tag decodes.
 
-'avc1' is the standard fourcc for real H.264 in an MP4 container --
-playable everywhere IF OpenCV's FFmpeg build actually has a usable H.264
-ENCODER (needs libx264 or a driveable hardware encoder -- NOT guaranteed
-on every machine/OpenCV build, confirmed in this project's own sandbox:
-'avc1'/'H264'/'X264' all fail to open here, only 'mp4v' does). So this
-tries 'avc1' first and only falls back to 'mp4v' -- loudly, with a
-printed warning -- rather than silently producing another unplayable
-file, which is exactly the failure mode this module exists to catch.
+Why VP9/WebM and not just switch to real H.264: this project pins
+`pywebview[qt]` on Linux (see requirements.txt) -- the Compare window's
+video engine there is QtWebEngine (PyQtWebEngine's bundled Chromium).
+Confirmed (Qt's own docs/mailing list, 2026-08): the STOCK pip-installed
+PyQtWebEngine build never includes H.264 decode at all, on any Linux
+distro, regardless of what's installed system-wide -- it's excluded for
+patent-licensing reasons and only re-appears if PyQtWebEngine itself is
+rebuilt from source with `-webengine-proprietary-codecs` (a heavy,
+fragile, machine-specific rebuild, not a `sudo apt install`). VP9 (in a
+WebM container) is royalty-free and IS included in every stock
+open-source Chromium/QtWebEngine build -- no system package, no
+rebuild, works out of the box on any Linux machine running this
+project's pinned pywebview[qt]. It also decodes fine in Safari/WKWebView
+(macOS, VP9 support since Safari 14.1) so this doesn't regress the Mac
+side either.
+
+'avc1' (real H.264) and 'mp4v' (MPEG-4 Part 2) remain as fallbacks, in
+that order, ONLY for the rare case this machine's OpenCV/FFmpeg build
+has no usable VP9 ENCODER (unlikely: libvpx is bundled in virtually
+every FFmpeg build, unlike the often-excluded libx264 -- confirmed by
+testing in this project's own sandbox, which has no H.264 encoder at
+all but DOES have a working VP9 one).
 """
 
 from __future__ import annotations
 
+import os
+
 import cv2
 
-# Tried in order; first one whose VideoWriter actually opens wins. 'avc1'
-# is real H.264 (what browsers need); 'mp4v' is the guaranteed-available
-# fallback (works with any FFmpeg build) but produces browser-incompatible
-# MPEG-4 Part 2 -- see module docstring.
-_CANDIDATES = (("avc1", "h264"), ("mp4v", "mpeg4"))
+# Tried in order; first one whose VideoWriter actually opens wins. Each
+# entry is (fourcc, container extension, codec label) -- the extension
+# MUST match the codec's container, so `open_annotated_video_writer` may
+# return a different path than the one it was asked for (see its
+# docstring: always use the returned `actual_path`).
+_CANDIDATES = (
+    ("VP90", ".webm", "vp9"),    # preferred: royalty-free, works everywhere this
+                                  # project runs without any system package -- see
+                                  # module docstring.
+    ("avc1", ".mp4", "h264"),    # real H.264, if this machine happens to have an
+                                  # encoder for it (still useless for the Compare
+                                  # window on this project's Linux/Qt setup, see
+                                  # above, but harmless to prefer over mpeg4 for
+                                  # anything else that opens the file).
+    ("mp4v", ".mp4", "mpeg4"),   # last resort -- opens on almost any FFmpeg build,
+                                  # but NOT decodable by <video> pretty much anywhere
+                                  # modern, see warning below.
+)
 
 
 def open_annotated_video_writer(path: str, fps: float, width: int, height: int):
-    """Returns `(writer, codec_label)` where `codec_label` is `"h264"` or
-    `"mpeg4"` (the latter meaning: opened, but likely won't play back in
-    an HTML5 `<video>` element on Linux -- see module docstring; callers
-    should surface this to the user, not just silently accept it).
-    Raises `RuntimeError` if no candidate opens at all (e.g. an
+    """Returns `(writer, actual_path, codec_label)`. `path`'s extension
+    is only a hint for the preferred candidate (VP9/.webm) -- if a
+    fallback is needed, the extension is swapped to match ITS container
+    (a codec must match its container). ALWAYS use `actual_path`, not
+    the `path` that was passed in, for anything shown to the user or
+    reopened later -- it can differ if a fallback kicked in.
+    `codec_label` is `"vp9"`, `"h264"`, or `"mpeg4"` (the last one
+    printed as a loud warning -- see below -- since it means this file
+    will likely NOT play back in this project's Compare runs window on
+    Linux). Raises `RuntimeError` if no candidate opens at all (e.g. an
     unwritable path)."""
-    for fourcc_str, label in _CANDIDATES:
+    stem = os.path.splitext(path)[0]
+    for fourcc_str, ext, label in _CANDIDATES:
+        actual_path = stem + ext
         fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
-        writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
+        writer = cv2.VideoWriter(actual_path, fourcc, fps, (width, height))
         if writer.isOpened():
             if label == "mpeg4":
                 print(
-                    f"[video_writer] WARNING: no H.264 encoder available in this "
-                    f"OpenCV/FFmpeg build -- falling back to 'mp4v' (MPEG-4 Part 2) "
-                    f"for {path!r}. This file will likely NOT play in an HTML5 "
-                    f"<video> element on Linux (GStreamer-based decoders there "
-                    f"typically lack MPEG-4 Part 2 support, even though the file "
-                    f"itself is perfectly valid) -- install/build FFmpeg with "
-                    f"libx264 to get real H.264 output instead."
+                    f"[video_writer] WARNING: no VP9 or H.264 encoder available in "
+                    f"this OpenCV/FFmpeg build -- falling back to 'mp4v' (MPEG-4 "
+                    f"Part 2) for {actual_path!r}. This file will likely NOT play "
+                    f"in the Compare runs window on Linux (see common/video_writer.py "
+                    f"module docstring) -- install/build FFmpeg with libvpx (VP9) or "
+                    f"libx264 (H.264) to fix this."
                 )
-            return writer, label
+            return writer, actual_path, label
         writer.release()
     raise RuntimeError(
-        f"Could not open {path!r} for writing with either an H.264 or MPEG-4 "
-        f"encoder (unwritable path, or no working video encoder in this "
-        f"OpenCV/FFmpeg build at all)."
+        f"Could not open {path!r} for writing with a VP9, H.264, or MPEG-4 encoder "
+        f"(unwritable path, or no working video encoder in this OpenCV/FFmpeg build "
+        f"at all)."
     )

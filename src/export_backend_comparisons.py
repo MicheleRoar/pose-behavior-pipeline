@@ -2,10 +2,13 @@
 export_backend_comparisons.py
 ================================
 Runs the SAME video through 4 fixed SAM 3.1 configurations (see CONFIGS
-below, agreed with Michele 2026-08) and writes one annotated MP4 per
+below, agreed with Michele 2026-08) and writes one annotated video per
 configuration -- ready to load side by side into the webui's "Compare
 runs" window (see webui/api.py::Api.open_compare_window / compare.html)
-to eyeball which combination keeps identities the most stable.
+to eyeball which combination keeps identities the most stable. Written
+as VP9/.webm by default (see common/video_writer.py for why: this
+project's Linux pywebview[qt] backend can't decode H.264 out of the box,
+VP9 can, no extra codec install needed).
 
 Unlike `benchmark_backends.py` (fast, no overlay, quantitative CSV only:
 n_raw_ids/track lifespans/fps), this script goes through the REAL
@@ -133,12 +136,16 @@ def export_one(config: dict, *, source, fps: float, device: str,
     webui/api.py, just without a `VideoPlayer` cache in front of it since
     nothing here needs to support seeking/replay, only a single forward
     pass."""
-    out_path = os.path.join(out_dir, f"{config['label']}.mp4")
+    # ".webm" is only a HINT here -- open_annotated_video_writer() picks
+    # the real container/extension based on which codec actually opens
+    # (VP9/.webm preferred, see common/video_writer.py), so the final
+    # path can differ from this one; always use the returned `out_path`.
+    out_path_hint = os.path.join(out_dir, f"{config['label']}.webm")
     print(f"\n=== {config['label']}: {config['description']} ===")
-    print(f"    -> {out_path}")
 
     writer = None
     codec = None
+    out_path = out_path_hint
     n_frames = 0
     t_start = time.time()
     try:
@@ -155,7 +162,9 @@ def export_one(config: dict, *, source, fps: float, device: str,
         ):
             if writer is None:
                 height, width = frame.frame.shape[:2]
-                writer, codec = open_annotated_video_writer(out_path, fps, width, height)
+                writer, out_path, codec = open_annotated_video_writer(
+                    out_path_hint, fps, width, height)
+                print(f"    -> {out_path}")
             writer.write(frame.frame)
             n_frames += 1
             if n_frames % 150 == 0:

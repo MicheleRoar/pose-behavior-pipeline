@@ -392,14 +392,21 @@ def part15_export_video_writes_every_cached_frame():
     for _ in range(12):
         api.player.step_forward()
 
-    out_path = tempfile.mktemp(suffix=".mp4")
+    requested_path = tempfile.mktemp(suffix=".mp4")
+    actual_path = requested_path  # overwritten below once we know it (may differ, see result["path"])
     try:
-        result = api.export_video(out_path)
+        result = api.export_video(requested_path)
         assert result["ok"] is True, result
         assert result["frames"] == 12, result
-        assert os.path.exists(out_path) and os.path.getsize(out_path) > 0, "expected a non-empty video file"
+        # NOT necessarily requested_path: open_annotated_video_writer()
+        # (common/video_writer.py) may have swapped the extension to
+        # match whichever codec actually opened (VP9 -> .webm preferred,
+        # see there) -- always trust the returned "path".
+        actual_path = result["path"]
+        assert os.path.exists(actual_path) and os.path.getsize(actual_path) > 0, \
+            "expected a non-empty video file"
 
-        cap = cv2.VideoCapture(out_path)
+        cap = cv2.VideoCapture(actual_path)
         try:
             written_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             written_fps = cap.get(cv2.CAP_PROP_FPS)
@@ -408,8 +415,8 @@ def part15_export_video_writes_every_cached_frame():
         assert written_count == 12, f"expected 12 frames written, container reports {written_count}"
         assert abs(written_fps - 12.0) < 0.5, f"expected ~12 fps (the run's configured fps), found {written_fps}"
     finally:
-        if os.path.exists(out_path):
-            os.remove(out_path)
+        if os.path.exists(actual_path):
+            os.remove(actual_path)
     print("Part 15: export_video() writes every cached annotated frame to a playable video "
           "at the run's configured fps — OK")
 

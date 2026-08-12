@@ -195,8 +195,9 @@
       case 2: return "Network error while loading the video (local server unreachable?).";
       case 3: return "The video data is corrupted and could not be decoded.";
       case 4: return "This video's codec isn't supported by this system's video player "
-        + "(common on Linux for older codecs -- try re-exporting; see the terminal log "
-        + "for which codec was used).";
+        + "(likely an H.264/.mp4 or old mpeg4 file -- re-export it: this project now "
+        + "prefers VP9/.webm, which plays here without extra codec installs, see "
+        + "common/video_writer.py).";
       default: return "Unknown playback error.";
     }
   }

@@ -2,16 +2,27 @@
 video_writer_check.py
 =======================
 Verifies `common/video_writer.py::open_annotated_video_writer` -- the
-fix for a real bug (Michele, 2026-08): annotated videos exported by
-`Api.export_video()` / `export_backend_comparisons.py` used
-`cv2.VideoWriter_fourcc(*"mp4v")`, which produces MPEG-4 Part 2, not
-H.264 -- undecodable by an HTML5 <video> element on Linux (see the
-module docstring for the full story). This only checks that the
-function opens SOME working writer and reports which codec it actually
-used -- it does NOT assert which codec wins on any given machine (that
-depends on the local OpenCV/FFmpeg build, e.g. this sandbox has no
-libx264 and always falls back to 'mpeg4', see part1's assertion is
-deliberately permissive about that).
+fix for two real bugs found together (Michele, 2026-08):
+
+1. Annotated videos exported by `Api.export_video()` /
+   `export_backend_comparisons.py` used `cv2.VideoWriter_fourcc(*"mp4v")`,
+   which produces MPEG-4 Part 2, not H.264 -- undecodable by pretty much
+   any modern browser engine.
+2. Switching to real H.264 wouldn't have fully fixed it anyway: this
+   project's Linux backend (pywebview[qt] -> QtWebEngine) never includes
+   H.264 in its stock pip build at all (patent licensing). VP9/.webm is
+   royalty-free and IS included -- see the module docstring for the full
+   story.
+
+This checks that the function opens SOME working writer, reports which
+codec it actually used, and returns the RIGHT extension for that codec
+(not just whatever was passed in) -- it does NOT assert which codec wins
+on any given machine (that depends on the local OpenCV/FFmpeg build).
+This sandbox happens to have a working VP9 encoder (libvpx, bundled by
+virtually every FFmpeg build) but no H.264 one at all -- part1 accepts
+either "vp9", "h264", or "mpeg4" and just verifies internal consistency
+(the extension always matches the reported codec) rather than assuming
+one specific outcome.
 
 Run with: python video_writer_check.py
 """
@@ -30,20 +41,31 @@ import numpy as np
 
 from common.video_writer import open_annotated_video_writer
 
+_EXPECTED_EXT = {"vp9": ".webm", "h264": ".mp4", "mpeg4": ".mp4"}
 
-def part1_returns_a_working_writer_and_a_known_codec_label():
-    out_path = tempfile.mktemp(suffix=".mp4")
+
+def part1_returns_a_working_writer_with_a_matching_extension():
+    # Passed in as ".mp4" -- if VP9 wins (as it does in this sandbox,
+    # and as it should on the user's real machine, see module docstring),
+    # the ACTUAL path must come back as ".webm", not ".mp4": a codec must
+    # match its container, and callers are told to always use the
+    # returned path for exactly this reason.
+    base = tempfile.mktemp(suffix=".mp4")
     try:
-        writer, codec = open_annotated_video_writer(out_path, fps=10.0, width=32, height=32)
-        assert codec in ("h264", "mpeg4"), f"unexpected codec label: {codec!r}"
+        writer, actual_path, codec = open_annotated_video_writer(base, fps=10.0, width=32, height=32)
+        assert codec in ("vp9", "h264", "mpeg4"), f"unexpected codec label: {codec!r}"
+        assert actual_path.endswith(_EXPECTED_EXT[codec]), (
+            f"codec {codec!r} should produce a {_EXPECTED_EXT[codec]!r} file, "
+            f"got {actual_path!r}"
+        )
         frame = np.zeros((32, 32, 3), dtype=np.uint8)
         for _ in range(5):
             writer.write(frame)
         writer.release()
-        assert os.path.exists(out_path) and os.path.getsize(out_path) > 0, \
+        assert os.path.exists(actual_path) and os.path.getsize(actual_path) > 0, \
             "expected a non-empty video file"
 
-        cap = cv2.VideoCapture(out_path)
+        cap = cv2.VideoCapture(actual_path)
         try:
             assert cap.isOpened(), "the written file should itself be re-openable/decodable by OpenCV"
             count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -51,10 +73,12 @@ def part1_returns_a_working_writer_and_a_known_codec_label():
             cap.release()
         assert count == 5, f"expected 5 frames written, container reports {count}"
     finally:
-        if os.path.exists(out_path):
-            os.remove(out_path)
-    print(f"Part 1: open_annotated_video_writer() opens a working writer and reports a real "
-          f"codec label (got {codec!r} on this machine's OpenCV/FFmpeg build) — OK")
+        for p in (base, os.path.splitext(base)[0] + ".webm", os.path.splitext(base)[0] + ".mp4"):
+            if os.path.exists(p):
+                os.remove(p)
+    print(f"Part 1: open_annotated_video_writer() opens a working writer whose actual path "
+          f"extension always matches the reported codec (got {codec!r} -> {_EXPECTED_EXT[codec]!r} "
+          f"on this machine's OpenCV/FFmpeg build) — OK")
 
 
 def part2_unwritable_path_raises_a_clear_runtime_error():
@@ -71,7 +95,8 @@ def part2_unwritable_path_raises_a_clear_runtime_error():
 
 
 if __name__ == "__main__":
-    part1_returns_a_working_writer_and_a_known_codec_label()
+    part1_returns_a_working_writer_with_a_matching_extension()
     part2_unwritable_path_raises_a_clear_runtime_error()
     print("\nVerification completed with no errors: open_annotated_video_writer() opens a "
-          "real, working video writer and always reports which codec it actually used.")
+          "real, working video writer, always reports which codec it actually used, and the "
+          "returned path's extension always matches that codec's container.")

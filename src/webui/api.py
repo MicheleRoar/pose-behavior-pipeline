@@ -433,7 +433,7 @@ class Api:
             return None
         result = self.window.create_file_dialog(
             webview.OPEN_DIALOG,
-            file_types=("Video files (*.mp4;*.mov;*.avi;*.mkv)", "All files (*.*)"),
+            file_types=("Video files (*.mp4;*.mov;*.avi;*.mkv;*.webm)", "All files (*.*)"),
         )
         if not result:
             return None
@@ -462,13 +462,16 @@ class Api:
         (Michele, 2026-08: wanted the annotated video saved at the end
         of a run to compare different runs/parameter choices side by
         side, not just re-watch them live in the player one at a
-        time)."""
+        time). Defaults to .webm now (VP9, see common/video_writer.py
+        for why) -- `export_video()` may still write a DIFFERENT actual
+        path than the one returned here if it has to fall back to
+        another codec/container, see its `"path"` return field."""
         import webview
         if self.window is None:
             return None
         result = self.window.create_file_dialog(
-            webview.SAVE_DIALOG, save_filename="annotated_session.mp4",
-            file_types=("MP4 video (*.mp4)",),
+            webview.SAVE_DIALOG, save_filename="annotated_session.webm",
+            file_types=("WebM video (*.webm)", "MP4 video (*.mp4)"),
         )
         if not result:
             return None
@@ -634,7 +637,7 @@ class Api:
         height, width = frames[0].shape[:2]
         fps = self._source_fps or 15.0
         try:
-            writer, codec = open_annotated_video_writer(path, fps, width, height)
+            writer, actual_path, codec = open_annotated_video_writer(path, fps, width, height)
         except RuntimeError as exc:
             return {"ok": False, "error": str(exc)}
         try:
@@ -642,14 +645,14 @@ class Api:
                 writer.write(frame)
         finally:
             writer.release()
-        result = {"ok": True, "frames": len(frames), "codec": codec}
+        result = {"ok": True, "frames": len(frames), "codec": codec, "path": actual_path}
         if codec == "mpeg4":
             # See common/video_writer.py: opened fine, but this file will
             # likely not play back in the Compare runs window on Linux --
             # tell the user now instead of them discovering a silent
             # black box later.
             result["warning"] = (
-                "Saved, but this machine has no H.264 encoder available -- "
+                "Saved, but this machine has no VP9 or H.264 encoder available -- "
                 "the file was written with an older codec that may not play "
                 "in the 'Compare runs' window on Linux."
             )
@@ -843,7 +846,7 @@ class CompareApi:
             return None
         result = self.window.create_file_dialog(
             webview.OPEN_DIALOG,
-            file_types=("Video files (*.mp4;*.mov;*.avi;*.mkv)", "All files (*.*)"),
+            file_types=("Video files (*.mp4;*.mov;*.avi;*.mkv;*.webm)", "All files (*.*)"),
         )
         if not result:
             return None

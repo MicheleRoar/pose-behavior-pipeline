@@ -47,6 +47,7 @@ _CONTENT_TYPES = {
     ".mov": "video/quicktime",
     ".avi": "video/x-msvideo",
     ".mkv": "video/x-matroska",
+    ".webm": "video/webm",  # the default output of common/video_writer.py, see there
 }
 _CHUNK_SIZE = 1024 * 1024  # 1 MiB per read/write -- streams the file instead
 # of holding a whole (possibly large) response in memory at once.

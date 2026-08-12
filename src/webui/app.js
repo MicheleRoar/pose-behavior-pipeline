@@ -734,9 +734,21 @@
       if (!path) return;
       setStatusPill("Saving video…", "idle");
       const result = await api().export_video(path);
-      const message = result.ok
-        ? (result.warning || `Saved ${result.frames} frames`)
-        : (result.error || "Save failed");
+      let message;
+      if (result.ok) {
+        message = result.warning || `Saved ${result.frames} frames`;
+        // export_video() may have written a DIFFERENT extension than
+        // what was picked (VP9 needs .webm, see common/video_writer.py)
+        // -- tell the user the real filename so they're not searching
+        // for one that doesn't exist.
+        const chosenName = path.split(/[\\/]/).pop();
+        const actualName = result.path ? result.path.split(/[\\/]/).pop() : chosenName;
+        if (actualName !== chosenName) {
+          message += ` (saved as ${actualName})`;
+        }
+      } else {
+        message = result.error || "Save failed";
+      }
       setStatusPill(message, "idle");
     } catch (err) {
       setStatusPill(String(err.message || err), "idle");
