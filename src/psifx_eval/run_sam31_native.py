@@ -80,12 +80,22 @@ def run_sam31_and_write_maskdir(
     iou_threshold: float,
     max_people: int | None,
     device: str,
+    appearance_fallback: bool = True,
 ) -> str:
     """Runs `Sam31Tracker` end to end and writes its output as a psifx-
     shaped MaskDir at `mask_dir`. Returns `mask_dir` (as a str) once
     every tracked id's video has been back-filled to the full source
     video length, matching real psifx's own invariant (see module
-    docstring) that `mask_io.load_mask_dir()` depends on."""
+    docstring) that `mask_io.load_mask_dir()` depends on.
+
+    `appearance_fallback` (default True, matching `Sam31Tracker`'s own
+    default): toggles the OSNet-embedding gallery used when a chunk
+    boundary finds no geometric match (see `segmentation/
+    identity_gallery.py`) -- set `False` to get "pure" SAM 3.1 +
+    geometric/Hungarian reconciliation only, no appearance recovery.
+    This is the ONE knob that distinguishes configs 3 and 4 of the
+    four-way comparison (`run_four_way_comparison.py`): everything else
+    about this function is identical between the two calls."""
     from segmentation.sam31_estimation import Sam31Tracker
     from psifx_eval.video_probe import probe_total_frames
 
@@ -108,6 +118,7 @@ def run_sam31_and_write_maskdir(
     tracker = Sam31Tracker(
         device=device, chunk_size=chunk_size, overlap=overlap,
         text_prompt=text_prompt, iou_threshold=iou_threshold, max_people=max_people,
+        appearance_fallback=appearance_fallback,
     )
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -183,6 +194,7 @@ def run_experiment(
     eval_iou_threshold: float,
     max_people: int | None,
     device: str,
+    appearance_fallback: bool = True,
 ) -> dict:
     from psifx_eval.id_metrics import compute_metrics
     from psifx_eval.mask_io import load_mask_dir
@@ -191,11 +203,11 @@ def run_experiment(
     sam31_mask_dir = out_dir_path / "MaskDir"
 
     print(f"\n=== SAM 3.1 native (chunk_size={chunk_size}, overlap={overlap}, "
-          f"text_prompt={text_prompt!r}) ===")
+          f"text_prompt={text_prompt!r}, appearance_fallback={appearance_fallback}) ===")
     run_sam31_and_write_maskdir(
         video_path=video_path, mask_dir=str(sam31_mask_dir), chunk_size=chunk_size,
         overlap=overlap, text_prompt=text_prompt, iou_threshold=iou_threshold,
-        max_people=max_people, device=device,
+        max_people=max_people, device=device, appearance_fallback=appearance_fallback,
     )
 
     print("\n=== computing cross-chunk ID persistence metrics vs the existing oracle ===")
@@ -236,6 +248,10 @@ def main() -> None:
                          help="THIS script's oracle-to-run correspondence threshold (id_metrics.compute_metrics)")
     parser.add_argument("--max-people", type=int, default=None)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--appearance-fallback", dest="appearance_fallback", action="store_true", default=True,
+                         help="OSNet-embedding recovery at chunk boundaries with no geometric match (default: on)")
+    parser.add_argument("--no-appearance-fallback", dest="appearance_fallback", action="store_false",
+                         help="Disable the OSNet fallback -- pure geometric/Hungarian reconciliation only")
     args = parser.parse_args()
 
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
@@ -243,7 +259,7 @@ def main() -> None:
         video_path=args.video, oracle_mask_dir=args.oracle_mask_dir, out_dir=args.out_dir,
         chunk_size=args.chunk_size, overlap=args.overlap, text_prompt=args.text_prompt,
         iou_threshold=args.iou_threshold, eval_iou_threshold=args.eval_iou_threshold,
-        max_people=args.max_people, device=args.device,
+        max_people=args.max_people, device=args.device, appearance_fallback=args.appearance_fallback,
     )
 
 
