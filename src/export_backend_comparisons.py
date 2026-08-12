@@ -19,42 +19,53 @@ numbers, this script to actually SEE the difference on the 1-2
 configurations that look most promising (or, as here, on all 4 at once
 if you want the full picture).
 
-The 4 configurations (a 2x2: {box-mode w/o cross-chunk helpers, text-
-prompt w/ cross-chunk helpers} x {no extra re-id layer, +OSNet re-id
-layer}):
+The 4 configurations (Michele, 2026-08: switched to `text_prompt="person"`
+FIXED across all 4 -- dropping the earlier box-mode-vs-text-prompt axis
+entirely -- after looking at how a comparable clinical-video pipeline
+(github.com/LiubovRev/Video-Annotation-System, psifx-based) sets up its
+own SAM3 baseline: `text_prompt="person"` fixed, chunked tracking, no
+appearance-based re-id at all -- identity drift is instead caught by
+manual review, per that repo's own README limitations section. That's
+close to config (1) below; the remaining 3 build up from there with
+this project's own helpers, so the whole ladder is comparable to a
+recognizable external baseline instead of an arbitrary starting point.
 
-  1. sam_vanilla         -- SAM 3.1, box-mode (YOLO proposes boxes once
-                             per chunk boundary, ids passed straight
-                             through to SAM's obj_id -- see
-                             ChunkedVideoPredictorBackend._seed_new_chunk's
-                             docstring for why box mode never needs
-                             geometric reconciliation in the first
-                             place), appearance-gallery fallback OFF, no
-                             SegReIdentifier. The true baseline: nothing
-                             beyond what SAM itself does across chunks.
-  2. sam_osnet            -- same base as (1), PLUS a SegReIdentifier
+Now a clean 2x2: {SAM's internal appearance gallery at chunk boundaries
+off/on} x {external OSNet re-id layer off/on} -- box-mode is no longer
+part of the comparison, see the note below on why it can't coexist with
+a fixed text_prompt:
+
+  1. sam_geometric_only   -- SAM 3.1, text-prompt discovery
+                             ("person"), Hungarian + motion-compensated
+                             geometric reconciliation across chunks
+                             (chunking.reconcile_ids_windowed -- this
+                             part is UNCONDITIONAL in text-prompt mode,
+                             see build_tracker()'s docstring), internal
+                             appearance-gallery fallback OFF, no
+                             SegReIdentifier. The closest match to the
+                             reference repo's own baseline (geometry/IoU
+                             only, no appearance help of any kind).
+  2. sam_geometric_osnet  -- same base as (1), PLUS a SegReIdentifier
                              with the OSNet embedding on top (post-
                              processing layer, independent of SAM's own
                              logic -- see identity_gallery.py's docstring
                              in chunking.py for why this is a SEPARATE
                              system from SAM's internal one).
-  3. sam_chunk_helpers    -- SAM 3.1, TEXT-PROMPT discovery (SAM finds
-                             people on its own each chunk) with the
-                             built-in chunk-boundary helpers ON: Hungarian
-                             geometric reconciliation + motion
-                             compensation (chunking.reconcile_ids_windowed)
-                             + the internal appearance gallery
-                             (identity_gallery.py). No extra re-id layer.
+  3. sam_internal_gallery -- same as (1), but with SAM's OWN internal
+                             appearance gallery turned ON as an
+                             additional chunk-boundary helper
+                             (identity_gallery.py) -- no extra re-id
+                             layer.
   4. sam_everything       -- (3) + the same OSNet SegReIdentifier layer
                              as (2), stacked on top.
 
-Why box-mode for (1)/(2) and text-prompt for (3)/(4): the geometric
-reconciliation helpers ONLY EVER run in text-prompt mode (box mode has
-no local-id ambiguity to resolve, ids are passed to SAM directly) -- see
-build_tracker()'s docstring in segmentation_demo.py. So "helpers off" and
-"helpers on" aren't a single flag, they're a change of seeding strategy;
-this is the closest fair comparison achievable without inventing a new
-code path just for this benchmark.
+Why box-mode can't be config (1) anymore: box mode requires
+`sam_text_prompt=None` (YOLO proposes boxes, ids pass straight through
+to SAM -- see build_tracker()'s docstring in segmentation_demo.py) --
+it's a structurally different seeding path from text-prompt discovery,
+not a flag you can combine with a fixed text_prompt. Comparing
+box-mode-vs-not is still possible (see `benchmark_backends.py` for
+ad-hoc single-config runs), just no longer one of these 4 fixed slots.
 
 `sam_redetect_every` is intentionally left unset (None) in ALL 4 configs:
 combining it with text-prompt mode is known to make already-tracked
@@ -76,7 +87,7 @@ Usage:
     # only a subset
     python export_backend_comparisons.py --source video.mp4 --fps 15 \\
         --max-people 2 --sam-chunk-size 300 --out-dir comparisons \\
-        --configs 1_sam_vanilla,3_sam_chunk_helpers
+        --configs 1_sam_geometric_only,3_sam_internal_gallery
 """
 
 from __future__ import annotations
@@ -91,25 +102,27 @@ from gui.pipeline_runner import iter_pipeline_frames
 
 CONFIGS = [
     {
-        "label": "1_sam_vanilla",
-        "description": "SAM 3.1, box-mode, no cross-chunk helpers, no re-id layer (baseline).",
-        "sam_text_prompt": None,
+        "label": "1_sam_geometric_only",
+        "description": "SAM 3.1, text_prompt=\"person\", geometric reconciliation only "
+                        "(no appearance help at all) -- closest match to the "
+                        "LiubovRev/Video-Annotation-System psifx baseline.",
+        "sam_text_prompt": "person",
         "sam_appearance_fallback": False,
         "with_seg_reid": False,
         "use_appearance_embedding": False,
     },
     {
-        "label": "2_sam_osnet",
+        "label": "2_sam_geometric_osnet",
         "description": "Same base as (1) + SegReIdentifier with OSNet embedding on top.",
-        "sam_text_prompt": None,
+        "sam_text_prompt": "person",
         "sam_appearance_fallback": False,
         "with_seg_reid": True,
         "use_appearance_embedding": True,
     },
     {
-        "label": "3_sam_chunk_helpers",
-        "description": "SAM 3.1 text-prompt discovery + built-in chunk-boundary helpers "
-                        "(Hungarian + motion compensation + internal appearance gallery).",
+        "label": "3_sam_internal_gallery",
+        "description": "Same base as (1), but with SAM's own internal appearance "
+                        "gallery turned on as a chunk-boundary helper. No extra re-id layer.",
         "sam_text_prompt": "person",
         "sam_appearance_fallback": True,
         "with_seg_reid": False,
