@@ -43,7 +43,6 @@ pose-behavior-pipeline/
 │   ├── track_stability_check.py   # ACTIVE diagnostic: id count/lifespan
 │   ├── pipeline.py                # batch CLI (pose-based, on hold)
 │   ├── live_demo.py               # real-time CLI (pose-based, on hold)
-│   ├── benchmark_backends.py      # compares tracking backends side by side
 │   ├── gui/                       # shared player/dispatch logic behind the GUI
 │   ├── webui/                     # "Behaviour Vision Lab" GUI (pywebview + HTML/CSS/JS)
 │   ├── segmentation/              # ACTIVE library: silhouettes only, no keypoints
@@ -85,8 +84,7 @@ pose-behavior-pipeline/
     ├── psifx_eval/                 # psifx_eval/ tests (algorithmic core only, no psifx/GPU)
     ├── common/                     # common/ tests
     ├── gui/                        # gui/ tests
-    ├── webui/                      # webui/ tests
-    └── pipeline/                   # top-level script tests (benchmark_backends.py, etc.)
+    └── webui/                      # webui/ tests
 ```
 
 ## Setup
