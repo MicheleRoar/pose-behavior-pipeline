@@ -53,6 +53,30 @@ Matching philosophy, consistent with the rest of the project
   CANDIDATES (too few frames for a trustworthy signature) but are still
   copied through to the output unchanged -- never silently dropped.
 
+Trajectory-aware contour selection (2026-08, real-footage bug, Michele)
+------------------------------------------------------------------------
+On real footage a track's mask can occasionally contain a SECOND,
+unrelated blob in the same frame (a stray detection stuck to the frame
+border was the observed case) alongside the real person. Naively taking
+the largest connected component (the normal rule elsewhere in this
+project, see `sam_backend._mask_to_polygon`) picks whichever one has
+more pixels -- if the stray blob happens to be bigger than the real
+person that frame, the signature ends up built from the WRONG region
+entirely (observed: a similarity of 0.04 between two fragments that
+were, by visual inspection, unambiguously the same child). `_sample_signature`
+guards against this via `_select_best_contour`: it predicts where the
+tracked person should be from the track's own recent motion (a plain
+constant-velocity estimate, the same idea as `chunking.estimate_velocities`,
+just applied frame-by-frame) and picks whichever disconnected region is
+closest to that prediction, not whichever is largest. A filter on mask
+SIZE was considered and rejected -- a crouching or partially-occluded
+person can legitimately have a small mask, and a person legitimately
+exiting through the edge of the frame can legitimately be near the
+border; neither should be penalized. Motion continuity doesn't have
+that problem: a real person's predicted position moves WITH them
+(including toward an edge they're walking out of), while a fixed
+background artifact doesn't track any predicted trajectory at all.
+
 Not runnable in this project's sandbox (needs `psifx`, a real MaskDir on
 disk, and optionally `torch`/`torchreid` for the OSNet signal -- verify
 on Michele's machine, same as the rest of `psifx_eval`).
@@ -70,6 +94,7 @@ from scipy.optimize import linear_sum_assignment
 
 from psifx_eval.mask_io import load_mask_dir
 from segmentation.sam_backend import _mask_to_polygon, _polygon_to_box
+from segmentation.chunking import _centroid as _polygon_centroid
 from segmentation.seg_reid import _mask_hue_histogram, _histogram_similarity
 from pose.appearance_embedding import OSNetEmbedder, embedding_similarity
 
@@ -95,6 +120,51 @@ def _fragment_bounds(mask_arr: np.ndarray) -> tuple[int, int] | None:
     return int(nonempty[0]), int(nonempty[-1])
 
 
+def _select_best_contour(
+    mask_frame: np.ndarray,
+    expected_centroid: np.ndarray | None,
+) -> np.ndarray:
+    """Like `_mask_to_polygon`, but when a mask frame has MULTIPLE
+    disconnected regions (a real person plus e.g. a stray detection
+    stuck to the frame border), picks the region whose centroid is
+    closest to `expected_centroid` -- a position predicted from the
+    track's OWN recent motion (see `_sample_signature`) -- instead of
+    blindly the largest by area.
+
+    Why not filter by size instead (2026-08, real-footage bug, Michele):
+    a person can legitimately have a SMALL mask (crouching, partially
+    behind an object) -- rejecting small regions would throw away good
+    signal. A spurious region stuck to the frame edge, on the other
+    hand, doesn't move the way a real person does: its position stays
+    essentially fixed regardless of where the person the track is
+    supposed to be following actually goes. Comparing against a
+    motion-predicted expected position (not a fixed reference point)
+    also still recognizes a person legitimately walking out through the
+    edge of the frame, since the prediction moves with them.
+
+    Falls back to `_mask_to_polygon`'s "largest contour" rule when
+    `expected_centroid` is `None` (no motion estimate yet -- e.g. the
+    very first sampled frame of a track) or when there's only one
+    region to begin with -- same "no made-up signal" convention used
+    throughout this module."""
+    if expected_centroid is None:
+        return _mask_to_polygon(mask_frame)
+    mask_u8 = mask_frame.astype(np.uint8)
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return np.empty((0, 2))
+    if len(contours) == 1:
+        return contours[0].reshape(-1, 2).astype(float)
+
+    def _dist_to_expected(contour: np.ndarray) -> float:
+        poly = contour.reshape(-1, 2).astype(float)
+        centroid = poly.mean(axis=0)
+        return float(np.linalg.norm(centroid - expected_centroid))
+
+    best = min(contours, key=_dist_to_expected)
+    return best.reshape(-1, 2).astype(float)
+
+
 def _sample_signature(
     cap: cv2.VideoCapture,
     mask_arr: np.ndarray,
@@ -106,9 +176,31 @@ def _sample_signature(
     internal gaps even between its own first/last frame). Re-normalized
     after averaging (an average of unit vectors isn't itself unit norm).
     `(None, None)` if no usable frame was found -- same "no made-up
-    signal" convention as the underlying per-frame functions."""
+    signal" convention as the underlying per-frame functions.
+
+    `frame_indices` MUST be walked in the order the caller wants motion
+    estimated in (the end-of-track window walks TOWARD the risky last
+    frame; the start-of-track window walks AWAY from the risky first
+    frame -- see the two call sites in `merge_fragments`). Each frame's
+    contour is chosen via `_select_best_contour`, using a plain
+    constant-velocity prediction (this frame's expected centroid =
+    last confirmed centroid + last observed per-frame velocity * frame
+    gap) built up incrementally from whichever earlier frames in this
+    same window already had a confident, unambiguous contour -- the
+    same "simple first-difference beats nothing" motion compensation
+    already used in `chunking.estimate_velocities`, just applied frame
+    by frame instead of chunk-boundary by chunk-boundary. The very
+    first usable frame of the window has no prior observation to
+    predict from, so it falls back to the old "largest contour" rule --
+    a corrupted seed frame is a known limitation, not a claim this is
+    bulletproof (see module docstring)."""
     embeddings: list[np.ndarray] = []
     histograms: list[np.ndarray] = []
+
+    prev_centroid: np.ndarray | None = None
+    prev_frame_idx: int | None = None
+    velocity: np.ndarray | None = None
+
     for frame_idx in frame_indices:
         if frame_idx >= mask_arr.shape[0] or not mask_arr[frame_idx].any():
             continue
@@ -116,9 +208,24 @@ def _sample_signature(
         ok, frame = cap.read()
         if not ok:
             continue
-        poly = _mask_to_polygon(mask_arr[frame_idx])
+
+        expected_centroid = None
+        if prev_centroid is not None and prev_frame_idx is not None:
+            step = frame_idx - prev_frame_idx
+            shift = velocity * step if velocity is not None else 0.0
+            expected_centroid = prev_centroid + shift
+
+        poly = _select_best_contour(mask_arr[frame_idx], expected_centroid)
         if poly.shape[0] < 3:
             continue
+
+        centroid = _polygon_centroid(poly)
+        if centroid is not None:
+            if prev_centroid is not None and prev_frame_idx is not None and frame_idx != prev_frame_idx:
+                velocity = (centroid - prev_centroid) / (frame_idx - prev_frame_idx)
+            prev_centroid = centroid
+            prev_frame_idx = frame_idx
+
         box = _polygon_to_box(poly)
         if embedder is not None:
             vec = embedder.embed(frame, box, poly=poly)
