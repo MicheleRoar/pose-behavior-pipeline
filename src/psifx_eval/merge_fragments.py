@@ -171,15 +171,24 @@ def _resolve_merges(
     end_sigs: dict[int, tuple],
     start_sigs: dict[int, tuple],
     merge_threshold: float,
-) -> list[tuple[int, int, float]]:
+) -> list[dict]:
     """Global (Hungarian) assignment between `end_ids` (rows) and
-    `start_ids` (columns), returning only the accepted `(end_id,
-    start_id, similarity)` triples -- similarity >= `merge_threshold`
-    AND temporally valid (end strictly before start). A single call
-    over the whole bipartite set instead of pairwise greedy matching,
-    so two simultaneous fragmentation events (e.g. both people losing
-    their id around the same time) don't steal each other's correct
-    match -- same reasoning as `chunking.reconcile_ids`."""
+    `start_ids` (columns). Returns EVERY temporally-valid pair Hungarian
+    actually assigned (end strictly before start), each tagged with
+    `"accepted": similarity >= merge_threshold` -- not just the accepted
+    ones. This is deliberate: a near-miss rejection (e.g. similarity
+    0.58 against a 0.6 threshold) is exactly the kind of thing worth
+    seeing when tuning `merge_threshold`, and silently dropping rejected
+    candidates would hide it. Temporally-invalid pairs (same track, or
+    start not after end -- cost still at `_IMPOSSIBLE_COST`) are left out
+    entirely, since Hungarian only "assigned" them to fill out a
+    rectangular matrix, not because they're real candidates.
+
+    A single Hungarian call over the whole bipartite set instead of
+    pairwise greedy matching, so two simultaneous fragmentation events
+    (e.g. both people losing their id around the same time) don't steal
+    each other's correct match -- same reasoning as
+    `chunking.reconcile_ids`."""
     if not end_ids or not start_ids:
         return []
 
@@ -192,12 +201,18 @@ def _resolve_merges(
             cost[i, j] = 1.0 - sim
 
     row_idx, col_idx = linear_sum_assignment(cost)
-    accepted = []
+    candidates = []
     for r, c in zip(row_idx, col_idx):
+        if cost[r, c] >= _IMPOSSIBLE_COST:
+            continue  # not a real candidate -- see docstring
         similarity = 1.0 - cost[r, c]
-        if similarity >= merge_threshold:
-            accepted.append((end_ids[r], start_ids[c], similarity))
-    return accepted
+        candidates.append({
+            "from_id": end_ids[r],
+            "into_id": start_ids[c],
+            "similarity": round(float(similarity), 3),
+            "accepted": similarity >= merge_threshold,
+        })
+    return candidates
 
 
 def _group_chains(merges: list[tuple[int, int, float]], all_ids: list[int]) -> dict[int, int]:
@@ -299,7 +314,11 @@ def merge_fragments(
     finally:
         cap.release()
 
-    merges = _resolve_merges(end_ids, start_ids, bounds, end_sigs, start_sigs, merge_threshold)
+    candidate_pairs = _resolve_merges(end_ids, start_ids, bounds, end_sigs, start_sigs, merge_threshold)
+    merges = [
+        (c["from_id"], c["into_id"], c["similarity"])
+        for c in candidate_pairs if c["accepted"]
+    ]
     canonical = _group_chains(merges, all_ids)
 
     # write the merged MaskDir: one file per DISTINCT canonical id,
@@ -348,6 +367,10 @@ def merge_fragments(
             {"from_id": e, "into_id": s, "similarity": round(sim, 3)}
             for e, s, sim in merges
         ],
+        "rejected_candidates": [
+            {"from_id": c["from_id"], "into_id": c["into_id"], "similarity": c["similarity"]}
+            for c in candidate_pairs if not c["accepted"]
+        ],
         "groups": {str(canon): members for canon, members in groups.items()},
     }
     return report
@@ -384,6 +407,11 @@ def main() -> None:
           f"{len(report['excluded_as_too_short'])} id(s) excluded as too short to use as a signature)")
     for m in report["accepted_merges"]:
         print(f"  id {m['from_id']} -> id {m['into_id']}  (similarity {m['similarity']})")
+    if report["rejected_candidates"]:
+        print(f"\n{len(report['rejected_candidates'])} candidate pair(s) considered but "
+              f"below --merge-threshold ({report['merge_threshold']}):")
+        for c in sorted(report["rejected_candidates"], key=lambda c: -c["similarity"]):
+            print(f"  id {c['from_id']} -> id {c['into_id']}  (similarity {c['similarity']})")
 
     report_path = Path(args.out_dir) / "merge_report.json"
     with open(report_path, "w") as f:
