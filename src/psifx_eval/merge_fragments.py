@@ -372,12 +372,12 @@ def _resolve_merges(
     for r, c in zip(row_idx, col_idx):
         if cost[r, c] >= _IMPOSSIBLE_COST:
             continue  # not a real candidate -- see docstring
-        similarity = 1.0 - cost[r, c]
+        similarity = float(1.0 - cost[r, c])
         candidates.append({
             "from_id": end_ids[r],
             "into_id": start_ids[c],
-            "similarity": round(float(similarity), 3),
-            "accepted": similarity >= merge_threshold,
+            "similarity": round(similarity, 3),
+            "accepted": bool(similarity >= merge_threshold),
         })
     return candidates
 
@@ -419,12 +419,12 @@ def _resolve_group_merges(
     for r, c in zip(row_idx, col_idx):
         if cost[r, c] >= _IMPOSSIBLE_COST:
             continue  # not a real candidate -- see docstring
-        similarity = 1.0 - cost[r, c]
+        similarity = float(1.0 - cost[r, c])
         candidates.append({
             "orphan_id": orphan_ids[r],
             "group_id": group_ids[c],
-            "similarity": round(float(similarity), 3),
-            "accepted": similarity >= merge_threshold,
+            "similarity": round(similarity, 3),
+            "accepted": bool(similarity >= merge_threshold),
         })
     return candidates
 
