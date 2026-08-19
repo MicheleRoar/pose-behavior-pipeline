@@ -110,6 +110,34 @@ lighting), not just more frames from one narrow moment. Same Hungarian/
 "tag every real candidate" conventions as pass one, just at group
 granularity instead of fragment granularity (see `_resolve_group_merges`).
 
+Streaming, not preloaded (2026-08, full-session OOM, Michele)
+------------------------------------------------------------------------
+The first working version loaded every `<id>.mp4` in the MaskDir fully
+into RAM (via `mask_io.load_mask_dir`) as a dense `(T, H, W)` boolean
+array per id -- fine for a short clip, but on a full clinical session
+this exceeded available memory and the process was killed outright
+(no traceback, just `Killed`, the classic Linux OOM-killer signature).
+
+This is a pure I/O/implementation limitation of THIS post-processing
+step, not a re-run of SAM3.1's chunking problem: SAM3.1's chunk
+boundaries lose real information (the tracker's own attention/feature
+propagation genuinely can't span the whole video, so identity can
+actually be lost at a boundary), whereas here the full set of already-
+computed masks exists on disk the whole time -- the only question is
+*when* pixels are read into memory, not what the algorithm can see.
+The matching logic never actually needed a whole track's pixel data at
+once: only its `(first, last)` bounds (two integers) and a handful of
+specific sampled frames per track. So every function that used to index
+a preloaded array now takes a mask file `Path` instead and opens its
+own `cv2.VideoCapture`, seeking to just the frames it needs (`_scan_
+track`, `_sample_signature`, `_pooled_group_signature`), and the final
+merged-MaskDir write reads every group member in lock-step alongside
+the output writer instead of allocating a full merged array -- at no
+point does this version hold more than a few frames' worth of pixels in
+memory, and every decision (which frames count as signature candidates,
+which pairs are temporally valid, the Hungarian assignment itself) is
+identical to the preloaded version.
+
 Not runnable in this project's sandbox (needs `psifx`, a real MaskDir on
 disk, and optionally `torch`/`torchreid` for the OSNet signal -- verify
 on Michele's machine, same as the rest of `psifx_eval`).
@@ -125,7 +153,7 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from psifx_eval.mask_io import load_mask_dir
+from psifx_eval.mask_io import _MASK_FILENAME_RE
 from segmentation.sam_backend import _polygon_to_box
 from segmentation.seg_reid import _mask_hue_histogram, _histogram_similarity
 from pose.appearance_embedding import OSNetEmbedder, embedding_similarity
@@ -134,6 +162,10 @@ DEFAULT_MIN_FRAGMENT_FRAMES = 8
 DEFAULT_MERGE_THRESHOLD = 0.6
 DEFAULT_SIGNATURE_SAMPLES = 5
 DEFAULT_POOLED_SAMPLES_PER_MEMBER = 5
+# same white-on-black threshold convention as mask_io.read_mask_video --
+# kept in sync by hand since this module deliberately doesn't preload
+# through mask_io anymore (see module docstring's "Streaming" section).
+DEFAULT_MASK_THRESHOLD = 127
 # cost assigned to a temporally-impossible pair (end doesn't precede
 # start) in the Hungarian matrix -- worse than any real similarity score
 # (which lives in cost = 1 - similarity, i.e. [0, 1]), so these pairs are
@@ -142,15 +174,94 @@ DEFAULT_POOLED_SAMPLES_PER_MEMBER = 5
 _IMPOSSIBLE_COST = 10.0
 
 
-def _fragment_bounds(mask_arr: np.ndarray) -> tuple[int, int] | None:
-    """(first, last) non-empty-frame indices for one id's mask array, or
-    `None` if the id has no non-empty frame at all (defensive -- normal
-    MaskDirs shouldn't contain such an id, since nothing would have
-    written it)."""
-    nonempty = np.where(mask_arr.any(axis=(1, 2)))[0]
-    if nonempty.size == 0:
+def _list_mask_files(mask_dir: str) -> dict[int, Path]:
+    """`{id: path}` for every `<id>.mp4` in `mask_dir`, same filename
+    convention as `mask_io.load_mask_dir` (`_MASK_FILENAME_RE`) -- but
+    without decoding anything, unlike `load_mask_dir`, which eagerly
+    loads every file fully into RAM (the whole reason for this
+    module's streaming rewrite, see module docstring)."""
+    dir_path = Path(mask_dir)
+    paths: dict[int, Path] = {}
+    if not dir_path.is_dir():
+        return paths
+    for p in dir_path.iterdir():
+        m = _MASK_FILENAME_RE.match(p.name)
+        if m:
+            paths[int(m.group(1))] = p
+    return paths
+
+
+def _scan_track(
+    mask_path: Path,
+    threshold: int = DEFAULT_MASK_THRESHOLD,
+) -> tuple[int, int, int, int, int, int] | None:
+    """Streams one id's mask video ONCE -- each frame is decoded, checked,
+    and discarded, so memory stays O(1) regardless of video length --
+    and returns `(first, last, real_frames, decoded_frame_count, height,
+    width)`, or `None` if the track has no non-empty frame at all
+    (defensive -- normal MaskDirs shouldn't contain such an id, since
+    nothing would have written it). This replaces the old
+    `_fragment_bounds`, which sliced a fully preloaded `(T, H, W)` array
+    (see module docstring's "Streaming" section for why that no longer
+    works on a full-session video).
+
+    `real_frames` counts every non-empty frame in the track, which by
+    construction all fall inside `[first, last]` -- same quantity the
+    old version computed via `masks[obj_id][first:last+1].any(axis=(1,2)
+    ).sum()`.
+
+    `decoded_frame_count` -- the number of frames this call actually
+    walked through -- is used as this track's contribution to
+    `total_frames` in `merge_fragments`, rather than trusting
+    `cv2.CAP_PROP_FRAME_COUNT` container metadata, since this project
+    has already hit cases where the two disagree."""
+    cap = cv2.VideoCapture(str(mask_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Could not open mask video: {mask_path}")
+
+    first = last = None
+    real_frames = 0
+    decoded = 0
+    height = width = None
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if height is None:
+                height, width = frame.shape[0], frame.shape[1]
+            gray = frame[:, :, 0] if frame.ndim == 3 else frame
+            if bool((gray > threshold).any()):
+                if first is None:
+                    first = decoded
+                last = decoded
+                real_frames += 1
+            decoded += 1
+    finally:
+        cap.release()
+
+    if first is None:
         return None
-    return int(nonempty[0]), int(nonempty[-1])
+    return first, last, real_frames, decoded, height, width
+
+
+def _read_mask_frame(
+    cap: cv2.VideoCapture,
+    frame_idx: int,
+    threshold: int = DEFAULT_MASK_THRESHOLD,
+) -> np.ndarray | None:
+    """Seeks `cap` (an already-open mask-file `VideoCapture`) to
+    `frame_idx` and returns the decoded boolean mask frame, or `None` if
+    the seek/read failed (past end of file, corrupt frame, ...) -- same
+    `gray > threshold` decode convention as `mask_io.read_mask_video`,
+    replicated here since this module streams instead of going through
+    `mask_io.load_mask_dir` (see module docstring)."""
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ok, raw = cap.read()
+    if not ok:
+        return None
+    gray = raw[:, :, 0] if raw.ndim == 3 else raw
+    return gray > threshold
 
 
 def _mask_to_polygon_single_component(mask_frame: np.ndarray) -> np.ndarray:
@@ -225,15 +336,22 @@ def _finalize_signature(
 
 def _sample_signature(
     cap: cv2.VideoCapture,
-    mask_arr: np.ndarray,
+    mask_path: Path,
     candidate_frames: list[int],
     signature_samples: int,
     embedder: OSNetEmbedder | None,
+    threshold: int = DEFAULT_MASK_THRESHOLD,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Average OSNet embedding + average hue histogram over up to
     `signature_samples` USABLE frames drawn from `candidate_frames`
     (see `_frame_signal` for what "usable" means), stopping as soon as
     that many have been collected.
+
+    Streams `mask_path`'s frames on demand through its own
+    `cv2.VideoCapture` (opened once per call, seeked per candidate
+    frame) instead of indexing a preloaded array -- see module
+    docstring's "Streaming" section. `cap` remains the SOURCE video
+    capture, passed through to `_frame_signal` unchanged.
 
     `candidate_frames` MUST be ordered from the risky edge of the track
     OUTWARD (the end-of-track caller walks backward starting at the
@@ -249,20 +367,30 @@ def _sample_signature(
     embeddings: list[np.ndarray] = []
     histograms: list[np.ndarray] = []
 
+    mask_cap = cv2.VideoCapture(str(mask_path))
+    if not mask_cap.isOpened():
+        raise FileNotFoundError(f"Could not open mask video: {mask_path}")
+
     used_frames = 0
-    for frame_idx in candidate_frames:
-        if used_frames >= signature_samples:
-            break
-        if frame_idx < 0 or frame_idx >= mask_arr.shape[0]:
-            continue
-        emb, hist = _frame_signal(cap, mask_arr[frame_idx], frame_idx, embedder)
-        if emb is None and hist is None:
-            continue  # empty, or ambiguous (>1 disconnected region) -- skip, don't guess
-        if emb is not None:
-            embeddings.append(emb)
-        if hist is not None:
-            histograms.append(hist)
-        used_frames += 1
+    try:
+        for frame_idx in candidate_frames:
+            if used_frames >= signature_samples:
+                break
+            if frame_idx < 0:
+                continue
+            mask_frame = _read_mask_frame(mask_cap, frame_idx, threshold)
+            if mask_frame is None:
+                continue  # past this track's own file bounds -- skip, don't guess
+            emb, hist = _frame_signal(cap, mask_frame, frame_idx, embedder)
+            if emb is None and hist is None:
+                continue  # empty, or ambiguous (>1 disconnected region) -- skip, don't guess
+            if emb is not None:
+                embeddings.append(emb)
+            if hist is not None:
+                histograms.append(hist)
+            used_frames += 1
+    finally:
+        mask_cap.release()
 
     return _finalize_signature(embeddings, histograms)
 
@@ -284,11 +412,12 @@ def _evenly_spaced_frames(first: int, last: int, n: int) -> list[int]:
 
 def _pooled_group_signature(
     cap: cv2.VideoCapture,
-    masks: dict[int, np.ndarray],
+    mask_paths: dict[int, Path],
     member_ids: list[int],
     bounds: dict[int, tuple[int, int]],
     samples_per_member: int,
     embedder: OSNetEmbedder | None,
+    threshold: int = DEFAULT_MASK_THRESHOLD,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Aggregated appearance signature for an already-confirmed GROUP of
     ids (formed by pass-one merges in `merge_fragments`), pooling clean
@@ -297,19 +426,32 @@ def _pooled_group_signature(
     edge frames of one fragment. See the module docstring's "Second
     pass" section for why this, rather than just widening
     `signature_samples` on a single fragment, is the fallback used for
-    a candidate pass one rejected."""
+    a candidate pass one rejected.
+
+    Streams each member's own mask file through its own
+    `cv2.VideoCapture` (opened per member, released before moving to
+    the next) -- see module docstring's "Streaming" section."""
     embeddings: list[np.ndarray] = []
     histograms: list[np.ndarray] = []
     for member_id in member_ids:
-        if member_id not in bounds:
+        if member_id not in bounds or member_id not in mask_paths:
             continue  # e.g. a too-short fragment folded into this group
         first, last = bounds[member_id]
-        for frame_idx in _evenly_spaced_frames(first, last, samples_per_member):
-            emb, hist = _frame_signal(cap, masks[member_id][frame_idx], frame_idx, embedder)
-            if emb is not None:
-                embeddings.append(emb)
-            if hist is not None:
-                histograms.append(hist)
+        member_cap = cv2.VideoCapture(str(mask_paths[member_id]))
+        if not member_cap.isOpened():
+            raise FileNotFoundError(f"Could not open mask video: {mask_paths[member_id]}")
+        try:
+            for frame_idx in _evenly_spaced_frames(first, last, samples_per_member):
+                mask_frame = _read_mask_frame(member_cap, frame_idx, threshold)
+                if mask_frame is None:
+                    continue
+                emb, hist = _frame_signal(cap, mask_frame, frame_idx, embedder)
+                if emb is not None:
+                    embeddings.append(emb)
+                if hist is not None:
+                    histograms.append(hist)
+        finally:
+            member_cap.release()
     return _finalize_signature(embeddings, histograms)
 
 
@@ -471,19 +613,40 @@ def merge_fragments(
     (see module docstring), writes a NEW MaskDir at `out_mask_dir`
     (never touches the original), and returns a JSON-able report of
     every merge decision made (accepted and -- for transparency --
-    every candidate pair actually considered)."""
-    masks = load_mask_dir(mask_dir)
-    total_frames = next(iter(masks.values())).shape[0]
+    every candidate pair actually considered).
 
-    all_ids = sorted(masks.keys())
+    Streams every mask video from disk instead of preloading the whole
+    MaskDir into RAM -- see module docstring's "Streaming" section
+    (added 2026-08 after a full-session run hit the Linux OOM killer on
+    the old `load_mask_dir`-based version). At no point does this
+    function hold more than a handful of individual frames in memory;
+    the set of frames actually used for matching, and every matching
+    decision itself, is unchanged."""
+    mask_paths = _list_mask_files(mask_dir)
+    if not mask_paths:
+        raise ValueError(f"No <id>.mp4 mask files found in {mask_dir}")
+
+    all_ids = sorted(mask_paths.keys())
     bounds: dict[int, tuple[int, int]] = {}
     excluded_short: list[int] = []
+    total_frames: int | None = None
+    total_frames_source_id: int | None = None
+    height = width = None
     for obj_id in all_ids:
-        fb = _fragment_bounds(masks[obj_id])
-        if fb is None:
+        scan = _scan_track(mask_paths[obj_id])
+        if scan is None:
             continue
-        first, last = fb
-        real_frames = int(masks[obj_id][first:last + 1].any(axis=(1, 2)).sum())
+        first, last, real_frames, decoded_frames, h, w = scan
+        if total_frames is None:
+            total_frames = decoded_frames
+            total_frames_source_id = obj_id
+            height, width = h, w
+        elif decoded_frames != total_frames:
+            raise ValueError(
+                f"id {obj_id} has {decoded_frames} frames but id {total_frames_source_id} "
+                f"has {total_frames} -- every <id>.mp4 in a MaskDir is expected to be padded "
+                f"to the same total frame count (same invariant mask_io.load_mask_dir checks)."
+            )
         if real_frames < min_fragment_frames:
             excluded_short.append(obj_id)
             continue
@@ -524,7 +687,7 @@ def merge_fragments(
             # further into the track's more stable middle instead of
             # forcing a fixed-size window (see _sample_signature).
             candidates = list(range(last, first - 1, -1))
-            end_sigs[obj_id] = _sample_signature(cap, masks[obj_id], candidates, signature_samples, embedder)
+            end_sigs[obj_id] = _sample_signature(cap, mask_paths[obj_id], candidates, signature_samples, embedder)
 
         start_sigs = {}
         for obj_id in start_ids:
@@ -532,7 +695,7 @@ def merge_fragments(
             # search FORWARD from `first` (the risky reappearance edge)
             # toward `last`, same reasoning as above.
             candidates = list(range(first, last + 1))
-            start_sigs[obj_id] = _sample_signature(cap, masks[obj_id], candidates, signature_samples, embedder)
+            start_sigs[obj_id] = _sample_signature(cap, mask_paths[obj_id], candidates, signature_samples, embedder)
     finally:
         cap.release()
 
@@ -562,10 +725,12 @@ def merge_fragments(
         candidate_group_ids = [g for g in pass1_groups if g not in orphan_start_ids]
 
         cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Could not open video: {video_path}")
         try:
             group_sigs = {
                 g: _pooled_group_signature(
-                    cap, masks, pass1_groups[g], bounds, pooled_samples_per_member, embedder,
+                    cap, mask_paths, pass1_groups[g], bounds, pooled_samples_per_member, embedder,
                 )
                 for g in candidate_group_ids
             }
@@ -590,6 +755,16 @@ def merge_fragments(
     # overlap in time by construction (merges only ever go
     # earlier-end -> later-start), OR is just a safe way to combine
     # them without assuming that never breaks.
+    #
+    # Streamed lock-step: every member's mask file is already padded to
+    # the SAME total_frames length (project-wide MaskDir format
+    # invariant, checked above), so frame t of each member's file
+    # already aligns with global frame t -- no seeking needed, every
+    # member can just be read forward in step with the output writer,
+    # OR-ing each frame together and writing it immediately. This never
+    # allocates a full (total_frames, height, width) array, which was
+    # the other big memory cost in the pre-streaming version (see
+    # module docstring's "Streaming" section).
     out_dir_path = Path(out_mask_dir)
     out_dir_path.mkdir(parents=True, exist_ok=True)
     groups: dict[int, list[int]] = {}
@@ -598,24 +773,41 @@ def merge_fragments(
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    height, width = masks[all_ids[0]].shape[1:]
     cap.release()
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     for canon_id, members in groups.items():
-        merged = np.zeros((total_frames, height, width), dtype=bool)
-        for member in members:
-            merged |= masks[member]
-        path = out_dir_path / f"{canon_id}.mp4"
-        writer = cv2.VideoWriter(str(path), fourcc, fps, (width, height))
+        member_caps = [cv2.VideoCapture(str(mask_paths[m])) for m in members]
+        for member, mcap in zip(members, member_caps):
+            if not mcap.isOpened():
+                for c in member_caps:
+                    c.release()
+                raise FileNotFoundError(f"Could not open mask video: {mask_paths[member]}")
+
+        out_path = out_dir_path / f"{canon_id}.mp4"
+        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
         if not writer.isOpened():
-            raise RuntimeError(f"Could not open mask writer at {path}")
+            for c in member_caps:
+                c.release()
+            raise RuntimeError(f"Could not open mask writer at {out_path}")
+
         try:
-            for t in range(total_frames):
-                frame_rgb = np.repeat((merged[t].astype(np.uint8) * 255)[..., np.newaxis], 3, axis=-1)
+            for _t in range(total_frames):
+                merged_frame = np.zeros((height, width), dtype=bool)
+                for mcap in member_caps:
+                    ok, raw = mcap.read()
+                    if not ok:
+                        continue  # this member's file ended early (shouldn't
+                                  # happen given the padding invariant, but
+                                  # degrade gracefully rather than crash)
+                    gray = raw[:, :, 0] if raw.ndim == 3 else raw
+                    merged_frame |= gray > DEFAULT_MASK_THRESHOLD
+                frame_rgb = np.repeat((merged_frame.astype(np.uint8) * 255)[..., np.newaxis], 3, axis=-1)
                 writer.write(frame_rgb)
         finally:
             writer.release()
+            for mcap in member_caps:
+                mcap.release()
 
     report = {
         "source_mask_dir": str(mask_dir),
