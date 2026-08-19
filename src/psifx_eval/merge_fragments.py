@@ -138,6 +138,49 @@ memory, and every decision (which frames count as signature candidates,
 which pairs are temporally valid, the Hungarian assignment itself) is
 identical to the preloaded version.
 
+Border-touching frames also excluded from signatures (2026-08,
+full-session finding, Michele)
+------------------------------------------------------------------------
+On the full-session video, `merge_fragments` merged the child's track
+into the therapist's group with a suspiciously high similarity (0.897)
+in the pooled-group fallback (pass two), well into a stretch where
+manual inspection showed they were never actually confused by SAM3
+itself -- the child's own raw, pre-merge track was clean (verified by
+opening it directly, before `merge_fragments` ever touches it). What
+that raw track DID contain, though, was a persistent stray artifact
+along the left edge of frame (same kind of border-stuck blob already
+described above) -- present, intermittently, in BOTH the child's and
+the therapist's raw tracks.
+
+The existing single-connected-component rule doesn't catch this case:
+it was designed for frames with a stray blob ALONGSIDE the real person
+(two components, rejected as ambiguous), but here some frames have
+ONLY the border artifact as their single component -- e.g. a moment
+where the real person isn't well segmented yet, but the artifact is.
+Such a frame passes the single-component check (it genuinely is just
+one region) even though it isn't the person at all, and if the same
+artifact appears in signature-building frames on both sides of a
+comparison, it can make two different people's signatures spuriously
+resemble each other.
+
+So `_frame_signal` (shared by `_sample_signature` and
+`_pooled_group_signature`, i.e. every place a frame is considered for a
+signature) now additionally rejects any single-component frame whose
+region touches the frame's border (`_touches_border`) -- same "skip,
+don't guess" philosophy as the multi-region case, just catching a
+region that's suspicious for a different reason. A real person fully
+in frame essentially never has their whole silhouette touch the very
+edge, so this should cost very few genuine frames; a person leaving
+frame does, but a partial, mid-exit view is poor signature material
+anyway.
+
+To make issues like this easier to catch (and confirm) without
+guessing, `merge_fragments`'s report also now records the exact frame
+indices used to build every track's and every pooled group's
+signature (`signature_frames` in the report) -- so a suspiciously high
+or low similarity can be checked by opening the specific frames that
+produced it, the same way this particular bug was found.
+
 Not runnable in this project's sandbox (needs `psifx`, a real MaskDir on
 disk, and optionally `torch`/`torchreid` for the OSNet signal -- verify
 on Michele's machine, same as the rest of `psifx_eval`).
@@ -281,6 +324,24 @@ def _mask_to_polygon_single_component(mask_frame: np.ndarray) -> np.ndarray:
     return contours[0].reshape(-1, 2).astype(float)
 
 
+def _touches_border(poly: np.ndarray, height: int, width: int, margin: int = 1) -> bool:
+    """True if `poly`'s bounding box comes within `margin` pixels of any
+    edge of a `(height, width)` frame. Used to reject single-component
+    frames whose one region is actually a stray artifact stuck to the
+    frame border (2026-08, full-session finding, Michele) -- see module
+    docstring's "Border-touching frames" section for why the plain
+    single-component check alone doesn't catch this: such a frame IS
+    technically one connected region, just not the person."""
+    if poly.shape[0] == 0:
+        return False
+    x_min, y_min = poly.min(axis=0)
+    x_max, y_max = poly.max(axis=0)
+    return bool(
+        x_min <= margin or y_min <= margin
+        or x_max >= width - 1 - margin or y_max >= height - 1 - margin
+    )
+
+
 def _frame_signal(
     cap: cv2.VideoCapture,
     mask_frame: np.ndarray,
@@ -288,15 +349,22 @@ def _frame_signal(
     embedder: OSNetEmbedder | None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """OSNet embedding + hue histogram for ONE frame -- `(None, None)`
-    if the frame is empty OR ambiguous (its mask isn't a SINGLE
-    connected component, see `_mask_to_polygon_single_component`).
-    Shared by `_sample_signature` (per-fragment, edge-anchored) and
-    `_pooled_group_signature` (per-group, evenly spread) so both use
-    the exact same "don't trust an ambiguous frame" rule."""
+    if the frame is empty, ambiguous (its mask isn't a SINGLE connected
+    component, see `_mask_to_polygon_single_component`), OR its one
+    component touches the frame border (see `_touches_border` and the
+    module docstring's "Border-touching frames" section -- a stray
+    artifact stuck to the edge can be the ONLY region in a frame,
+    passing the single-component check while still not being the real
+    person). Shared by `_sample_signature` (per-fragment, edge-anchored)
+    and `_pooled_group_signature` (per-group, evenly spread) so both use
+    the exact same "don't trust a suspicious frame" rules."""
     if not mask_frame.any():
         return None, None
     poly = _mask_to_polygon_single_component(mask_frame)
     if poly.shape[0] < 3:
+        return None, None
+    height, width = mask_frame.shape[:2]
+    if _touches_border(poly, height, width):
         return None, None
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
     ok, frame = cap.read()
@@ -341,11 +409,16 @@ def _sample_signature(
     signature_samples: int,
     embedder: OSNetEmbedder | None,
     threshold: int = DEFAULT_MASK_THRESHOLD,
-) -> tuple[np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None, list[int]]:
     """Average OSNet embedding + average hue histogram over up to
     `signature_samples` USABLE frames drawn from `candidate_frames`
     (see `_frame_signal` for what "usable" means), stopping as soon as
-    that many have been collected.
+    that many have been collected. Also returns the list of frame
+    indices actually used, in the order they were collected -- recorded
+    in `merge_fragments`'s report (`signature_frames`) so a suspicious
+    similarity can be checked by opening the exact frames that produced
+    it (see module docstring's "Border-touching frames" section, added
+    after that's exactly how a real bug was found).
 
     Streams `mask_path`'s frames on demand through its own
     `cv2.VideoCapture` (opened once per call, seeked per candidate
@@ -366,6 +439,7 @@ def _sample_signature(
     of this module."""
     embeddings: list[np.ndarray] = []
     histograms: list[np.ndarray] = []
+    used_frame_indices: list[int] = []
 
     mask_cap = cv2.VideoCapture(str(mask_path))
     if not mask_cap.isOpened():
@@ -383,16 +457,18 @@ def _sample_signature(
                 continue  # past this track's own file bounds -- skip, don't guess
             emb, hist = _frame_signal(cap, mask_frame, frame_idx, embedder)
             if emb is None and hist is None:
-                continue  # empty, or ambiguous (>1 disconnected region) -- skip, don't guess
+                continue  # empty, ambiguous, or border-touching -- skip, don't guess
             if emb is not None:
                 embeddings.append(emb)
             if hist is not None:
                 histograms.append(hist)
             used_frames += 1
+            used_frame_indices.append(frame_idx)
     finally:
         mask_cap.release()
 
-    return _finalize_signature(embeddings, histograms)
+    embedding, histogram = _finalize_signature(embeddings, histograms)
+    return embedding, histogram, used_frame_indices
 
 
 def _evenly_spaced_frames(first: int, last: int, n: int) -> list[int]:
@@ -418,7 +494,7 @@ def _pooled_group_signature(
     samples_per_member: int,
     embedder: OSNetEmbedder | None,
     threshold: int = DEFAULT_MASK_THRESHOLD,
-) -> tuple[np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None, dict[int, list[int]]]:
     """Aggregated appearance signature for an already-confirmed GROUP of
     ids (formed by pass-one merges in `merge_fragments`), pooling clean
     frames spread ACROSS ALL MEMBERS -- different times, poses, and
@@ -428,11 +504,16 @@ def _pooled_group_signature(
     `signature_samples` on a single fragment, is the fallback used for
     a candidate pass one rejected.
 
+    Also returns `{member_id: [frame indices actually used]}` -- see
+    `_sample_signature`'s docstring for why this is recorded (same
+    `signature_frames` report field, keyed by pooled group here).
+
     Streams each member's own mask file through its own
     `cv2.VideoCapture` (opened per member, released before moving to
     the next) -- see module docstring's "Streaming" section."""
     embeddings: list[np.ndarray] = []
     histograms: list[np.ndarray] = []
+    used_frame_indices: dict[int, list[int]] = {}
     for member_id in member_ids:
         if member_id not in bounds or member_id not in mask_paths:
             continue  # e.g. a too-short fragment folded into this group
@@ -446,13 +527,17 @@ def _pooled_group_signature(
                 if mask_frame is None:
                     continue
                 emb, hist = _frame_signal(cap, mask_frame, frame_idx, embedder)
+                if emb is None and hist is None:
+                    continue  # empty, ambiguous, or border-touching -- skip, don't guess
                 if emb is not None:
                     embeddings.append(emb)
                 if hist is not None:
                     histograms.append(hist)
+                used_frame_indices.setdefault(member_id, []).append(frame_idx)
         finally:
             member_cap.release()
-    return _finalize_signature(embeddings, histograms)
+    embedding, histogram = _finalize_signature(embeddings, histograms)
+    return embedding, histogram, used_frame_indices
 
 
 def _pair_similarity(
@@ -677,6 +762,11 @@ def merge_fragments(
     # something else can resume INTO it later).
     start_ids = [oid for oid in bounds if bounds[oid][0] > 0]
 
+    # per-signature frame indices actually used, for transparency (see
+    # module docstring's "Border-touching frames" section) -- filled in
+    # below, included in the report as `signature_frames`.
+    signature_frames: dict[str, dict] = {"end": {}, "start": {}, "pooled_groups": {}}
+
     try:
         end_sigs = {}
         for obj_id in end_ids:
@@ -687,7 +777,9 @@ def merge_fragments(
             # further into the track's more stable middle instead of
             # forcing a fixed-size window (see _sample_signature).
             candidates = list(range(last, first - 1, -1))
-            end_sigs[obj_id] = _sample_signature(cap, mask_paths[obj_id], candidates, signature_samples, embedder)
+            emb, hist, frames_used = _sample_signature(cap, mask_paths[obj_id], candidates, signature_samples, embedder)
+            end_sigs[obj_id] = (emb, hist)
+            signature_frames["end"][obj_id] = frames_used
 
         start_sigs = {}
         for obj_id in start_ids:
@@ -695,7 +787,9 @@ def merge_fragments(
             # search FORWARD from `first` (the risky reappearance edge)
             # toward `last`, same reasoning as above.
             candidates = list(range(first, last + 1))
-            start_sigs[obj_id] = _sample_signature(cap, mask_paths[obj_id], candidates, signature_samples, embedder)
+            emb, hist, frames_used = _sample_signature(cap, mask_paths[obj_id], candidates, signature_samples, embedder)
+            start_sigs[obj_id] = (emb, hist)
+            signature_frames["start"][obj_id] = frames_used
     finally:
         cap.release()
 
@@ -728,12 +822,13 @@ def merge_fragments(
         if not cap.isOpened():
             raise FileNotFoundError(f"Could not open video: {video_path}")
         try:
-            group_sigs = {
-                g: _pooled_group_signature(
+            group_sigs = {}
+            for g in candidate_group_ids:
+                emb, hist, member_frames_used = _pooled_group_signature(
                     cap, mask_paths, pass1_groups[g], bounds, pooled_samples_per_member, embedder,
                 )
-                for g in candidate_group_ids
-            }
+                group_sigs[g] = (emb, hist)
+                signature_frames["pooled_groups"][g] = member_frames_used
         finally:
             cap.release()
         orphan_sigs = {o: start_sigs[o] for o in orphan_start_ids}
@@ -834,6 +929,14 @@ def merge_fragments(
             for c in group_candidates
         ],
         "groups": {str(canon): members for canon, members in groups.items()},
+        "signature_frames": {
+            "end": {str(oid): frames for oid, frames in signature_frames["end"].items()},
+            "start": {str(oid): frames for oid, frames in signature_frames["start"].items()},
+            "pooled_groups": {
+                str(gid): {str(mid): frames for mid, frames in member_frames.items()}
+                for gid, member_frames in signature_frames["pooled_groups"].items()
+            },
+        },
     }
     return report
 
