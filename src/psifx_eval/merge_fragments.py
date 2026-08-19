@@ -181,6 +181,41 @@ signature (`signature_frames` in the report) -- so a suspiciously high
 or low similarity can be checked by opening the specific frames that
 produced it, the same way this particular bug was found.
 
+Pooled signature: search nearby instead of giving up on an exact
+target frame (2026-08, full-session finding, Michele)
+------------------------------------------------------------------------
+`signature_frames` from the very first full-session test with the
+border filter above showed the fix working (frames were being
+rejected) but not helping: the false merge's similarity barely moved.
+The reason was a separate, pre-existing weakness in
+`_pooled_group_signature` that the new, stricter filtering exposed.
+`_evenly_spaced_frames` picks `samples_per_member` EXACT target frame
+indices spread across a member's span, and the old code tried each one
+exactly -- if a target frame failed any check (empty, ambiguous, or now
+also border-touching), that sampling "slot" was simply lost, with no
+attempt at a nearby alternative. On a member spanning tens of thousands
+of frames, this could -- and did -- collapse 5 requested samples down
+to a single surviving frame, leaving the pooled signature built from
+far too little (and far too lucky-or-unlucky) material to be a
+reliable average, undermining the whole point of pooling ("genuine
+diversity across multiple confirmed sightings", see the "Second pass"
+section above).
+
+`_pooled_group_signature` now searches a small neighborhood around
+each target frame (`_search_nearby_signal`, expanding outward one
+frame at a time on both sides, capped in radius, and never revisiting
+a frame already used by an earlier slot for the same member) before
+giving up on that slot -- the same "keep looking nearby instead of
+giving up immediately" principle `_sample_signature` already applies
+via its own directional scan, just applied locally per target instead
+of as one long scan. The search radius per target is capped at roughly
+half the average spacing between targets (so one slot's search stays
+in its own neighborhood instead of drifting into an adjacent slot's
+territory, preserving the intended spread-out diversity) and at
+`MAX_POOLED_SEARCH_RADIUS` frames absolutely (so a member with a huge,
+mostly-unusable span can't make a single pooled-signature call scan
+enormous numbers of frames).
+
 Not runnable in this project's sandbox (needs `psifx`, a real MaskDir on
 disk, and optionally `torch`/`torchreid` for the OSNet signal -- verify
 on Michele's machine, same as the rest of `psifx_eval`).
@@ -205,6 +240,12 @@ DEFAULT_MIN_FRAGMENT_FRAMES = 8
 DEFAULT_MERGE_THRESHOLD = 0.6
 DEFAULT_SIGNATURE_SAMPLES = 5
 DEFAULT_POOLED_SAMPLES_PER_MEMBER = 5
+# absolute cap on how far _search_nearby_signal will look on either side
+# of an evenly-spaced target frame before giving up on that sampling
+# slot -- bounds the worst case (a member with a huge, mostly-unusable
+# span) to a fixed amount of work per pooled-signature call, see module
+# docstring's "Pooled signature: search nearby" section.
+MAX_POOLED_SEARCH_RADIUS = 200
 # same white-on-black threshold convention as mask_io.read_mask_video --
 # kept in sync by hand since this module deliberately doesn't preload
 # through mask_io anymore (see module docstring's "Streaming" section).
@@ -486,6 +527,47 @@ def _evenly_spaced_frames(first: int, last: int, n: int) -> list[int]:
     return sorted({int(round(first + i * (span - 1) / (n - 1))) for i in range(n)})
 
 
+def _search_nearby_signal(
+    cap: cv2.VideoCapture,
+    member_cap: cv2.VideoCapture,
+    target: int,
+    first: int,
+    last: int,
+    max_radius: int,
+    exclude: set[int],
+    embedder: OSNetEmbedder | None,
+    threshold: int = DEFAULT_MASK_THRESHOLD,
+) -> tuple[int, np.ndarray | None, np.ndarray | None] | None:
+    """Tries `target` first, then alternately expands outward
+    (+1, -1, +2, -2, ...) up to `max_radius` frames on either side --
+    clamped to `[first, last]` and skipping anything already in
+    `exclude` -- and returns the first `(frame_idx, embedding,
+    histogram)` that passes `_frame_signal`'s checks, or `None` if
+    nothing nearby works. Used by `_pooled_group_signature` so one bad
+    frame at an evenly-spaced target position (empty, ambiguous, or
+    border-touching -- see `_frame_signal`) doesn't lose that sampling
+    slot entirely -- the same "keep looking, don't give up" principle
+    `_sample_signature` already applies via its own directional scan,
+    just applied locally per target instead of as one long scan (see
+    module docstring's "Pooled signature: search nearby" section)."""
+    offsets = [0]
+    for r in range(1, max_radius + 1):
+        offsets.append(r)
+        offsets.append(-r)
+    for offset in offsets:
+        frame_idx = target + offset
+        if frame_idx < first or frame_idx > last or frame_idx in exclude:
+            continue
+        mask_frame = _read_mask_frame(member_cap, frame_idx, threshold)
+        if mask_frame is None:
+            continue
+        emb, hist = _frame_signal(cap, mask_frame, frame_idx, embedder)
+        if emb is None and hist is None:
+            continue
+        return frame_idx, emb, hist
+    return None
+
+
 def _pooled_group_signature(
     cap: cv2.VideoCapture,
     mask_paths: dict[int, Path],
@@ -504,6 +586,14 @@ def _pooled_group_signature(
     `signature_samples` on a single fragment, is the fallback used for
     a candidate pass one rejected.
 
+    For each of the `samples_per_member` evenly-spaced target frames,
+    searches a small neighborhood around it (`_search_nearby_signal`)
+    instead of trying only the exact target -- see module docstring's
+    "Pooled signature: search nearby" section for why: without this, a
+    member spanning a huge span could end up represented by far fewer
+    (sometimes just one) usable frame than requested, if a handful of
+    unlucky exact target frames happened to fail.
+
     Also returns `{member_id: [frame indices actually used]}` -- see
     `_sample_signature`'s docstring for why this is recorded (same
     `signature_frames` report field, keyed by pooled group here).
@@ -518,17 +608,28 @@ def _pooled_group_signature(
         if member_id not in bounds or member_id not in mask_paths:
             continue  # e.g. a too-short fragment folded into this group
         first, last = bounds[member_id]
+        targets = _evenly_spaced_frames(first, last, samples_per_member)
+        # search radius per target: roughly half the average spacing
+        # between targets, so a slot's search stays in its own
+        # neighborhood instead of drifting into an adjacent slot's --
+        # capped absolutely by MAX_POOLED_SEARCH_RADIUS regardless of
+        # how large the member's own span is.
+        avg_gap = max(1, (last - first + 1) // max(1, samples_per_member))
+        max_radius = min(max(1, avg_gap // 2), MAX_POOLED_SEARCH_RADIUS)
+
         member_cap = cv2.VideoCapture(str(mask_paths[member_id]))
         if not member_cap.isOpened():
             raise FileNotFoundError(f"Could not open mask video: {mask_paths[member_id]}")
         try:
-            for frame_idx in _evenly_spaced_frames(first, last, samples_per_member):
-                mask_frame = _read_mask_frame(member_cap, frame_idx, threshold)
-                if mask_frame is None:
-                    continue
-                emb, hist = _frame_signal(cap, mask_frame, frame_idx, embedder)
-                if emb is None and hist is None:
-                    continue  # empty, ambiguous, or border-touching -- skip, don't guess
+            used: set[int] = set()
+            for target in targets:
+                found = _search_nearby_signal(
+                    cap, member_cap, target, first, last, max_radius, used, embedder, threshold,
+                )
+                if found is None:
+                    continue  # nothing usable near this slot -- same "some signal beats none"
+                frame_idx, emb, hist = found
+                used.add(frame_idx)
                 if emb is not None:
                     embeddings.append(emb)
                 if hist is not None:
