@@ -242,6 +242,26 @@ one member genuinely precedes it (the original "genuine gap, not
 concurrent existence" requirement, just applied correctly to the whole
 group instead of to just one lucky member).
 
+Pass two must offer EVERY group as a candidate, not just non-orphan
+ones (2026-08, full-session finding, Michele)
+------------------------------------------------------------------------
+With the fix above in place, the child's session still ended up split
+across three separate ids (an early long fragment, a brief doorway
+peek, and the final reappearance after the box) instead of being
+recognized as one person throughout. The reason turned out to be
+another gap in pass two, unrelated to appearance or thresholds: the
+list of candidate groups for an orphan excluded EVERY group whose
+canonical id happened to be SOME orphan's id -- not just when an
+orphan was being compared against its own trivial group. That meant a
+group formed from ONE orphan (e.g. the early fragment, once pass one
+left it unmatched) was invisible as a candidate for every OTHER orphan
+too (e.g. the final reappearance) -- the pair was never scored at all,
+not rejected for low similarity. Self-matching was already correctly
+excluded elsewhere (`if o in members: continue`), so the broader
+exclusion was both redundant and wrong. Now every pass-one group is
+offered as a candidate for every orphan; the existing self-match and
+temporal-overlap checks still apply correctly per pair.
+
 Not runnable in this project's sandbox (needs `psifx`, a real MaskDir on
 disk, and optionally `torch`/`torchreid` for the OSNet signal -- verify
 on Michele's machine, same as the rest of `psifx_eval`).
@@ -953,12 +973,20 @@ def merge_fragments(
         pass1_groups: dict[int, list[int]] = {}
         for oid in all_ids:
             pass1_groups.setdefault(canonical[oid], []).append(oid)
-        # a lone orphan's own (still-trivial) "group" isn't a useful
-        # pooled candidate for itself -- excluded up front rather than
-        # relying on the `o in members` check alone, since that check
-        # only guards against matching an orphan to ITS OWN group, not
-        # against wastefully computing a pooled signature for it.
-        candidate_group_ids = [g for g in pass1_groups if g not in orphan_start_ids]
+        # EVERY pass-one group is a candidate here, including a trivial
+        # one-member group formed from another orphan (e.g. an earlier
+        # orphan start id that pass one left unmatched) -- excluding
+        # groups whose key happened to be SOME orphan id used to also
+        # exclude them as candidates for every OTHER orphan, not just
+        # for themselves (2026-08, full-session finding, Michele: this
+        # silently prevented two genuinely-the-same-person orphan
+        # fragments, separated by more than one gap, from ever being
+        # compared at all -- not rejected on low similarity, simply
+        # never evaluated). Self-matching an orphan against its own
+        # trivial group is already correctly excluded below via
+        # `if o in members: continue`, so no separate filter is needed
+        # here.
+        candidate_group_ids = list(pass1_groups.keys())
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
