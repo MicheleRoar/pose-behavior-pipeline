@@ -216,6 +216,32 @@ territory, preserving the intended spread-out diversity) and at
 mostly-unusable span can't make a single pooled-signature call scan
 enormous numbers of frames).
 
+Pass two must reject a group that's active AT THE SAME TIME as the
+orphan (2026-08, full-session finding, Michele)
+------------------------------------------------------------------------
+Even with the two fixes above, the full-session test still produced a
+false merge in pass two -- this time a different orphan (a track later
+confirmed, by opening the raw video at the same frame as both tracks'
+masks, to be the CHILD) got folded into the therapist's group. The
+child's track and the therapist's own long-running track were both
+active across almost the exact same stretch of the video -- visibly
+two different people on screen at once, confirmed directly.
+
+The bug was a gap in `_resolve_group_merges`'s temporal-validity check,
+not an appearance problem. A group was accepted as a candidate for an
+orphan as long as ANY ONE of its members ended before the orphan
+started -- which the group satisfied only via a tiny, long-finished
+early fragment, while its OTHER (and much longer) member was still
+running concurrently with the orphan the entire time. A real person
+cannot be two simultaneously-active tracks, so a group can only
+plausibly be "the same person, reappearing as this orphan" if NONE of
+its members overlap the orphan's `[first, last]` span at all -- not
+merely if some one member happens to have already finished. The check
+now requires both: no member overlaps the orphan in time, AND at least
+one member genuinely precedes it (the original "genuine gap, not
+concurrent existence" requirement, just applied correctly to the whole
+group instead of to just one lucky member).
+
 Not runnable in this project's sandbox (needs `psifx`, a real MaskDir on
 disk, and optionally `torch`/`torchreid` for the OSNet signal -- verify
 on Michele's machine, same as the rest of `psifx_eval`).
@@ -722,23 +748,38 @@ def _resolve_group_merges(
     ones pass one's fragment-to-fragment comparison left unmatched)
     against candidate GROUPS (columns, `{canonical_id: member_ids}`
     from pass one) -- see the module docstring's "Second pass" section.
-    A group is a temporally valid candidate for an orphan if ANY of its
-    members ends before the orphan starts (mirrors `_resolve_merges`'s
-    single-id check, just applied to every member). Same global
-    assignment + "tag every real candidate" conventions as
-    `_resolve_merges`."""
+    A group is a temporally valid candidate for an orphan only if BOTH:
+    (a) no member of the group overlaps the orphan's own `[first, last]`
+    span -- a real person can't be two simultaneously-active tracks, so
+    any overlap rules the group out entirely, regardless of how the
+    other members line up (see module docstring's "Pass two must reject
+    a group that's active at the same time" section for the real-footage
+    bug this fixes: a group was previously accepted via one long-
+    finished member while ANOTHER of its members was still running
+    concurrently with the orphan); and (b) at least one member actually
+    ends before the orphan starts, i.e. there's a genuine gap, not just
+    an absence of overlap with a group that simply starts later (mirrors
+    `_resolve_merges`'s single-id check, just applied correctly to
+    every member instead of any one of them). Same global assignment +
+    "tag every real candidate" conventions as `_resolve_merges`."""
     if not orphan_ids or not groups:
         return []
 
     group_ids = list(groups.keys())
     cost = np.full((len(orphan_ids), len(group_ids)), _IMPOSSIBLE_COST)
     for i, o in enumerate(orphan_ids):
+        o_first, o_last = bounds[o]
         for j, g in enumerate(group_ids):
             members = groups[g]
             if o in members:
                 continue  # orphan is (trivially) already part of this group
-            if not any(m in bounds and bounds[m][1] < bounds[o][0] for m in members):
-                continue  # no member of this group ends before the orphan starts
+            member_bounds = [bounds[m] for m in members if m in bounds]
+            if not member_bounds:
+                continue  # e.g. every member was too short to have bounds
+            if any(m_first <= o_last and m_last >= o_first for m_first, m_last in member_bounds):
+                continue  # a member of this group is active at the same time as the orphan -- can't be the same person
+            if not any(m_last < o_first for _m_first, m_last in member_bounds):
+                continue  # no member of this group actually ends before the orphan starts
             sim = _pair_similarity(group_sigs[g], orphan_sigs[o])
             cost[i, j] = 1.0 - sim
 
