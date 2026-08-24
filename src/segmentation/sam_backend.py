@@ -2,114 +2,62 @@
 sam_backend.py
 ================
 Shared base for `Sam31Tracker` (sam31_estimation.py) and `Sam2Tracker`
-(sam2_estimation.py): both libraries expose the SAME stateful video API
-(official docs: facebookresearch/sam3 and facebookresearch/sam2) --
+(sam2_estimation.py): both libraries expose the same stateful video API
+(`init_state()` / `add_new_points_or_box()` / `propagate_in_video()`,
+per facebookresearch/sam3 and facebookresearch/sam2 docs), so all
+chunking/prompting/reconciliation/persistence logic lives here once;
+the two subclasses only implement `_build_predictor()` (delayed import
+-- neither sam3 nor sam2 install in this environment, they need Python
+3.12+/CUDA 12.6+).
 
-    state = predictor.init_state(frames)
-    predictor.add_new_points_or_box(state, frame_idx=..., obj_id=..., box=...)
-    for frame_idx, obj_ids, masks in predictor.propagate_in_video(state):
-        ...
-
--- so all the chunking/prompting/reconciliation/persistence logic lives
-here ONCE; the two subclasses implement only `_build_predictor()`
-(which library to import/instantiate, delayed import because neither
-sam3 nor sam2 are installable in this environment: they require Python
-3.12+/CUDA 12.6+, see requirements.txt).
-
-Why chunking (see also segmentation/chunking.py)
-------------------------------------------------------------
-`init_state()` loads the pixels of ALL passed frames into memory -- on a
-video several minutes long it's not feasible to pass it whole. It's
+Chunking (see also segmentation/chunking.py): `init_state()` loads all
+passed frames into memory, infeasible for a multi-minute video, so it's
 processed in overlapping windows (`chunk_size` frames, `overlap` shared
-between one chunk and the next).
+between consecutive chunks).
 
-ID prompting/continuity strategy
-------------------------------------------------
-- First chunk: no known person yet. YOLO is used (the same model already
-  used by `SegTracker`, here only as a DETECTOR on a single frame, not
-  as a tracker) to propose the initial boxes on the chunk's first frame.
-  NOTE: this means the quality of the initial prompt still depends on
-  YOLO -- SAM here replaces TRACKING/re-id over time, not necessarily
-  the initial detection (one could switch to a text prompt "person" if
-  the SAM 3.1 concept-prompting model supports it well enough; to be
-  verified on the CUDA machine, see Sam31Tracker).
-- Subsequent chunks: for each already-known person (global id) a box
-  prompt is derived from their mask in the LAST frame of the previous
-  chunk (which is also the FIRST frame -- "anchor frame" -- of the new
-  chunk, being in the overlap window), and it's registered with
-  `obj_id=<global id>`: SAM thus continues to directly use the same id,
-  no need for after-the-fact matching in the common case. YOLO is ALSO
-  run on the anchor frame to spot NEW people (who entered the frame
-  during the previous chunk) not already covered by an existing prompt
-  (low IoU with all already-seeded boxes): these are assigned a
-  never-used global id.
-- As a consistency check (not as a primary matching mechanism, see
-  above), the mask SAM produces on the anchor frame is still compared
-  against the seeded one (`chunking.polygon_iou`): if the IoU drops
-  below `iou_threshold` only a warning is logged -- it may mean SAM lost
-  the person or "swapped" identities in the overlap, useful to see in
-  the logs but not handled automatically in this first version (see
-  chunking.py for the known limitation).
+ID prompting/continuity: the first chunk has no known person yet, so
+YOLO (as a single-frame detector, not a tracker) proposes the initial
+boxes. Every later chunk derives a box prompt for each known person from
+their mask on the chunk's anchor frame (= last frame of the previous
+chunk = first frame of this one, via the overlap), registered with
+`obj_id=<global id>` so SAM continues the same id directly; YOLO also
+runs on the anchor frame to spot new people (low IoU with all seeded
+boxes) and assigns them a fresh id. As a consistency check only (not the
+primary matching mechanism), SAM's own anchor-frame mask is compared
+against the seeded one (`chunking.polygon_iou`) -- a drop below
+`iou_threshold` just logs a warning (possible lost/swapped identity in
+the overlap), not handled automatically yet.
 
-Periodic re-detection within the chunk (`redetect_every`)
--------------------------------------------------------------
-Observed problem (Michele, direct comparison YOLO+ByteTrack vs
-Sam2Tracker on the same video): YOLO+ByteTrack detects on EVERY frame,
-while in the scheme above YOLO runs only once per chunk (the anchor
-frame) -- with the default `chunk_size` of 600, one detection every ~40s
-at 15fps. Whoever isn't exactly in the anchor frame stays invisible for
-the ENTIRE rest of the chunk, even if visible in 99% of the other
-frames; on top of that SAM propagates by inertia (internal memory) and
-if it loses a person halfway through a chunk (occlusion, fast movement)
-it has no way to re-detect them before the next chunk boundary. Result:
-many fewer masks compared to YOLO+ByteTrack, not due to a model quality
-difference but due to re-detection frequency.
+`redetect_every` (default `None` = one window per chunk): YOLO normally
+only runs once per chunk (the anchor frame), so with the default
+`chunk_size=600` at 15fps that's one detection every ~40s -- anyone not
+in that exact frame stays invisible for the rest of the chunk, and SAM
+has no way to recover someone it loses mid-chunk before the next
+boundary. Setting `redetect_every` splits each chunk into sub-windows,
+propagating one at a time and re-running YOLO between them to seed any
+new people (respects the same `reseed_new_people` flag as chunk
+boundaries); already-known people keep propagating automatically, no
+reseed needed. `propagate_in_video(state, start_frame_idx=...,
+max_frame_num_to_track=...)` is assumed available per the official
+SAM2/SAM3 notebooks but not yet verified on a real CUDA machine.
 
-`redetect_every` (default `None` = unchanged behavior, a single window
-as large as the chunk) splits each chunk into sub-windows of
-`redetect_every` frames: one sub-window is propagated at a time
-(`propagate_in_video(state, start_frame_idx=..., max_frame_num_to_track=...)`,
-assumed available because documented in the official SAM2/SAM3 notebooks
-for adding objects mid-video -- NOT yet verified on a real CUDA machine,
-see the "Honesty" note below), then YOLO is called on the first frame of
-the NEXT sub-window to propose any new people not yet seeded (same IoU
-comparison as `reseed_new_people`, and indeed it respects the same flag:
-with `reseed_new_people=False` no re-detection happens, neither at the
-chunk boundary nor within the chunk -- it remains the "pure SAM"
-condition). Already-known people keep propagating automatically (same
-`state`, same SAM memory) -- no need to reseed them at every
-sub-window, re-detection ONLY proposes any new entries.
+What's verified: this module was written and tested only against a fake
+predictor (`tests/sam_backend_check.py`, no CUDA GPU here). One real
+finding from a CUDA-machine test with the SAMURAI fork (same
+`sam2_video_predictor` as vanilla SAM2) did make it back into
+`_init_state()`: the predictor does NOT accept in-memory frame lists
+("Only MP4 video and JPEG folder are supported"), so each chunk is
+written as a JPEG sequence to a temp folder first. Not yet confirmed for
+SAM 3.1 (likely the same, shares the video code) -- `_init_state()` stays
+overridable per subclass if it differs.
 
-Honesty about what's verified here
---------------------------------------
-This module was initially written and tested ONLY with a fake predictor
-injected in place of sam3/sam2 (see `tests/sam_backend_check.py`, no CUDA
-GPU in this environment). `_init_state()` below was however CORRECTED
-based on a real test on a CUDA machine (with the SAMURAI fork, which
-vendors the same `sam2_video_predictor` as vanilla SAM2 -- same expected
-behavior with `Sam2Tracker`): the predictor does NOT accept a list of
-in-memory frames as was initially assumed -- it hit "Only MP4 video and
-JPEG folder are supported". Each chunk is therefore written as a JPEG
-sequence in a temporary folder (see below) before calling
-`init_state()`. Not yet confirmed whether SAM 3.1 has the same
-constraint (it inherits the same video code from SAM2, so likely) -- if
-it turns out it also accepts frame lists, `_init_state()` remains
-overridable per subclass in case it's worth differentiating in the
-future.
-
-Why Sam2Tracker and not SamuraiTracker
-------------------------------------------
-`SamuraiTracker` (removed) used the same predictor with SAMURAI's
-motion-aware mode active. Verified on a real CUDA machine: that code
-(`sam2_base.py::_forward_sam_heads`) assumes a single object per session
-(written/validated on the LaSOT/GOT-10k/TrackingNet single-target visual
-object tracking benchmarks) -- seeding multiple people in the same
-session (the normal case here) crashes with `RuntimeError: Boolean value
-of Tensor with more than one value is ambiguous`. Vanilla SAM2
-(`Sam2Tracker`, sam2_estimation.py) uses the same predictor WITHOUT that
-patch: it natively supports batched multi-object, at the cost of losing
-motion-modeling through occlusions. See the docstring of
-`segmentation/sam2_estimation.py` for the full detail.
+Why `Sam2Tracker` and not a SAMURAI-mode tracker: SAMURAI's
+motion-aware mode (`sam2_base.py::_forward_sam_heads`) assumes a single
+object per session (built for single-target benchmarks) and crashes on
+multi-object seeding (`RuntimeError: Boolean value of Tensor with more
+than one value is ambiguous`, confirmed on a real CUDA machine). Vanilla
+SAM2 supports batched multi-object natively, at the cost of losing
+motion-modeling through occlusions -- see `sam2_estimation.py`.
 """
 
 from __future__ import annotations

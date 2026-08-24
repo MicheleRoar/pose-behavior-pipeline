@@ -2,137 +2,77 @@
 sam31_estimation.py
 =====================
 `Sam31Tracker`: segmentation/tracking backend based on SAM 3.1
-(facebookresearch/sam3, checkpoint `facebook/sam3.1` -- latest version
-available as of 2026-08, released 2026-03-27 as the "Object Multiplex"
-update to SAM 3, see https://github.com/facebookresearch/sam3). All the
-chunking/persistence logic lives in
-`segmentation/sam_backend.py::ChunkedVideoPredictorBackend` -- here is
-the specific part: how to build the SAM 3.1 predictor and, new, how to
-seed a chunk using SAM 3's TEXT prompt instead of YOLO box-seeding (see
+(facebookresearch/sam3, checkpoint `facebook/sam3.1`, the "Object
+Multiplex" update to SAM 3). All chunking/persistence logic lives in
+`segmentation/sam_backend.py::ChunkedVideoPredictorBackend`; this module
+supplies the SAM 3.1-specific parts: building the predictor, and seeding
+a chunk with SAM 3's TEXT prompt instead of YOLO box-seeding (see
 `text_prompt` below).
 
-Real API (confirmed by the official facebookresearch/sam3 README, "Basic
-Usage" section -- NOT the SAM2-style one initially assumed by this
-module/by `ChunkedVideoPredictorBackend`, completely different):
+Real API (per the official facebookresearch/sam3 README -- a single
+`handle_request(request=dict(type=..., ...))` call, NOT the SAM2-style
+`init_state`/`add_new_points_or_box`/`propagate_in_video` initially
+assumed), mapped onto `ChunkedVideoPredictorBackend`'s three overridable
+methods (`_init_state`, `_add_box_prompt`, `_propagate`):
 
-    from sam3.model_builder import build_sam3_video_predictor
     video_predictor = build_sam3_video_predictor()
-    response = video_predictor.handle_request(request=dict(
-        type="start_session", resource_path=video_path,  # JPEG folder or MP4 file
-    ))
-    response = video_predictor.handle_request(request=dict(
-        type="add_prompt", session_id=response["session_id"],
-        frame_index=0, text="<PROMPT>",
-    ))
-    output = response["outputs"]
+    r = video_predictor.handle_request(request=dict(type="start_session", resource_path=video_path))
+    r = video_predictor.handle_request(request=dict(type="add_prompt", session_id=r["session_id"], frame_index=0, text="<PROMPT>"))
+    output = r["outputs"]
 
-A single function (`handle_request`, a "request" dict with a `type`
-field) replaces both `init_state`/`add_new_points_or_box` and
-(presumably) `propagate_in_video` from SAM2 -- here translated into the
-three overridable methods of `ChunkedVideoPredictorBackend`
-(`_init_state`, `_add_box_prompt`, `_propagate`) to reuse the
-chunking/reconciliation/persistence logic without duplicating it.
+Confirmed on a real CUDA run, notes for anyone touching this file again:
+- `add_prompt` with `text=` returns `{"frame_index": ..., "outputs":
+  {"out_obj_ids": [...], "out_boxes_xywh": [...], "out_binary_masks":
+  [...]}}` -- the VIDEO api's shape, different from SAM 3's IMAGE api
+  (`boxes`/`object_ids`/`scores`) initially assumed. Code reads these
+  keys with a fallback to the old names, and raises an explicit
+  `RuntimeError` (found keys included) rather than a silent `KeyError`
+  if neither matches.
+- `out_boxes_xywh` is (x, y, width, height), not (x1,y1,x2,y2) like the
+  rest of the pipeline -- see `_xywh_to_xyxy_pixels()`. Whether the
+  coordinates are pixels or normalized [0,1] isn't documented; that
+  method's docstring has the heuristic used.
+- `add_prompt` with `box=`/`obj_id=` (for YOLO box-seeding) does not
+  exist as assumed by SAM2 analogy -- confirmed both by a real crash
+  (`AssertionError: at least one type of prompt (text, boxes) must be
+  provided`) and by reading `sam3/model/sam3_base_predictor.py` +
+  `sam3_video_inference.py`: boxes are `bounding_boxes`/
+  `bounding_box_labels` and route through the SEMANTIC prompt method,
+  which resets the whole session and ignores a caller-chosen `obj_id`.
+  Fixed in `_add_box_prompt()` by going through the POINT-based tracker
+  api instead (`points=`/`point_labels=`/`obj_id=`, confirmed to respect
+  `obj_id` and not reset the session) -- see that method's docstring.
+- `propagate_in_video` is not a `handle_request()` type (confirmed:
+  raises `RuntimeError("invalid request type: propagate_in_video")`).
+  Multi-frame propagation is the separate streaming method
+  `handle_stream_request()`, returning a generator (see `_propagate()`).
+  Exact streaming request/response field names are inferred by analogy
+  with `add_prompt`'s confirmed shape, not independently confirmed; code
+  tries the confirmed keys first, then falls back, then raises with the
+  found keys rather than guessing silently.
 
-Honesty about certainty level (updated after the first test on Michele's
-real CUDA machine, 2026-08-06 -- see below for what changed):
-- `start_session` and `add_prompt` with `text=`/`frame_index=` --
-  CONFIRMED by the official README (snippet copied above) AND by the
-  real run.
-- REAL shape of the `response` for `add_prompt` with `text=` (CONFIRMED
-  by the real run, different from what was initially assumed -- what was
-  assumed was the shape of SAM 3's IMAGE API, `boxes`/`object_ids`/
-  `scores`, not the VIDEO one):
-      {
-          "frame_index": ...,
-          "outputs": {
-              "out_obj_ids": [...],
-              "out_boxes_xywh": [...],   # (x, y, width, height) per box
-              "out_binary_masks": [...],
-          },
-      }
-  `_add_text_prompt()`/`_propagate()` read these keys with a fallback to
-  the old ones (`boxes`/`object_ids`/`masks`) for safety, and raise an
-  explicit `RuntimeError` (with the found keys included in the message)
-  if neither variant is found, instead of a silent `KeyError` -- see what
-  happened the first time.
-- `out_boxes_xywh` box format: (x, y, width, height), NOT
-  (x1,y1,x2,y2) like the rest of the pipeline (`_polygon_to_box`,
-  `_detect_people` via YOLO). It's also not clear from the value alone
-  whether the coordinates are already in pixels or normalized [0,1]
-  (common convention for detection APIs, not explicitly documented in
-  the README) -- see `_xywh_to_xyxy_pixels()` below for the heuristic
-  used (and its limitation).
-- `add_prompt` with `box=`/`obj_id=` (used by box-seeding via YOLO) --
-  the SAM2-by-analogy guess turned out WRONG, confirmed both by a real
-  crash (Michele, CUDA machine, 2026-08-11, `redetect_every` finally
-  exercising this path for the first time: `AssertionError: at least
-  one type of prompt (text, boxes) must be provided`) and by reading
-  the real source (github.com/facebookresearch/sam3,
-  `sam3/model/sam3_base_predictor.py` + `sam3_video_inference.py`,
-  fetched 2026-08-11): there is no `box` request key at all (boxes are
-  `bounding_boxes`/`bounding_box_labels`), and even those route to the
-  SEMANTIC prompt method, which resets the whole session on every call
-  and ignores a caller-chosen `obj_id`. Now FIXED in `_add_box_prompt()`
-  below by going through the POINT-based tracker API instead
-  (`points=`/`point_labels=`/`obj_id=`, confirmed to respect `obj_id`
-  and NOT reset the session) -- see that method's docstring for the
-  full trail. Not yet re-verified on a real CUDA run after this fix
-  (the source reading is solid, but nothing replaces seeing it work).
-- `propagate_in_video` does NOT go through `handle_request()` --
-  CONFIRMED on a real run (Michele, CUDA machine, 2026-08-06): the SAM 3
-  dispatcher raised `RuntimeError("invalid request type: propagate_in_video")`.
-  Multi-frame propagation uses a separate STREAMING method,
-  `handle_stream_request()`, which returns a generator (one response per
-  frame), see `_propagate()` below. `handle_request()` remains correct
-  only for `start_session`/`add_prompt` (single response, confirmed).
-- Exact field names of the streaming request (`start_frame_index`
-  instead of `start_frame_idx`, `propagation_direction="forward"`) and
-  the exact shape of each generator response -- NOT confirmed with the
-  same certainty as the method change: inferred for consistency with the
-  `frame_index` key already confirmed in `add_prompt`. The code first
-  tries the real keys already confirmed for `add_prompt`
-  (`out_obj_ids`/`out_binary_masks`, reused here by analogy), then the
-  old ones as a fallback, and raises an explicit error with the found
-  keys if neither matches -- instead of silently guessing again.
+Text prompt mode (`text_prompt`, e.g. "person"): mirrors CHUV's
+production pipeline (`psifx video tracking sam3 inference --text_prompt
+"person"`). SAM 3 can discover every instance of a concept on its own,
+no YOLO proposer needed. When set, `_seed_new_chunk()` calls SAM 3 with
+the prompt on the anchor frame instead of YOLO; SAM 3 assigns its own
+LOCAL ids to what it finds (can't be told to reuse a global id like with
+box-prompting), so they're reconciled against the previous chunk's
+global ids via `chunking.reconcile_ids_windowed()` (Hungarian over a
+short multi-frame window -- see chunking.py for why this replaced a
+single-anchor-frame greedy match). An id with no geometric match in the
+window is tried against the appearance gallery (`identity_gallery.py`)
+before minting a new global id. `text_prompt=None` (default) keeps the
+original box-via-YOLO behavior unchanged.
 
-Text prompt mode (`text_prompt`, e.g. "person")
------------------------------------------------------------
-Born from a direct comparison with the CHUV production pipeline
-(Video-Annotation-System, which uses `psifx video tracking sam3
-inference --text_prompt "person"`, confirmed working in production): SAM
-3 can discover ALL instances of a text concept in a frame ON ITS OWN,
-without needing YOLO as a proposer. When `text_prompt` is set,
-`_seed_new_chunk()` calls SAM 3 with that prompt on the anchor frame
-instead of YOLO: SAM 3, HOWEVER, assigns its own LOCAL ids to the
-discovered instances (we can't ask it to reuse one of our global ids,
-unlike with the box-prompt) -- they are therefore reconciled by geometry
-with the previous chunk's global ids using `chunking.reconcile_ids_windowed()`
-(Hungarian assignment over a short multi-frame window, see chunking.py
-for the 2026-08 revision -- this used to be a single-anchor-frame
-greedy match, `chunking.reconcile_ids()`, which could steal an
-already-known id for a nearby new detection; see the module docstring
-of chunking.py for the concrete bug and the fix). A local id that finds
-no geometric match anywhere in the window is tried against the
-appearance gallery (`identity_gallery.py`) before a brand-new global id
-is minted. If `text_prompt` is
-`None` (default), behavior stays the original box-via-YOLO one,
-unchanged -- `Sam31Tracker()` with no arguments behaves exactly as
-before this change.
-
-`redetect_every` (see sam_backend.py) technically RUNS alongside
-`text_prompt` (periodic re-detection inside the chunk still uses
-YOLO/box -- not a new text prompt, to avoid having to reconcile twice
-mid-chunk -- and passes an `obj_id` chosen by US, a global id, needing
-no translation: `_propagate()` passes it through unchanged, see
-`_local_to_global` below), but the COMBINATION is NOT recommended as of
-2026-08 (dancing-tracks test, Michele): injecting a person mid-chunk
-via `_add_box_prompt` perturbs SAM 3.1's own session-wide "masklet
-confirmation" bookkeeping (see `Sam31Tracker.__init__`'s warning for the
-full explanation) -- observed to make ALREADY-tracked people flicker in
-and out, not just cleanly add the new one. Prefer a smaller `chunk_size`
-over `redetect_every` when using `text_prompt`: more frequent full text
-re-discovery, always through a clean new session, already reconciled by
-`chunking.reconcile_ids_windowed` + the appearance gallery.
+`redetect_every` technically runs alongside `text_prompt` (still uses
+YOLO/box mid-chunk, passing a global `obj_id` straight through, no
+translation needed) but the combination isn't recommended: injecting a
+person mid-chunk via `_add_box_prompt` perturbs SAM 3.1's session-wide
+"masklet confirmation" bookkeeping (see `Sam31Tracker.__init__`'s
+warning) and was observed to make already-tracked people flicker, not
+just cleanly add the new one. Prefer a smaller `chunk_size` over
+`redetect_every` when using `text_prompt`.
 """
 
 from __future__ import annotations

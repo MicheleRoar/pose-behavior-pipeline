@@ -1,23 +1,18 @@
 """
 psifx_eval/run_four_way_comparison.py
 ========================================
-Unified comparison script, REWRITTEN 2026-08-13 per Michele's second
-pivot on this design. The SAM3-continuous "oracle" (one pass, no
-chunking at all) is GONE: Michele visually inspected it frame-by-frame
-and confirmed it inherits SAM3's own native tracking errors on hard
-occlusions/crossings (two confirmed relabeling events, ~14s and
-~38-39s at 15fps) -- it was never actually ground truth, just another
-imperfect run. Trusting it as the reference meant scoring everything
-else against a flawed target.
+Unified comparison script. There is no SAM3-continuous "oracle" (one
+pass, no chunking): visual inspection showed it inherits SAM3's own
+native tracking errors on hard occlusions/crossings, so it isn't
+actually ground truth, and scoring everything else against it would
+mean scoring against a flawed target.
 
-The new reference is `sam31_overlap_osnet_cap4`: this repo's own
+The reference instead is `sam31_overlap_osnet_cap4`: this repo's own
 `Sam31Tracker`, SAM 3.1's natural chunk_size/overlap (600/50), OSNet
-appearance-fallback ON, capped at the known headcount (max_people=4).
-Michele ran this exact config from the GUI and confirmed it visually:
-ids stay stable on the right person throughout, only occasional
-single-pixel mask edge slop, no real identity errors ("config 4
-perfetto"). It becomes the new "oracolo": the 3 other configs are
-scored AGAINST it now, not the other way around.
+appearance-fallback ON, capped at the known headcount (max_people=4) --
+visually verified stable (ids stay on the right person throughout, no
+real identity errors, only occasional single-pixel mask edge slop). The
+other 3 configs are scored against it.
 
   a. sam31_overlap_osnet_cap4  -- THE REFERENCE. chunk_size=600,
                                    overlap=50, appearance_fallback=True,

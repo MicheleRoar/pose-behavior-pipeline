@@ -3,80 +3,51 @@ chunking.py
 ============
 Logic for splitting video into overlapping chunks (windows) and
 reconciling IDs between one chunk and the next -- independent of
-SAM/SAM2, used by `sam_backend.py`. No heavy dependency (only numpy/cv2,
-already required by the rest of the project): testable with synthetic
-masks, without needing a GPU or the SAM weights installed (see
-tests/chunking_check.py).
+SAM/SAM2, used by `sam_backend.py`. Testable with synthetic masks, no
+GPU/SAM weights needed (see tests/chunking_check.py).
 
-Why chunking is necessary (not just an optimization)
-------------------------------------------------------------------
-The SAM 3.1 and SAM2 video API is stateful: `init_state(video)` loads
-the pixels of ALL passed frames into memory, even before starting to
-propagate masks. On a video several minutes long this isn't just slow,
-it's a memory problem (VRAM/RAM) -- so the whole video is never passed
-to `init_state()`, a window of `chunk_size` frames is passed at a time.
-The price to pay is that each chunk starts "without memory" of the
-previous chunk: the IDs SAM assigns within a chunk are local to that
-chunk, there's no guarantee that id 1 of chunk 2 is the same person as
-id 1 of chunk 1. Hence the overlap (`overlap` frames shared between one
-chunk and the next) and the geometric reconciliation below: the masks
-produced by the two chunks are compared on the SAME frames (the shared
-ones) and a stable global id is reconstructed.
+Why chunking is necessary: the SAM 3.1/SAM2 video API is stateful --
+`init_state(video)` loads all passed frames into memory, a memory
+problem on a multi-minute video -- so only a `chunk_size`-frame window
+is passed at a time. Each chunk then starts "without memory" of the
+previous one: SAM's within-chunk ids are local, not guaranteed stable
+across chunks. Hence the overlap (`overlap` shared frames between
+consecutive chunks) and the geometric reconciliation below: masks from
+both chunks are compared on the shared frames to reconstruct a stable
+global id.
 
-2026-08 revision (dancing-tracks test, reported by Michele): the
-original version matched old/new ids GREEDILY (highest IoU pair first,
-then the next-highest among what's left, ...). Greedy is only correct
-when the single best pair is always part of SOME globally-optimal
-assignment -- not guaranteed in general. Concrete failure observed:
-two already-known people close together (A, B) near a chunk boundary;
-a new detection happens to overlap A's OLD polygon slightly more than
-B's own (moved) polygon does. Greedy grabs that pair first (highest
-single IoU), "stealing" A's global id for what's actually B's
-continuation -- B, now unmatched, gets a brand-new id, even though a
-strictly better assignment existed (matching each new detection to
-its TRUE previous id would have covered both people, with a higher
-TOTAL iou). `reconcile_ids()` below now solves the assignment
-GLOBALLY with the Hungarian algorithm
-(`scipy.optimize.linear_sum_assignment`, maximizing the sum of IoU
-over the whole set at once) instead of greedily -- see
+`reconcile_ids()` matches old/new ids via the Hungarian algorithm
+(`scipy.optimize.linear_sum_assignment`, maximizing total IoU across
+the whole set), not greedily -- greedy (highest-IoU pair first) can
+steal one person's id for another's continuation when two known people
+are close together near a boundary, since the single best pair isn't
+always part of the globally-best assignment. See
 `tests/chunking_check.py::part5b_hungarian_beats_greedy_on_close_by_people`
-for a worked-out reproduction of the old bug and the fixed assignment.
-This does NOT solve every ambiguous case (two people who genuinely
-crossed paths, ending up with SAM's discovered geometry more similar
-to swapped identities than to the true ones -- no purely-geometric
-algorithm, greedy or optimal, can resolve that from IoU alone): it
-only removes the additional, avoidable error of picking a
-sum-suboptimal assignment. See `reconcile_ids_windowed()` and
-`segmentation/identity_gallery.py` for the two further mitigations
-(multi-frame evidence instead of trusting a single anchor frame, and
-an appearance-based fallback for detections that still find no
-geometric match) built on top of this.
+for a worked example. This doesn't resolve every ambiguous case (two
+people who genuinely swap positions can still fool any purely-geometric
+matcher); it only removes the additional, avoidable error of a
+sum-suboptimal assignment. `reconcile_ids_windowed()` (multi-frame
+evidence instead of trusting a single anchor frame) and
+`segmentation/identity_gallery.py` (appearance-based fallback when
+geometry finds no match) build further mitigations on top.
 
-Known limitation still present: reconciliation only compares polygons
-across a SHORT window around the chunk boundary, not the person's
-whole history -- someone who's been occluded for an entire chunk (no
-polygon anywhere in the window) can't be recovered by geometry no
-matter how good the matcher is; that's what the appearance gallery
-(`identity_gallery.py`) is for.
+Known limitation: reconciliation only compares polygons in a short
+window around the chunk boundary, not a person's whole history --
+someone occluded for an entire chunk can't be recovered by geometry
+alone; that's what the appearance gallery is for.
 
-2026-08 addition -- motion compensation (`estimate_velocities()`,
-used by `reconcile_ids_windowed()`): motivated directly by the
-DanceTrack benchmark's own oracle analysis (dancetrack.github.io,
-CVPR 2022) -- with ground-truth boxes, a simple constant-velocity
-motion model already beats naive static-position IoU by a wide margin
-once people move fast between frames, which is exactly the
-dancing-tracks failure mode `reconcile_ids_windowed` exists for.
-Per-id velocity is estimated from the trailing history itself (no
-extra dependency, no Kalman filter yet -- see the function's docstring
-for why a plain first-difference was chosen first) and used to
-translate an older polygon to where the person is PREDICTED to be at
-the comparison frame, before computing IoU. Always compared ALONGSIDE
-the un-shifted (static) IoU, keeping the max of the two per pair: a
-bad/noisy velocity estimate (e.g. derived across a degenerate frame)
-can therefore only ever be a no-op, never worse than the previous
-static-only behavior -- see
+Motion compensation (`estimate_velocities()`, used by
+`reconcile_ids_windowed()`): per-id velocity is estimated from trailing
+history (plain first-difference, no Kalman filter -- see that function's
+docstring for why) and used to translate an older polygon to its
+predicted position before computing IoU, always compared alongside the
+un-shifted (static) IoU and keeping the max of the two -- so a
+noisy/bad velocity estimate can only ever be a no-op, never worse than
+static-only matching. Motivated by the DanceTrack benchmark's oracle
+analysis: a constant-velocity model beats static-position IoU by a wide
+margin once people move fast between frames. See
 `tests/chunking_check.py::part5e_reconcile_ids_windowed_motion_compensation_recovers_fast_linear_motion`
-for a case static IoU alone misses entirely.
+for a case static IoU alone misses.
 """
 
 from __future__ import annotations

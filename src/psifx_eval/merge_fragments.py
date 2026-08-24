@@ -2,265 +2,71 @@
 psifx_eval/merge_fragments.py
 ================================
 Post-processing pass that re-links fragmented identities across an
-ENTIRE already-produced MaskDir (any tracker: `sam3_baseline`, the
-overlap-strategy SAM3 runs, native SAM3.1, ...), using appearance
-(OSNet embedding + hue-histogram color, same two signals already used
-by `identity_gallery.py`/`seg_reid.py`) instead of the geometric
-chunk-boundary matching those other mechanisms rely on.
+ENTIRE already-produced MaskDir (any tracker's output), using
+appearance (OSNet embedding + hue-histogram color, same signals as
+`identity_gallery.py`/`seg_reid.py`) instead of the geometric
+chunk-boundary matching those other mechanisms rely on. Needed because
+`identity_gallery.py` and the overlap strategy's own reconciliation
+only ever run at a CHUNK BOUNDARY (see `sam_backend.py`'s per-chunk
+loop) -- they miss a person disappearing and reappearing entirely
+WITHIN a single chunk (SAM3 loses them mid-propagation, mints a new
+local id on rediscovery, no chunk boundary anywhere near the event).
 
-Why this is a separate, video-wide pass and not another chunk-boundary
-hook (2026-08, real-footage test, Michele)
-------------------------------------------------------------------------
-Both `identity_gallery.py` (SAM3.1 native path) and the overlap
-strategy's own reconciliation only ever run at a CHUNK BOUNDARY (the
-shared anchor frame between chunk N and N+1) -- see `sam_backend.py`'s
-per-chunk loop. On real clinical footage this turned out to miss a
-whole class of id changes: a person (a child, in the motivating case)
-disappearing and reappearing entirely WITHIN a single chunk -- SAM3's
-own video-session tracking loses them mid-propagation and mints a new
-local id on rediscovery, with no chunk boundary anywhere near the
-event. Nothing in the existing chunk-boundary machinery is even called
-in that case, so no amount of tuning it would have helped.
+Treats the whole MaskDir as a bag of "tracks" (one per id, with a
+first/last non-empty frame). For every track that STARTS after frame 0
+(a "reappearance" candidate, whatever caused the gap): is there an
+EARLIER track that ENDED before this one started, whose appearance is
+close enough to be the same person? If so, merge. Deliberately agnostic
+to *why* a track fragmented -- only time geometry + appearance, never
+chunk indices.
 
-This module instead treats the WHOLE MaskDir as a bag of "tracks" (one
-per id, each with a first and last non-empty frame) and asks, for
-every track that STARTS after frame 0 (a "reappearance" candidate,
-whatever caused the gap -- chunk boundary or mid-chunk loss, this pass
-doesn't care which): is there an EARLIER track that ENDED before this
-one started, whose appearance (OSNet + color) is close enough to be
-the same real person? If so, merge them into one id. This is deliberately
-agnostic to *why* a track fragmented -- it only looks at the geometry of
-time (does track A end before track B starts) and appearance (do they
-look like the same person), never chunk indices.
-
-Matching philosophy, consistent with the rest of the project
-------------------------------------------------------------------------
+Design decisions:
 - GLOBAL assignment via Hungarian (`scipy.optimize.linear_sum_assignment`),
   not greedy -- same reasoning as `chunking.reconcile_ids`: taking the
   single best-looking pair first can steal a match that belongs to
-  someone else, when multiple fragmentation events are being resolved
-  at once.
-- "Take the strongest signal, don't sum them" for combining OSNet with
-  color -- same convention as `reid.py`/`seg_reid.py`'s `_pair_cost`/
-  `_pair_score`: a very strong match on ONE reliable signal shouldn't be
-  diluted by a weak/absent second one.
-- Signatures are averaged over a few frames at the very end of a track
-  (for the "ending" side) / very start of a track (for the "starting"
-  side), not a single frame -- the same "don't trust one frame" lesson
-  already learned the hard way for geometric matching in
-  `chunking.reconcile_ids_windowed`.
+  someone else when multiple fragmentations are resolved at once.
+- "Strongest signal wins", not summed, when combining OSNet with color
+  -- same convention as `reid.py`/`seg_reid.py`'s `_pair_cost`/`_pair_score`.
+- Signatures are averaged over a few frames at a track's edge, not a
+  single frame, and only over frames whose mask is a SINGLE connected
+  component (`_mask_to_polygon_single_component`) that doesn't touch
+  the frame border (`_touches_border`) -- a second stray blob or a
+  border-stuck artifact in the same frame makes bad signature material,
+  and there's no reliable way to pick the "right" region when a frame
+  has more than one, so such frames are simply skipped rather than
+  guessed at. `_sample_signature` searches outward from the track's
+  risky edge (backward from last frame / forward from first) until it
+  has enough clean frames.
 - Fragments shorter than `min_fragment_frames` are excluded as merge
   CANDIDATES (too few frames for a trustworthy signature) but are still
   copied through to the output unchanged -- never silently dropped.
+- Second pass: for start tracks pass one left unmatched
+  (`orphan_start_ids`), compare against a POOLED signature built from
+  clean frames across EVERY member of an already-confirmed group
+  (`_pooled_group_signature`) instead of one fragment's own tight,
+  edge-anchored signature -- genuine diversity across multiple
+  confirmed sightings beats a wider window on a single fragment (which
+  just dilutes it with more varied-but-nearby frames). A group is only
+  offered as a candidate for an orphan if NONE of its members overlap
+  the orphan in time (a real person can't be two simultaneous tracks)
+  and at least one member actually precedes it; every pass-one group is
+  eligible, including one formed from a single earlier orphan.
+  `_search_nearby_signal` expands outward around each pooled target
+  frame (capped by `MAX_POOLED_SEARCH_RADIUS`) instead of giving up on
+  a slot the first time its exact target frame is unusable.
+- Streams every mask video from disk via its own `cv2.VideoCapture`
+  seeks (`_scan_track`, `_sample_signature`, `_pooled_group_signature`)
+  instead of preloading the whole MaskDir into RAM -- a full clinical
+  session doesn't fit in memory, and the matching logic only ever needs
+  a track's `(first, last)` bounds plus a handful of sampled frames at
+  once, never a whole track's pixels. The final merged-MaskDir write
+  reads every group member in lock-step alongside the output writer
+  (all members share the same total-frame length, the project-wide
+  MaskDir invariant) instead of allocating a full merged array.
 
-Single-component frames only, searched outward from the risky edge
-(2026-08, real-footage bug, Michele)
-------------------------------------------------------------------------
-On real footage a track's mask can occasionally contain a SECOND,
-unrelated blob in the same frame (a stray detection stuck to the frame
-border was the observed case) alongside the real person. Naively taking
-the largest connected component (the normal rule elsewhere in this
-project, see `sam_backend._mask_to_polygon`) picks whichever one has
-more pixels -- if the stray blob happens to be bigger than the real
-person that frame, the signature ends up built from the WRONG region
-entirely (observed: a similarity of 0.04 between two fragments that
-were, by visual inspection, unambiguously the same child).
-
-A first attempt tried to salvage these frames by predicting the
-person's position from recent motion and picking whichever region was
-closest to the prediction. That turned out to have its own failure
-mode: the very first frame sampled has no prior motion to predict
-from, so it still falls back to "largest region" -- and if THAT seed
-frame is already ambiguous, the whole prediction chain anchors to the
-wrong region from the start and never recovers (observed directly: the
-last frame before the child hides IS itself a two-region frame, both
-in and around the box).
-
-The simpler, more robust rule adopted instead: don't try to guess which
-region is right when a frame has more than one. Just don't trust that
-frame for a signature at all -- `_sample_signature` only uses frames
-whose mask is a SINGLE connected component (see
-`_mask_to_polygon_single_component`), and searches OUTWARD from the
-risky edge of the track (backward from the last frame, for an ending
-track; forward from the first frame, for a starting one) until it has
-collected enough clean frames, skipping ambiguous ones instead of
-picking between their regions. A filter on mask SIZE was considered
-and rejected too -- a crouching or partially-occluded person can
-legitimately have a small mask, and shouldn't be penalized for it; this
-rule doesn't touch size at all, only "is this frame unambiguous."
-
-Second pass: pooled-group signature fallback (2026-08, real-footage bug,
-Michele)
-------------------------------------------------------------------------
-Widening `signature_samples` to reach past a contaminated fragment
-boundary (real-footage finding) fixed one rejected candidate but broke
-a previously-accepted one: a bigger window on a SINGLE fragment dilutes
-its signature with more varied-but-nearby frames, trading one failure
-for another -- there's no one window size that's simultaneously tight
-enough for easy adjacent matches and wide enough for hard ones.
-
-So `merge_fragments` runs a SECOND pass, only for start tracks pass one
-left unmatched (`orphan_start_ids`): instead of comparing the orphan
-against one candidate fragment's own (tight, edge-anchored) signature,
-it's compared against a POOLED signature built from clean frames spread
-across EVERY member of an already-confirmed group from pass one (see
-`_pooled_group_signature`) -- genuine diversity across multiple
-confirmed sightings of the same person (different times, poses,
-lighting), not just more frames from one narrow moment. Same Hungarian/
-"tag every real candidate" conventions as pass one, just at group
-granularity instead of fragment granularity (see `_resolve_group_merges`).
-
-Streaming, not preloaded (2026-08, full-session OOM, Michele)
-------------------------------------------------------------------------
-The first working version loaded every `<id>.mp4` in the MaskDir fully
-into RAM (via `mask_io.load_mask_dir`) as a dense `(T, H, W)` boolean
-array per id -- fine for a short clip, but on a full clinical session
-this exceeded available memory and the process was killed outright
-(no traceback, just `Killed`, the classic Linux OOM-killer signature).
-
-This is a pure I/O/implementation limitation of THIS post-processing
-step, not a re-run of SAM3.1's chunking problem: SAM3.1's chunk
-boundaries lose real information (the tracker's own attention/feature
-propagation genuinely can't span the whole video, so identity can
-actually be lost at a boundary), whereas here the full set of already-
-computed masks exists on disk the whole time -- the only question is
-*when* pixels are read into memory, not what the algorithm can see.
-The matching logic never actually needed a whole track's pixel data at
-once: only its `(first, last)` bounds (two integers) and a handful of
-specific sampled frames per track. So every function that used to index
-a preloaded array now takes a mask file `Path` instead and opens its
-own `cv2.VideoCapture`, seeking to just the frames it needs (`_scan_
-track`, `_sample_signature`, `_pooled_group_signature`), and the final
-merged-MaskDir write reads every group member in lock-step alongside
-the output writer instead of allocating a full merged array -- at no
-point does this version hold more than a few frames' worth of pixels in
-memory, and every decision (which frames count as signature candidates,
-which pairs are temporally valid, the Hungarian assignment itself) is
-identical to the preloaded version.
-
-Border-touching frames also excluded from signatures (2026-08,
-full-session finding, Michele)
-------------------------------------------------------------------------
-On the full-session video, `merge_fragments` merged the child's track
-into the therapist's group with a suspiciously high similarity (0.897)
-in the pooled-group fallback (pass two), well into a stretch where
-manual inspection showed they were never actually confused by SAM3
-itself -- the child's own raw, pre-merge track was clean (verified by
-opening it directly, before `merge_fragments` ever touches it). What
-that raw track DID contain, though, was a persistent stray artifact
-along the left edge of frame (same kind of border-stuck blob already
-described above) -- present, intermittently, in BOTH the child's and
-the therapist's raw tracks.
-
-The existing single-connected-component rule doesn't catch this case:
-it was designed for frames with a stray blob ALONGSIDE the real person
-(two components, rejected as ambiguous), but here some frames have
-ONLY the border artifact as their single component -- e.g. a moment
-where the real person isn't well segmented yet, but the artifact is.
-Such a frame passes the single-component check (it genuinely is just
-one region) even though it isn't the person at all, and if the same
-artifact appears in signature-building frames on both sides of a
-comparison, it can make two different people's signatures spuriously
-resemble each other.
-
-So `_frame_signal` (shared by `_sample_signature` and
-`_pooled_group_signature`, i.e. every place a frame is considered for a
-signature) now additionally rejects any single-component frame whose
-region touches the frame's border (`_touches_border`) -- same "skip,
-don't guess" philosophy as the multi-region case, just catching a
-region that's suspicious for a different reason. A real person fully
-in frame essentially never has their whole silhouette touch the very
-edge, so this should cost very few genuine frames; a person leaving
-frame does, but a partial, mid-exit view is poor signature material
-anyway.
-
-To make issues like this easier to catch (and confirm) without
-guessing, `merge_fragments`'s report also now records the exact frame
-indices used to build every track's and every pooled group's
-signature (`signature_frames` in the report) -- so a suspiciously high
-or low similarity can be checked by opening the specific frames that
-produced it, the same way this particular bug was found.
-
-Pooled signature: search nearby instead of giving up on an exact
-target frame (2026-08, full-session finding, Michele)
-------------------------------------------------------------------------
-`signature_frames` from the very first full-session test with the
-border filter above showed the fix working (frames were being
-rejected) but not helping: the false merge's similarity barely moved.
-The reason was a separate, pre-existing weakness in
-`_pooled_group_signature` that the new, stricter filtering exposed.
-`_evenly_spaced_frames` picks `samples_per_member` EXACT target frame
-indices spread across a member's span, and the old code tried each one
-exactly -- if a target frame failed any check (empty, ambiguous, or now
-also border-touching), that sampling "slot" was simply lost, with no
-attempt at a nearby alternative. On a member spanning tens of thousands
-of frames, this could -- and did -- collapse 5 requested samples down
-to a single surviving frame, leaving the pooled signature built from
-far too little (and far too lucky-or-unlucky) material to be a
-reliable average, undermining the whole point of pooling ("genuine
-diversity across multiple confirmed sightings", see the "Second pass"
-section above).
-
-`_pooled_group_signature` now searches a small neighborhood around
-each target frame (`_search_nearby_signal`, expanding outward one
-frame at a time on both sides, capped in radius, and never revisiting
-a frame already used by an earlier slot for the same member) before
-giving up on that slot -- the same "keep looking nearby instead of
-giving up immediately" principle `_sample_signature` already applies
-via its own directional scan, just applied locally per target instead
-of as one long scan. The search radius per target is capped at roughly
-half the average spacing between targets (so one slot's search stays
-in its own neighborhood instead of drifting into an adjacent slot's
-territory, preserving the intended spread-out diversity) and at
-`MAX_POOLED_SEARCH_RADIUS` frames absolutely (so a member with a huge,
-mostly-unusable span can't make a single pooled-signature call scan
-enormous numbers of frames).
-
-Pass two must reject a group that's active AT THE SAME TIME as the
-orphan (2026-08, full-session finding, Michele)
-------------------------------------------------------------------------
-Even with the two fixes above, the full-session test still produced a
-false merge in pass two -- this time a different orphan (a track later
-confirmed, by opening the raw video at the same frame as both tracks'
-masks, to be the CHILD) got folded into the therapist's group. The
-child's track and the therapist's own long-running track were both
-active across almost the exact same stretch of the video -- visibly
-two different people on screen at once, confirmed directly.
-
-The bug was a gap in `_resolve_group_merges`'s temporal-validity check,
-not an appearance problem. A group was accepted as a candidate for an
-orphan as long as ANY ONE of its members ended before the orphan
-started -- which the group satisfied only via a tiny, long-finished
-early fragment, while its OTHER (and much longer) member was still
-running concurrently with the orphan the entire time. A real person
-cannot be two simultaneously-active tracks, so a group can only
-plausibly be "the same person, reappearing as this orphan" if NONE of
-its members overlap the orphan's `[first, last]` span at all -- not
-merely if some one member happens to have already finished. The check
-now requires both: no member overlaps the orphan in time, AND at least
-one member genuinely precedes it (the original "genuine gap, not
-concurrent existence" requirement, just applied correctly to the whole
-group instead of to just one lucky member).
-
-Pass two must offer EVERY group as a candidate, not just non-orphan
-ones (2026-08, full-session finding, Michele)
-------------------------------------------------------------------------
-With the fix above in place, the child's session still ended up split
-across three separate ids (an early long fragment, a brief doorway
-peek, and the final reappearance after the box) instead of being
-recognized as one person throughout. The reason turned out to be
-another gap in pass two, unrelated to appearance or thresholds: the
-list of candidate groups for an orphan excluded EVERY group whose
-canonical id happened to be SOME orphan's id -- not just when an
-orphan was being compared against its own trivial group. That meant a
-group formed from ONE orphan (e.g. the early fragment, once pass one
-left it unmatched) was invisible as a candidate for every OTHER orphan
-too (e.g. the final reappearance) -- the pair was never scored at all,
-not rejected for low similarity. Self-matching was already correctly
-excluded elsewhere (`if o in members: continue`), so the broader
-exclusion was both redundant and wrong. Now every pass-one group is
-offered as a candidate for every orphan; the existing self-match and
-temporal-overlap checks still apply correctly per pair.
+`signature_frames` in the returned report records exactly which frame
+indices built each signature, so a suspicious similarity score can be
+checked by opening those frames directly.
 
 Not runnable in this project's sandbox (needs `psifx`, a real MaskDir on
 disk, and optionally `torch`/`torchreid` for the OSNet signal -- verify
@@ -974,18 +780,10 @@ def merge_fragments(
         for oid in all_ids:
             pass1_groups.setdefault(canonical[oid], []).append(oid)
         # EVERY pass-one group is a candidate here, including a trivial
-        # one-member group formed from another orphan (e.g. an earlier
-        # orphan start id that pass one left unmatched) -- excluding
-        # groups whose key happened to be SOME orphan id used to also
-        # exclude them as candidates for every OTHER orphan, not just
-        # for themselves (2026-08, full-session finding, Michele: this
-        # silently prevented two genuinely-the-same-person orphan
-        # fragments, separated by more than one gap, from ever being
-        # compared at all -- not rejected on low similarity, simply
-        # never evaluated). Self-matching an orphan against its own
-        # trivial group is already correctly excluded below via
-        # `if o in members: continue`, so no separate filter is needed
-        # here.
+        # one-member group formed from another orphan -- excluding those
+        # would also hide them as candidates for every OTHER orphan, not
+        # just for themselves. Self-matching is already excluded below
+        # via `if o in members: continue`.
         candidate_group_ids = list(pass1_groups.keys())
 
         cap = cv2.VideoCapture(video_path)
@@ -1015,21 +813,11 @@ def merge_fragments(
         if extra_merges:
             canonical = _group_chains(merges + extra_merges, all_ids)
 
-    # write the merged MaskDir: one file per DISTINCT canonical id,
-    # union (logical OR) of every member's mask -- members shouldn't
-    # overlap in time by construction (merges only ever go
-    # earlier-end -> later-start), OR is just a safe way to combine
-    # them without assuming that never breaks.
-    #
-    # Streamed lock-step: every member's mask file is already padded to
-    # the SAME total_frames length (project-wide MaskDir format
-    # invariant, checked above), so frame t of each member's file
-    # already aligns with global frame t -- no seeking needed, every
-    # member can just be read forward in step with the output writer,
-    # OR-ing each frame together and writing it immediately. This never
-    # allocates a full (total_frames, height, width) array, which was
-    # the other big memory cost in the pre-streaming version (see
-    # module docstring's "Streaming" section).
+    # Write the merged MaskDir: one file per distinct canonical id,
+    # union (logical OR) of every member's mask. Streamed lock-step --
+    # every member's file is already padded to the same total_frames
+    # length, so frame t aligns across members with no seeking needed,
+    # and nothing allocates a full (total_frames, height, width) array.
     out_dir_path = Path(out_mask_dir)
     out_dir_path.mkdir(parents=True, exist_ok=True)
     groups: dict[int, list[int]] = {}

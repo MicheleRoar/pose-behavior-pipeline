@@ -3,175 +3,79 @@ reid.py
 =======
 Real-time re-identification based on an anthropometric signature, to
 recover a person's identity when ByteTrack assigns them a new track_id
-after they've fully left the frame (or when their appearance changes,
-e.g. different clothes, between an exit and a re-entry in the same
-session).
-
-Same idea as `reid_signature.py` in the CHUV repository
-(Video-Annotation-System, see that module for the full context), here
-readapted along two axes:
-  - COCO-17 schema (this pipeline) instead of BODY-25 (psifx/OpenPose);
-  - REAL-TIME operation instead of batch: there, already-finished
-    tracks are compared by reading a complete CSV; here we need to
-    decide "is this a never-seen person or an already-seen one?" at the
-    instant a new track_id appears, against a memory of people who
-    recently disappeared from the frame.
-
-Why prototype it here and not in the CHUV repository: that pipeline
-requires SAM3 on a CUDA GPU, not runnable on an M1 Mac -- and that's a
-hardware limitation, not one of the strategy. The anthropometric
-signature as a re-identification signal is independent of the
-underlying tracker (ByteTrack here, SAM3 there); it makes sense to
-validate it where iteration is fast, on unprotected data, before
-proposing it again for the CHUV repository.
+after they've fully left the frame (or their appearance changes between
+an exit and a re-entry). Same idea as `reid_signature.py` in the CHUV
+repository (Video-Annotation-System), readapted for COCO-17 (not
+BODY-25) and for real-time operation (decide at the instant a new
+track_id appears, against a memory of recently-lost people, instead of
+comparing already-finished tracks from a full CSV). Prototyped here
+first because that pipeline needs SAM3/CUDA, not runnable on an M1 Mac
+-- the signature itself is tracker-independent.
 
 Design (in brief)
 ------------------
-- Every time ByteTrack presents a track_id NEVER seen before, it's
-  immediately assigned a provisional `person_id` (no perceptible delay
-  in the live overlay).
-- In parallel, a small buffer (sliding window) of body proportions
-  accumulates for that track_id. Once enough valid frames are
-  collected, a median signature is computed and compared against
-  recently disappeared people (`lost`, expiring after
-  `max_lost_seconds`). If there's no match, the attempt does NOT stop
-  immediately: at every subsequent frame the window updates (older
-  frames drop out, new ones come in) and it retries -- a re-entry with
-  the first frames noisy (person still at the edges of the frame) is
-  thus not lost forever, only delayed until the data is clean enough.
-  Two guardrails, however, keep the retry from becoming dangerous: (1)
-  a track is never compared against a "lost" person AFTER the track
-  itself had already appeared -- the two were visible together (under
-  different raw_ids), so they can't be the same person (otherwise
-  whoever is present from the very start of the session would risk
-  being coincidentally linked to an identity lost much later); (2) the
-  retry gives up anyway after `_PENDING_RETRY_SECONDS` from the track's
-  appearance, so as not to keep re-checking it forever.
-- If there's a match under threshold, ALL frames AFTER that point are
-  attributed to the previous `person_id` instead of the new one -- the
-  frames already emitted (CSV/overlay) with the provisional person_id
-  are NOT rewritten. The merge event is explicitly logged
-  (`self.merge_log`) for transparency/audit, so a later analysis can
-  reconnect the two pieces if needed -- same "propose/make traceable,
-  don't decide silently" philosophy as reid_signature.py, adapted to
-  the fact that there's no human in the loop here in real time.
+- A never-seen track_id gets a provisional `person_id` immediately (no
+  perceptible overlay delay). In parallel, a sliding window of body
+  proportions accumulates for it; once enough valid frames exist, a
+  median signature is compared against recently-lost people (`lost`,
+  expiring after `max_lost_seconds`). No match doesn't mean giving up:
+  the window keeps updating and retrying each frame (so a re-entry with
+  noisy first frames isn't lost forever, just delayed), bounded by two
+  guardrails -- never compare against someone lost AFTER this track had
+  already appeared (they were visible together, can't be the same
+  person), and give up retrying after `_PENDING_RETRY_SECONDS`.
+- On a match under threshold, all frames AFTER that point go to the
+  previous `person_id`; already-emitted frames keep the provisional id
+  (never rewritten). Every merge is logged (`self.merge_log`) for
+  audit/traceability, since there's no human in the loop in real time.
 
-Optional signal: shirt/pants/hair color
-----------------------------------------------------
-The anthropometric signature alone, in practice, can be too weak when
-keypoints are noisy (partial occlusions, person at the edges of the
-frame during exit/re-entry): two slightly-off body proportions can
-cause a real match to be missed. If the video frame is passed to
-`resolve()`, an average color (hue + saturation, not brightness -- more
-robust to exposure changes) is ALSO computed over three regions: torso
-(shirt), thigh (pants) -- sampled from the pixels inside the polygon
-defined by the shoulder/hip/knee keypoints -- and a region above the
-ears (hair color proxy, estimated by extending the ear-to-ear width
-upward by the neck-to-nose distance). Hair color is independent of
-clothing: it specifically helps in the case where a person re-enters in
-different clothes (e.g. without a shirt).
+Optional signals (each only ever DISCOUNTS the proportion distance,
+never blocks or substitutes for it; when more than one applies, the
+STRONGEST discount wins, never the sum of several mediocre ones):
+- **Color** (`resolve()` given a frame): average hue+saturation over
+  torso, thigh, and above-the-ears (hair) regions, sampled from the
+  keypoint-defined polygons. Hair color specifically helps when someone
+  re-enters in different clothes.
+- **Position**: last known position (hip center) + scale (torso
+  length) at loss, compared against a new track's first position within
+  `MAX_POSITION_DIST_TORSOS` and `MAX_POSITION_GAP_SECONDS` (both must
+  hold). Targets brief in-scene occlusions (e.g. someone dressing a
+  child) where the person barely moved.
+- **Appearance embedding (OSNet)**: unlike color/position (computed
+  once at match time), an active person's embedding updates every frame
+  via EMA (`self.embedding_ema`, see `appearance_embedding.ema_update`)
+  so a later re-entry compares against a stabilized estimate. Needs an
+  `embedder` passed to the constructor; `None` (default) simply omits
+  the signal.
 
-Color does NOT replace the proportions nor ever raise the rejection
-threshold: if the color is very different (e.g. clothes changed between
-exit and re-entry) the match is decided exactly as before, based on
-proportions alone. If instead the color is similar (the most common
-case: same clothes during the session), the distance between
-proportions is "discounted" -- making it easier to recover a real match
-even with somewhat noisy proportions, without ever worsening the robust
-clothing-invariance that was the prototype's original goal.
-
-Optional signal: position
-------------------------------
-Designed for the concrete case of an "in-scene" clothing change (e.g.
-putting a jacket/apron on a child during an activity, typically about
-ten seconds): the child never leaves the frame, but the partial
-occlusion by whoever is dressing them can lose the track and generate a
-new one at separation. In this case the child has barely moved, so the
-last known position (hip center) before the loss and the new track's
-first position are very close -- the same principle also applies to
-exiting/re-entering through the same door. Every frame, the current
-person's position and scale (torso length) are stored; on loss, that
-position is frozen alongside the signature. A new track is compared on
-spatial proximity (in torso lengths, `MAX_POSITION_DIST_TORSOS`) AND
-temporal proximity (`MAX_POSITION_GAP_SECONDS`) -- both must count for
-something, one alone isn't enough.
-
-Same principle as color: position can only discount the distance,
-NEVER block a match nor substitute for the signature. Color and
-position don't add up -- the STRONGEST of the two available discounts
-is taken, not the sum, to avoid two only-mediocre signals accumulating
-into a confidence neither would justify alone.
-
-Optional signal: appearance embedding (OSNet)
---------------------------------------------------
-A third possible discount, same "the strongest wins, never the sum"
-principle as color/position above -- see `pose/appearance_embedding.py`
-for the module and why it's a real embedding (OSNet) and not just
-another heuristic. Unlike color/position (computed once from the median
-buffer at match time), an ACTIVE person's embedding is updated every
-frame with an exponential moving average (`self.embedding_ema`, see
-`appearance_embedding.ema_update`) -- the StrongSORT idea cited there:
-the longer a person stays visible, the more their stored appearance
-signature stabilizes, so a later re-entry can be compared against a
-consolidated estimate instead of a single (often noisy: motion blur,
-pose, partial occlusion) frame. Requires an `embedder` (an
-`OSNetEmbedder` instance) passed to the constructor -- if `None`
-(default), the signal is simply absent, no different behavior from the
-rest of the module.
-
-Optional signal: maximum number of people (closed session)
-------------------------------------------------------------------
-When the number of people who can appear in the session is known ahead
-of time (e.g. 2 for a 1v1 child-caregiver session, up to about a dozen
-for a group session), that number becomes a hard constraint, not just
-another "discount": if `max_people` distinct identities have already
-been confirmed and a new track finds no match with the normal
-thresholds, it CANNOT still be an eleventh person -- it must
-necessarily be one of the already-known people who is currently
-"lost". In this case, and only this case, the merge is FORCED with the
-lost person closest by signature (even above `max_signature_dist`),
-instead of giving up and minting a new person_id.
-
-Two guardrails keep the forcing safe: (1) the same causality rule as
-the other matches applies -- a match can't be forced with someone who
-was already visible together with this track under a different id; (2)
-it forces ONLY against people currently "lost" (out of frame), never
-against people active at that moment -- two people visible at the same
-time always remain two distinct identities, the cap never merges them.
-If the cap is reached but there's no one "lost" to recover, forcing is
-still abandoned (no sensible candidate) and a new person_id is minted
-while printing a warning -- a signal that the configured count might be
-wrong or that a spurious detection got past `pose_estimation.py`'s
-`max_people` filter.
+`max_people` (closed session): the one signal that FORCES a merge
+rather than discounting. If the known headcount is already fully
+confirmed and a new track matches no one under normal thresholds, it
+can't be a new person -- it's forced onto the closest currently-"lost"
+person (even above `max_signature_dist`). Guardrails: still respects
+the causality rule (never force against someone visible together with
+this track), and only forces against people currently lost, never
+against someone else active right now. If the cap is reached with no
+one lost to recover, forcing is abandoned and a new id is minted with a
+warning printed (a signal the configured count or `max_people` filter
+upstream may be wrong).
 
 Honest limitations
 -------------------
-  - The signature needs a minimum number of frames with sufficient
-    confidence on the key joints; a very brief appearance in the frame
-    will never produce a reliable signature and will remain its own
-    person_id.
-  - Two people of similar build can generate a false-positive merge --
-    the default threshold is conservative but needs to be calibrated on
-    your real data, it's not a validated value.
-  - Color helps when clothes stay the same, but for the same reason it
-    can increase the false-positive risk if two different people wear
-    similarly-colored clothes AND have close body proportions -- this
-    is an explicit trade-off, not a hidden problem.
-  - Position is a double-edged sword in scenes with two people close
-    together (e.g. child+caregiver): ONLY the discount (never the
-    forcing) keeps the risk in check, but if two people's proportions
-    are already ambiguous on their own, spatial proximity can push a
-    borderline comparison past threshold in the wrong direction --
-    a deliberate choice, not a hidden problem.
-  - Once decided, the merge is applied automatically (there's no way to
-    ask a human for confirmation in real time) -- that's why the event
-    always stays in the log, instead of silently disappearing.
-  - `max_people` is a real forcing (the sole exception to "never force"
-    in the module): if the configured number is wrong (e.g. an extra
-    adult briefly enters the scene, outside the expected count) the
-    forced merge can attribute their frames to the wrong lost person --
-    it should only be used when the number of participants is truly
-    fixed and known.
+- Needs a minimum number of confident-keypoint frames; a very brief
+  appearance never gets a reliable signature.
+- Similar-build false positives are possible; the default threshold is
+  conservative but not validated on real data.
+- Color and position are both deliberate trade-offs, not hidden bugs:
+  color helps only while clothes stay the same and can raise
+  false-positive risk between similarly-dressed, similarly-built
+  people; position can push an already-ambiguous match the wrong way in
+  scenes with two people close together (e.g. child+caregiver).
+- Merges apply automatically with no real-time human confirmation --
+  hence the audit log.
+- `max_people` forcing can misattribute frames if the configured count
+  is wrong (e.g. an unexpected extra adult); use only when the
+  participant count is genuinely fixed and known.
 """
 
 from __future__ import annotations

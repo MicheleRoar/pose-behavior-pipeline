@@ -68,6 +68,9 @@ pose-behavior-pipeline/
 │   │   ├── chuv_features.py       # reference-pipeline feature set, replicated in real time
 │   │   └── anonymize.py           # face blurring
 │   ├── psifx_eval/                 # SEPARATE effort — see note above, not part of the pipeline
+│   │   ├── run_pipeline.py               # full pipeline in one resumable pass: optional trim -> sam3_baseline -> merge_fragments -> overlay
+│   │   ├── run_sam3_baseline.py          # standalone: real-psifx SAM3 baseline tracking only
+│   │   ├── merge_fragments.py            # standalone: appearance-based cross-fragment id merging over a whole MaskDir
 │   │   ├── run_four_way_comparison.py    # main deliverable: psifx vs 3 native SAM3.1 configs, scored vs a SAM3.1 reference run
 │   │   ├── run_sam31_native.py           # SAM 3.1 native tracker vs an existing MaskDir (with/without OSNet)
 │   │   ├── run_overlap_experiment.py     # vanilla psifx vs overlapping-chunks stitching strategy
@@ -158,6 +161,21 @@ cd src && python live_demo.py --source 0 --fps 30 --out live_session.csv
 `--with-chuv-features`, `--target-track-id N`, `--blur-faces`, plus
 `--tracker`/`--conf-threshold`/`--max-people`. See `--help` per script,
 and `reid.py`'s docstring for re-identification details.
+
+## `psifx_eval` full pipeline (CUDA only)
+
+```bash
+python -m psifx_eval.run_pipeline --video ~/Bureau/9_group_1_3/camera_a.mkv \
+    --ss 00:22:34 --to 00:27:40 --device cuda
+```
+
+Runs trim (only if `--ss`/`--to` given) -> `run_sam3_baseline` ->
+`merge_fragments` -> overlay in one resumable pass, writing into
+`processed/`, `masks/`, `merged/` subfolders next to the source video
+(never a separate output root) -- see `run_pipeline.py`'s module
+docstring for the exact naming/skip-if-exists rules. Omit `--ss`/`--to`
+to run on the whole video. Same sandbox limitations as the rest of
+`psifx_eval` (needs the real `psifx` package, `sam3`, CUDA).
 
 ## Modules
 
