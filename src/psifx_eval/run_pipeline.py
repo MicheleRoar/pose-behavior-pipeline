@@ -9,7 +9,7 @@ Everything lives next to the source video, inside three top-level
 subfolders of the video's own directory (not a separate output root):
 
     <video_dir>/
-        processed/<name>.mp4          # trimmed clip -- only if --ss/--to given
+        processed/<name>.mp4          # always: ffmpeg re-encode (trimmed if --ss/--to given, full video otherwise)
         masks/<name>/                 # raw sam3_baseline MaskDir
         merged/<name>/
             <id>.mp4 ...              # merged MaskDir (merge_fragments)
@@ -21,8 +21,14 @@ subfolders of the video's own directory (not a separate output root):
 timestamps -- e.g. `--ss 00:22:34 --to 00:27:40` -> `_002234-002740`),
 so a whole-video run and any number of ranged runs on the same source
 video coexist as sibling folders under masks/ and merged/ without ever
-colliding. Without `--ss`/`--to`, the pipeline reads the source video
-directly (no `processed/` step).
+colliding.
+
+The `processed/` re-encode step ALWAYS runs, even with no range -- it's
+normalization (`-c:v libx264 -pix_fmt yuv420p`), not just a trim. Source
+camera `.mkv` files can use a codec/pixel format cv2 and psifx's video
+reading don't decode cleanly (corrupted "noise" frames, no error
+raised), so `masks/`/`merged/` always read from `processed/`, never
+from the original file.
 
 Each step is skipped if its output already exists (resumable -- SAM3
 can take a long time, no reason to redo it because a later step
@@ -33,7 +39,7 @@ Usage:
     python -m psifx_eval.run_pipeline --video ~/Bureau/9_group_1_3/camera_a.mkv \\
         --ss 00:22:34 --to 00:27:40 --device cuda
 
-    # whole video, no trim:
+    # whole video (still re-encoded to processed/camera_a.mp4, just not trimmed):
     python -m psifx_eval.run_pipeline --video ~/Bureau/9_individual_58/camera_a.mkv
 """
 
@@ -80,28 +86,29 @@ def resolve_paths(video_path: str, ss: str | None, to: str | None) -> dict[str, 
     paths["merge_report"] = paths["merged_dir"] / "merge_report.json"
     paths["overlay"] = paths["merged_dir"] / "overlay.mp4"
 
-    if ss is not None:
-        paths["processed_clip"] = video_dir / "processed" / f"{name}.mp4"
+    paths["processed_clip"] = video_dir / "processed" / f"{name}.mp4"
 
     return paths
 
 
-def _trim_clip(video_path: str, ss: str, to: str, out_path: Path, overwrite: bool) -> str:
-    """ffmpeg trim, same flags Michele already used by hand (re-encode
-    with libx264/crf18/yuv420p for a clean seek point, copy audio as-is).
-    Returns the path actually used as input to the rest of the pipeline."""
+def _transcode(video_path: str, ss: str | None, to: str | None, out_path: Path, overwrite: bool) -> str:
+    """ffmpeg re-encode to libx264/yuv420p -- ALWAYS runs, trimmed to
+    `[ss, to]` if given, full video otherwise. Same flags Michele already
+    used by hand. Not optional: normalizes source `.mkv` files whose
+    codec/pixel format cv2/psifx don't decode cleanly on their own (see
+    module docstring). Returns the path actually used as input to the
+    rest of the pipeline."""
     if out_path.exists() and not overwrite:
-        print(f"[run_pipeline] processed clip already exists, skipping trim -> {out_path}")
+        print(f"[run_pipeline] processed video already exists, skipping re-encode -> {out_path}")
         return str(out_path)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "ffmpeg", "-y" if overwrite else "-n",
-        "-i", video_path, "-ss", ss, "-to", to,
-        "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "copy",
-        str(out_path),
-    ]
-    print(f"[run_pipeline] trimming {video_path} [{ss} -> {to}] -> {out_path}")
+    cmd = ["ffmpeg", "-y" if overwrite else "-n", "-i", video_path]
+    if ss is not None:
+        cmd += ["-ss", ss, "-to", to]
+    cmd += ["-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "copy", str(out_path)]
+    label = f"[{ss} -> {to}]" if ss is not None else "(whole video)"
+    print(f"[run_pipeline] re-encoding {video_path} {label} -> {out_path}")
     subprocess.run(cmd, check=True)
     return str(out_path)
 
@@ -140,11 +147,9 @@ def run_pipeline(
 
     paths = resolve_paths(video_path, ss, to)
 
-    # Step 1: trim (optional)
-    if ss is not None:
-        sam3_input = _trim_clip(video_path, ss, to, paths["processed_clip"], overwrite)
-    else:
-        sam3_input = video_path
+    # Step 1: re-encode/normalize (always -- see module docstring on why
+    # this can't be conditional on a range being given)
+    sam3_input = _transcode(video_path, ss, to, paths["processed_clip"], overwrite)
 
     # Step 2: run_sam3_baseline -> masks/<name>/
     if _has_mask_files(paths["masks_dir"]) and not overwrite:
