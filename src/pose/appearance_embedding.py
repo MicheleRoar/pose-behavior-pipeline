@@ -1,63 +1,24 @@
 """
-appearance_embedding.py
-=========================
-Appearance signal based on a real deep re-identification embedding
-(OSNet, via `torchreid`), instead of the color/shape/position heuristics
-already present in `reid.py`/`seg_reid.py`. Born from the explicit
-request to add OSNet and "the idea" of StrongSORT to the pipeline, with
-absolute priority: ids must not change, and people must stay in memory
-to be easily re-associated on return.
+pose/appearance_embedding.py
+=============================
+OSNet deep re-identification embedding (via `torchreid`), used by
+`segmentation/merging/signatures.py` as one of the two appearance
+signals (alongside the hue-histogram color signal) that
+`merge_fragments.py` uses to decide whether two mask fragments belong
+to the same person.
 
-Why "OSNet + the idea of StrongSORT" and not "replace everything with
-StrongSORT" (scoping choice, see also the project memory)
-------------------------------------------------------------------------
-StrongSORT (Du et al. 2022) is DeepSORT plus three main additions: (1) a
-real appearance embedding (typically OSNet) instead of SORT's IoU-only
-features, (2) a per-track "feature bank" updated with an exponential
-moving average (EMA) instead of keeping only the last embedding seen,
-(3) an "NSA" Kalman filter (process noise scaled by detection confidence)
-plus camera motion compensation (ECC) -- these last two designed for a
-MOVING camera (e.g. drone/vehicle tracking), not the case here (fixed
-camera, clinical context).
+`torch`/`torchreid` are a heavy, optional dependency (not in
+requirements.txt, same treatment as any other GPU-only package): the
+import is delayed inside `OSNetEmbedder.__init__`, so the rest of the
+pipeline still works without them installed, just without the OSNet
+signal. First use of a `model_name` without `model_path` downloads
+pretrained weights from torchreid's model zoo (needs internet once).
 
-Rewriting the whole tracker from scratch (NSA Kalman + ECC + matching
-cascade) would throw away the already-built and tested
-`identity_manager.py` (batch Hungarian matching, "uncertain" policy
-instead of silent merging, `session_mode`, causality, the `max_people`
-cap for closed sessions) -- all logic tailored to the clinical context
-that a generic tracker doesn't know about. The two StrongSORT ideas that
-actually matter for the request ("don't change ids" + "stay in memory
-for re-entry") are exactly (1) and (2): a stronger appearance embedding
-than the current heuristics, and a memory that CONSOLIDATES over time
-instead of relying on a single frame. This module provides (1)
-(`OSNetEmbedder`); (2) is applied below (`ema_update`) and used by
-`reid.py`/`seg_reid.py` to update `self.embedding` on every frame the
-person is visible, not just at the moment of loss.
-
-Heavy, optional dependency
---------------------------------
-`torchreid` (and therefore `torch`) are NOT listed in requirements.txt as
-a normal dependency -- same treatment as SAM 3.1/SAM2, see there. The
-import is therefore delayed inside `OSNetEmbedder.__init__`: without
-torchreid installed, the rest of the pipeline (including the rest of the
-heuristic Re-ID) keeps working normally, simply without this extra
-signal. The first use of a known `model_name` (e.g. 'osnet_x1_0')
-without `model_path` makes torchreid download the pretrained weights
-from its model zoo -- so an internet connection is required on first
-run, not just installing the package.
-
-Crop format
------------------
-`torchreid.utils.FeatureExtractor` accepts numpy arrays (H, W, C) and
-converts them internally with `torchvision.transforms.ToPILImage()`,
-which for a 3-channel array produces an image in 'RGB' mode -- so the
-crop must be prepared in RGB, not OpenCV's native BGR (see
-`_crop_person`, `[:, :, ::-1]`). If the mask polygon is also passed (not
-just the bbox), the background inside the bbox but outside the
-silhouette is zeroed out before passing the crop to the model: the
-embedding focuses on the person, not the context (background, other
-people partially inside the same bbox) -- an improvement over a raw
-bbox-crop, discussed in the initial architectural consultation.
+Crop format: `torchreid.utils.FeatureExtractor` expects RGB, not
+OpenCV's native BGR, so `_crop_person` flips channels before handing
+the crop to the model. When a mask polygon is available (not just the
+bbox), pixels outside the silhouette are zeroed out first so the
+embedding focuses on the person rather than the background.
 """
 
 from __future__ import annotations
@@ -81,42 +42,27 @@ _MIN_MASK_FILL = 0.15
 
 
 def _resolve_feature_extractor():
-    """Resolves the `FeatureExtractor` class, handling TWO different
-    layouts of the 'torchreid' package that `pip install torchreid` can
-    end up installing:
-
-    - the original project (github.com/KaiyangZhou/deep-person-reid,
-      installable with `pip install git+...` or `pip install -e .` from
-      a clone) exposes `torchreid/utils/` as a real subpackage --
-      `from torchreid.utils import FeatureExtractor` works.
-    - the third-party PyPI "torchreid-pip" distribution (the one that
-      plain `pip install torchreid` installs by default, verified: it's
-      an unofficial repackaging) hides everything under
-      `torchreid.reid.*` and only rebinds `utils` as a top-level package
-      ATTRIBUTE inside its own `torchreid/__init__.py` (`from
-      torchreid.reid import ..., utils`) -- not a real submodule. With
-      this layout, `from torchreid.utils import FeatureExtractor` fails
-      with `ModuleNotFoundError: No module named 'torchreid.utils'` even
-      if the package is correctly installed (the real cause of a bug
-      reported by the user: "torchreid" importable on its own, but this
-      specific import isn't).
-
-    Importing `torchreid` and then accessing it by ATTRIBUTE
-    (`torchreid.utils.FeatureExtractor`) works in both cases, so that's
-    what we use here instead of a direct `from torchreid.utils import
-    ...`."""
+    """Resolves `FeatureExtractor`, handling two different layouts of
+    the 'torchreid' package: the original project
+    (github.com/KaiyangZhou/deep-person-reid) exposes `torchreid.utils`
+    as a real subpackage, while the third-party PyPI "torchreid-pip"
+    distribution (what plain `pip install torchreid` gets by default)
+    hides everything under `torchreid.reid.*` and only rebinds `utils`
+    as an attribute on the top-level package -- so
+    `from torchreid.utils import FeatureExtractor` raises
+    `ModuleNotFoundError` on that layout even though the package is
+    installed correctly. Importing `torchreid` and accessing
+    `torchreid.utils.FeatureExtractor` by attribute works on both."""
     import torchreid
     return torchreid.utils.FeatureExtractor
 
 
 class OSNetEmbedder:
     """Minimal wrapper over `torchreid.utils.FeatureExtractor` for a
-    single OSNet model. Usage in reid.py/seg_reid.py (a single wiring
-    point):
+    single OSNet model.
 
-        embedder = OSNetEmbedder(device="cpu")  # or "cuda"/"mps" if available
-        ...
-        vec = embedder.embed(frame_bgr, bbox_xyxy, poly=poly)  # None if the crop is poor
+        embedder = OSNetEmbedder(device="cpu")  # or "cuda"
+        vec = embedder.embed(frame_bgr, bbox_xyxy, poly=poly)  # None if the crop is too poor to trust
     """
 
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME, model_path: str | None = None,
@@ -206,39 +152,24 @@ def embedding_similarity(a: np.ndarray | None, b: np.ndarray | None) -> float | 
 
 def torchreid_available() -> bool:
     """True if `torchreid.utils.FeatureExtractor` is actually reachable
-    in this environment (same resolution as `_resolve_feature_extractor()`
-    used by `OSNetEmbedder`, not just a bare `import torchreid` -- an
-    `import torchreid` can succeed while `torchreid.utils.FeatureExtractor`
-    doesn't, see `_resolve_feature_extractor`'s docstring for the
-    concrete reason, verified on a real case). Doesn't instantiate any
-    model (doesn't download weights, doesn't touch the GPU) -- used only
-    for GUI-side gating (checkbox disabled with a reason, same pattern as
-    `cudaAvailable`/the SAM 3.1/SAM2 options in app.js), NEVER to
-    silently decide to skip the embedding: if the user explicitly
-    requests it but the dependency is missing, `OSNetEmbedder.__init__`
-    still raises its `ImportError` with installation instructions, it
-    doesn't fail silently."""
+    (same check as `_resolve_feature_extractor`, not just a bare
+    `import torchreid`, which can succeed even when that attribute
+    isn't reachable -- see that function's docstring). Doesn't
+    instantiate a model or touch the GPU. For availability checks only:
+    if OSNet is explicitly requested but unavailable,
+    `OSNetEmbedder.__init__` still raises with install instructions
+    rather than silently skipping the signal."""
     try:
         _resolve_feature_extractor()
     except (ImportError, AttributeError):
         return False
     except Exception as exc:
-        # torchreid is a package that's been stalled since 2021: the
-        # import can sometimes fail with something else (not
-        # ImportError) on an environment with more recent numpy/torch --
-        # e.g. `np.float`/`np.int` removed in numpy>=1.24, referenced by
-        # some versions of torchreid/yacs, which raise AttributeError
-        # during import, not ImportError. If we didn't catch it here,
-        # the exception would propagate all the way up to
-        # `Api.detect_device()` (no try/except there, see webui/api.py)
-        # and would make cuda/mps/cpu detection fail ALONG with it
-        # (app.js handles the whole call with a single try/catch) -- a
-        # confusing symptom ("SAM 3.1/SAM2 and the embedding are both
-        # disabled, even though torch is installed") for a non-obvious
-        # cause. Better to flag ONLY the embedding as unavailable here,
-        # printing the real reason to the terminal (not visible in the
-        # UI, but useful for diagnosis) instead of a silent error or a
-        # crash that also disables device detection.
+        # torchreid is unmaintained and can fail on import with something
+        # other than ImportError on newer numpy/torch (e.g. np.float/
+        # np.int removed in numpy>=1.24, still referenced by some
+        # torchreid/yacs versions -> AttributeError instead). Caught
+        # here and reported, rather than left to propagate and look like
+        # an unrelated crash.
         print(f"[appearance_embedding] torchreid installed but the import fails "
               f"({type(exc).__name__}: {exc}) -- OSNet embedding not available. "
               f"Likely a version incompatibility (torchreid is a package "
@@ -250,18 +181,11 @@ def torchreid_available() -> bool:
 
 def ema_update(prev: np.ndarray | None, new: np.ndarray | None,
                 alpha: float = 0.9) -> np.ndarray | None:
-    """Exponential moving average on an embedding "in memory" -- the
-    StrongSORT idea (2) cited in the module docstring: instead of
-    recomputing the embedding from a single frame (noisy: motion blur,
-    pose, partial occlusion), it's refined over time, so the signature
-    stored for a person becomes progressively more stable the longer it
-    stays visible -- exactly the requested behavior ("staying in memory
-    to easily re-associate them on return"). High `alpha` (default 0.9,
-    typical in the StrongSORT/DeepSORT literature) gives a lot of weight
-    to history, little to the current frame: a single anomalous frame
-    doesn't make the stored embedding "jump". Re-normalized to unit norm
-    after averaging (the average of two unit vectors isn't generally
-    unitary)."""
+    """Exponential moving average of an embedding over time (StrongSORT-
+    style "feature bank" update): blends in a new frame's embedding
+    without letting one noisy frame (motion blur, occlusion) swing the
+    stored signature. High `alpha` (default 0.9) weights history over
+    the current frame. Re-normalized to unit norm after averaging."""
     if new is None:
         return prev
     if prev is None:

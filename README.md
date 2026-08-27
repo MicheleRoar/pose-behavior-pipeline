@@ -1,97 +1,54 @@
-# Pose-based behavioural feature pipeline
+# psifx SAM3 identity-persistence pipeline
 
-Real-time and batch pipeline for extracting quantitative behavioural
-markers from interaction video, using multi-person pose/segmentation
-tracking and time-series feature engineering. Runs on Apple Silicon
-(MPS, no CUDA) as a testing/development platform alongside a
-CUDA/SAM3-based production pipeline for child neurodevelopment research.
+Post-processing fix for [psifx](https://github.com/psifx/psifx)'s SAM3
+cross-chunk identity tracking, built for CHUV (child neurodevelopment
+research video). Vanilla psifx chunks a video for SAM3 tracking and
+re-links object ids across chunk boundaries using a single-frame
+greedy match -- fragile: a person occluded, off-screen, or lost
+mid-propagation reappears under a brand-new id. This repo runs the
+real `psifx` package unmodified (fidelity to what CHUV actually runs
+in production) and repairs the fragmentation as a whole-video
+post-process.
 
-Exploratory and technical, not validated diagnostic markers. Any
-clinical use requires ethics-committee approval and validation on
-annotated data.
+**Approach: SAM3 + OSNet + a learned heuristic.**
 
-**Current status:** active pipeline is segmentation-based
-(`segmentation_demo.py`, YOLO26-seg + ByteTrack, no keypoints) — the
-pose model alone produced too many spurious ids on real footage. Plan
-is to reattach pose *inside* the tracked silhouette (see
-`segmentation/seg_estimation.py`). The pose-based pipeline
-(`pipeline.py`, `live_demo.py`, `pose/`) stays in the repo, on hold.
-
-This repo actually holds **two separate efforts** sharing one `src/`:
-
-1. **The pose/segmentation pipeline** (everything below except
-   `psifx_eval/`) — the behavioural-marker pipeline described in the
-   rest of this README.
-2. **`src/psifx_eval/`** — unrelated to the pipeline above. A separate
-   evaluation framework measuring cross-chunk ID persistence:
-   `run_four_way_comparison.py` runs real psifx+SAM3 (chunked) and
-   three native-SAM3.1 configs (`segmentation/sam31_estimation.py`) on
-   the same video, scored against a native SAM3.1 reference run
-   (chunk=600/overlap=50, OSNet on, capped at the known headcount —
-   visually verified accurate, not a SAM3-continuous "oracle", which
-   was dropped after it turned out to inherit SAM3's own tracking
-   errors). Plus an overlapping-chunks alternative stitching strategy
-   for psifx's own SAM3 path. Not runnable in this dev sandbox (needs
-   the real `psifx` package or `sam3` package, CUDA, gated SAM3
-   checkpoint access) — see each script's own module docstring for its
-   exact methodology.
+1. **SAM3** (real psifx's `Sam3TrackingTool`) produces the raw,
+   fragmented per-chunk MaskDir.
+2. **OSNet** appearance embeddings + a hue-histogram color signal give
+   each mask fragment a signature.
+3. **Heuristic merge** re-links fragments that are the same person
+   split by a chunk boundary or a mid-chunk tracking loss (global
+   Hungarian assignment), and separately resolves same-time
+   overlapping tracks (two ids alive at once -- same body split into
+   simultaneous fragments vs. a genuine second person) via fixed
+   thresholds or a small classifier trained on labeled examples.
 
 ## Structure
 
 ```
 pose-behavior-pipeline/
 ├── src/
-│   ├── webui_app.py               # GUI launcher: cd src && python webui_app.py
-│   ├── segmentation_demo.py       # ACTIVE main CLI: overlay + CSV, no keypoints
-│   ├── track_stability_check.py   # ACTIVE diagnostic: id count/lifespan
-│   ├── pipeline.py                # batch CLI (pose-based, on hold)
-│   ├── live_demo.py               # real-time CLI (pose-based, on hold)
-│   ├── gui/                       # shared player/dispatch logic behind the GUI
-│   ├── webui/                     # "Behaviour Vision Lab" GUI (pywebview + HTML/CSS/JS)
-│   ├── segmentation/              # ACTIVE library: silhouettes only, no keypoints
-│   │   ├── seg_estimation.py      # YOLO26-seg + ByteTrack wrapper (default backend)
-│   │   ├── seg_reid.py            # hard-capped id linking (position/color/shape)
-│   │   ├── sam_backend.py         # shared SAM/SAM2 chunking logic
-│   │   ├── sam31_estimation.py    # SAM 3.1 (needs CUDA, gated HF checkpoint)
-│   │   └── sam2_estimation.py     # SAM2 vanilla (needs CUDA)
-│   ├── pose/                      # ON HOLD library: everything keypoint-based
-│   │   ├── keypoints.py           # COCO-17 index names, skeleton edges
-│   │   ├── geometry.py            # shared angle/vector math
-│   │   ├── pose_estimation.py     # YOLO-pose + ByteTrack wrapper
-│   │   ├── features.py            # angles, velocity, symmetry, repetitiveness, synchrony
-│   │   ├── gaze_head.py           # head pose, mouth/eye/eyebrow signals (MediaPipe)
-│   │   ├── hands.py               # finger-level tracking (MediaPipe HandLandmarker)
-│   │   ├── mediapipe_pose.py      # single-person pose (MediaPipe), applied per tracked mask
-│   │   ├── identity_manager.py    # shared Hungarian batch re-id decision layer
-│   │   ├── reid.py                # re-id after exit/re-entry (body-shape signature + color)
-│   │   ├── appearance_embedding.py # OSNet embedding signal + EMA gallery
-│   │   ├── chuv_features.py       # reference-pipeline feature set, replicated in real time
-│   │   └── anonymize.py           # face blurring
-│   ├── psifx_eval/                 # SEPARATE effort — see note above, not part of the pipeline
-│   │   ├── run_pipeline.py               # full pipeline in one resumable pass: optional trim -> sam3_baseline -> merge_fragments -> overlay
-│   │   ├── run_sam3_baseline.py          # standalone: real-psifx SAM3 baseline tracking only
-│   │   ├── merge_fragments.py            # standalone: appearance-based cross-fragment id merging over a whole MaskDir
-│   │   ├── run_four_way_comparison.py    # main deliverable: psifx vs 3 native SAM3.1 configs, scored vs a SAM3.1 reference run
-│   │   ├── run_sam31_native.py           # SAM 3.1 native tracker vs an existing MaskDir (with/without OSNet)
-│   │   ├── run_overlap_experiment.py     # vanilla psifx vs overlapping-chunks stitching strategy
-│   │   ├── overlap_tracking.py           # real SAM3 glue for the overlap strategy
-│   │   ├── overlap_strategy.py           # pure algorithmic core (unit-testable, no psifx/GPU)
-│   │   ├── visualize_masks.py            # renders MaskDir overlays for the GUI's Compare runs window
-│   │   ├── video_probe.py                # shared video-metadata helper
-│   │   ├── id_metrics.py                 # cross-chunk ID persistence metrics
-│   │   └── mask_io.py                    # MaskDir (psifx output format) I/O
-│   ├── common/                    # shared: device detection, model-path resolution, drawing
-│   └── configs/
-│       ├── bytetrack.yaml             # Ultralytics' unmodified default, kept for reference
-│       └── bytetrack_permissive.yaml  # tuned variant for hard scenes
-├── models/                        # auto-downloaded weights — gitignored, not code
-└── tests/                          # camera-free tests, mirrors src/'s package layout
-    ├── pose/                       # pose/ tests
-    ├── segmentation/               # segmentation/ tests
-    ├── psifx_eval/                 # psifx_eval/ tests (algorithmic core only, no psifx/GPU)
-    ├── common/                     # common/ tests
-    ├── gui/                        # gui/ tests
-    └── webui/                      # webui/ tests
+│   ├── segmentation/                # the pipeline
+│   │   ├── run_pipeline.py          # MAIN ENTRY POINT -- see Usage below
+│   │   ├── run_sam3_baseline.py     # step 1: real-psifx SAM3 baseline tracking
+│   │   ├── merging/                 # step 2: the merge_fragments algorithm
+│   │   │   ├── merge_fragments.py   #   orchestrator (called by run_pipeline)
+│   │   │   ├── mask_io.py           #   MaskDir I/O
+│   │   │   ├── mask_utils.py        #   polygon/mask geometry
+│   │   │   ├── signatures.py        #   OSNet + color appearance signatures
+│   │   │   ├── reappearance_merge.py#   pass-1/2: track ends -> track starts
+│   │   │   └── overlap_resolution.py#   zeroth pass: same-time overlaps
+│   │   ├── classifier/              # builds the overlap classifier (optional)
+│   │   │   ├── extract_overlap_candidates.py  # dumps unlabeled feature CSV
+│   │   │   └── train_overlap_classifier.py    # fits weights from labeled CSV
+│   │   └── tools/                   # manual inspection/QA, not in the main path
+│   │       ├── subvideo.py          #   cuts a time window from video+MaskDir
+│   │       ├── run_osnet_window.py  #   runs merge_fragments on that window
+│   │       ├── overlay_subvideo.py  #   renders a labeled overlay for QA
+│   │       └── check_overlap_iou.py #   raw IoU/distance between two ids
+│   └── pose/
+│       └── appearance_embedding.py  # OSNetEmbedder + EMA gallery update
+└── requirements.txt
 ```
 
 ## Setup
@@ -99,112 +56,79 @@ pose-behavior-pipeline/
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pip install pywebview   # for the GUI
+pip install torch torchreid gdown tensorboard  # OSNet -- see requirements.txt's notes
 ```
 
-## GUI
+**`psifx` itself** (not a PyPI package):
 
 ```bash
-cd src && python webui_app.py
+git clone https://github.com/psifx/psifx
+cd psifx && pip install .
 ```
 
-Load a video, pick pipeline mode (Segmentation / Pose estimation /
-Both), model size, max people, re-identification settings. Same
-generators as the CLIs underneath (`gui/pipeline_runner.py`), so
-behaviour never diverges — see that module and `webui/api.py` for the
-full design.
+SAM3 checkpoint access is gated (Meta requires ethical-approval access
+via Hugging Face). To avoid psifx's automatic Hugging Face auth flow,
+clone the SAM3 checkpoint locally and point `SAM3_PATH` in
+`psifx/utils/constants.py` at it -- see psifx's own docs
+(https://psifx.github.io/psifx/) for the exact steps and CUDA/PyTorch
+requirements (needs a CUDA GPU; not runnable on a Mac).
 
-## SAM 3.1 / SAM2 (CUDA only)
+**`ffmpeg`** (system binary, `run_pipeline.py` shells out to it for
+the transcode step): install via your OS package manager.
 
-`--backend sam31`/`sam2` swap in
-[SAM 3.1](https://github.com/facebookresearch/sam3) or
-[SAM2](https://github.com/facebookresearch/sam2). SAM 3.1 checkpoints
-are gated on Hugging Face (`facebook/sam3.1` — request access, then
-`hf auth login`); SAM2's are public. Both need `device=cuda`, Python
-3.12+, PyTorch 2.7+, CUDA 12.6+. Processed in overlapping chunks
-(`--sam-chunk-size`/`--sam-overlap`, default 600/50) — see
-`segmentation/sam_backend.py`'s docstring for the chunking design and
-why SAMURAI was dropped for vanilla SAM2.
-
-Not yet run against the real `sam3`/`sam2` API in this environment (no
-CUDA here) — verified against a fake predictor only
-(`tests/segmentation/sam_backend_check.py`). Check `_init_state()` /
-`_add_box_prompt()` / `_propagate()` against the real API before
-relying on it.
-
-## Usage (CLI)
-
-**Active pipeline (segmentation, no keypoints):**
+## Usage
 
 ```bash
-cd src && python segmentation_demo.py --source video.mp4 --fps 15 \
-    --model yolo26s-seg.pt --tracker configs/bytetrack_permissive.yaml \
-    --conf-threshold 0.1 --max-people 2 --out session_seg.csv
-```
-
-Model weights auto-download into `models/` on first use, regardless of
-launch cwd. `--max-people N`: known headcount, caps detections per
-frame. `--with-seg-reid` (needs `--max-people`) links ids to a fixed
-identity pool instead of just capping — see `seg_reid.py`.
-`--with-mediapipe-pose` adds a skeleton inside each tracked mask — see
-`pose/mediapipe_pose.py`.
-
-**Pose-based pipeline (on hold):**
-
-```bash
-cd src && python pipeline.py --source video.mp4 --fps 30 --out features.csv
-cd src && python live_demo.py --source 0 --fps 30 --out live_session.csv
-```
-
-`--device` auto-detects cuda/mps/cpu. Flags stack freely:
-`--with-eyes/mouth/eyebrows/head-movement`, `--with-hands`, `--with-reid`,
-`--with-chuv-features`, `--target-track-id N`, `--blur-faces`, plus
-`--tracker`/`--conf-threshold`/`--max-people`. See `--help` per script,
-and `reid.py`'s docstring for re-identification details.
-
-## `psifx_eval` full pipeline (CUDA only)
-
-```bash
-python -m psifx_eval.run_pipeline --video ~/Bureau/9_group_1_3/camera_a.mkv \
+cd src
+python -m segmentation.run_pipeline --video ~/Bureau/9_group_1_3/camera_a.mkv \
     --ss 00:22:34 --to 00:27:40 --device cuda
 ```
 
-Runs trim (only if `--ss`/`--to` given) -> `run_sam3_baseline` ->
-`merge_fragments` -> overlay in one resumable pass, writing into
-`processed/`, `masks/`, `merged/` subfolders next to the source video
-(never a separate output root) -- see `run_pipeline.py`'s module
-docstring for the exact naming/skip-if-exists rules. Omit `--ss`/`--to`
-to run on the whole video. Same sandbox limitations as the rest of
-`psifx_eval` (needs the real `psifx` package, `sam3`, CUDA).
+Runs, in one resumable pass (each step skipped if its output already
+exists, unless `--overwrite`):
 
-## Modules
+1. ffmpeg transcode/trim (always runs -- normalizes source `.mkv`
+   codecs) -> `processed/<name>.mp4`
+2. `run_sam3_baseline` -> `masks/<name>/` (raw MaskDir)
+3. `merging.merge_fragments` -> `merged/<name>/` (merged MaskDir +
+   `merge_report.json`)
+4. psifx's `TrackingTool.visualize` -> `merged/<name>/overlay.mp4`
 
-- **`pose/features.py`** — joint angles, movement energy, symmetry,
-  repetitive-motion score, proximity/synchrony.
-- **`pose/gaze_head.py`** — head pose, shared-attention proxy, mouth
-  ratio, blink rate, eyebrow raise (rough proxy, single camera).
-- **`pose/hands.py`** — finger flexion, fingertip repetitiveness.
-- **`pose/mediapipe_pose.py`** — single-person MediaPipe pose remapped
-  onto COCO-17, applied inside a bbox crop.
-- **`pose/reid.py`** — restores identity after exit/re-entry, via a
-  body-proportion signature optionally boosted by color/position/
-  embedding (never forced, strongest signal wins).
-- **`pose/chuv_features.py`** — real-time reimplementation of the
-  reference pipeline's feature formulas. No trained classifier.
+All rooted next to the source video, never a separate output root --
+a whole-video run and any number of `--ss`/`--to` ranged runs on the
+same source video coexist as sibling folders. Omit `--ss`/`--to` to
+run the whole video.
+
+`--no-osnet` disables the OSNet signal (color only). `--overlap-classifier
+<path>` swaps in a weights JSON from `train_overlap_classifier.py`
+instead of the two fixed overlap thresholds. See `run_pipeline.py
+--help` for every parameter.
+
+### Building/updating the overlap classifier
+
+```bash
+cd src
+python -m segmentation.classifier.extract_overlap_candidates --masks-dir .../masks/<name> --out candidates.csv
+# label candidates.csv by hand: 1 = same body/simultaneous fragments, 0 = genuinely different people
+# (use tools/overlay_subvideo.py / tools/check_overlap_iou.py to inspect each candidate's frame range)
+python -m segmentation.classifier.train_overlap_classifier --csv candidates.csv --out classifier.json
+```
 
 ## Known limitations
 
-- ByteTrack alone loses identity on full exit/re-entry or major
-  appearance change; `reid.py`/`seg_reid.py` mitigate, don't eliminate.
-- Thresholds (activity, self-touch, blink, reid distance) are starting
-  points, not clinically validated.
-- COCO-17 lacks toe/heel keypoints present in BODY-25.
-- No trained classifier — feature extraction only.
+- Needs a CUDA GPU (SAM3 + the OSNet embedder can run on CPU, but not
+  in practical time for a full session).
+- The overlap classifier is only as good as its labeled examples --
+  `extract_overlap_candidates.py`'s CSVs need to keep growing across
+  sessions as new failure modes show up.
+- No face-blurring/anonymization step exists in this pipeline (removed
+  with the old pipeline in the 2026-08 cleanup, and was never wired
+  into an active path even before that). Needs to be reintroduced
+  before any video of minors leaves a controlled environment.
 
 ## Ethics & privacy
 
-Video of minors in a clinical context requires: face blurring as early
-as possible (`pose/anonymize.py` — not yet wired into the active
-pipeline), compliance with Swiss LPD and, where applicable, GDPR, and
-separation of raw video from derived features with distinct retention
-policies.
+Video of minors in a clinical context requires face blurring as early
+as possible (see Known limitations -- not currently implemented),
+compliance with Swiss LPD and, where applicable, GDPR, and separation
+of raw video from derived features with distinct retention policies.

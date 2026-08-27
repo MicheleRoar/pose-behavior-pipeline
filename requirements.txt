@@ -1,71 +1,53 @@
-ultralytics>=8.4  # richiesto per YOLO26 (yolo26n-pose.pt)
-opencv-python>=4.9,<5  # <5 richiesto: opencv-python 5.x forza numpy>=2, incompatibile con
-                        # sam3 (numpy<2, vedi sotto)
+# psifx SAM3 cross-chunk identity-persistence pipeline -- see README.md.
+#
+# `psifx` itself is NOT listed here: it's not a PyPI package, it's
+# installed from source (git clone + `pip install .`), and needs a
+# gated SAM3 checkpoint (Meta/Hugging Face access). See README.md's
+# Setup section for the exact steps.
+#
+# `ffmpeg` (the CLI binary `run_pipeline.py` shells out to for the
+# always-on transcode/trim step) is a system dependency, not a pip
+# package -- install via your OS package manager (e.g. `apt install
+# ffmpeg`).
+
+opencv-python>=4.9,<5  # <5: opencv-python 5.x forces numpy>=2; keep this pin
+                        # unless/until psifx's own numpy requirement says otherwise
 numpy>=1.26,<2
-pandas>=2.2
-scipy>=1.12
-scikit-learn>=1.4
-matplotlib>=3.8
-mediapipe>=1.0  # opzionale: head-pose/viso (live_demo.py --with-eyes/--with-mouth/
-                 # --with-eyebrows/--with-head-movement), mani (--with-hands), o pose
-                 # per-maschera nella pipeline di segmentazione (--with-mediapipe-pose)
-Pillow>=10.0  # richiesto dalla GUI Tkinter (gui_app.py) per mostrare l'overlay in una finestra
-# pywebview: opzionale, richiesto solo dalla GUI web "Behaviour Vision Lab" (webui_app.py).
-# Su macOS/Windows porta gia' il proprio backend nativo (Cocoa/EdgeWebView2), ma su Linux
-# NON include nessun backend grafico -- senza uno di questi va in errore "No Qt bindings
-# could be found" all'avvio. pywebview[qt] installa PyQt5+PyQtWebEngine via pip (nessun
-# pacchetto di sistema richiesto nella maggior parte dei casi); in alternativa il backend
-# GTK (pywebview[gtk]) richiede invece pacchetti di sistema (python3-gi, webkit2gtk).
-pywebview>=5.0; sys_platform != "linux"
-pywebview[qt]>=5.0; sys_platform == "linux"
-# SAM 3.1 / SAM2 (opzionali, backend --backend sam31|sam2 in
-# segmentation_demo.py, vedi README): NON elencati come riga pip qui sopra
-# di proposito -- non sono pacchetti PyPI normali. SAM 3.1 richiede
-# 'git clone https://github.com/facebookresearch/sam3 && pip install -e .'
-# (Python 3.12+, PyTorch 2.7+, CUDA 12.6+, checkpoint gated su Hugging Face
-# facebook/sam3.1, richiede 'hf auth login'); SAM2 richiede
-# 'git clone https://github.com/facebookresearch/sam2 && pip install -e .'
-# (checkpoint pubblici, nessun accesso gated). NON usare il fork SAMURAI
-# (yangchris11/samurai): il suo filtro di Kalman assume un solo oggetto
-# tracciato per sessione e va in crash col multi-persona, vedi README.
-# Entrambi richiedono una GPU CUDA -- non installarli per usare solo il
-# backend YOLO di default.
-#
-# Appearance embedding OSNet (opzionale, toggle "Appearance embedding
-# (OSNet)" in Advanced settings -- vedi pose/appearance_embedding.py):
-# segnale di aspetto supplementare per Identity & Re-identification, oltre
-# alle euristiche gia' integrate (proporzioni corporee/colore/posizione per
-# la pose, centroide/colore/forma per la segmentazione). NON elencato come
-# riga pip qui sopra di proposito: 'torch' e' un pacchetto pesante (centinaia
-# di MB) e non necessario per il resto della pipeline. Installare con:
+scipy>=1.12  # linear_sum_assignment (merge_fragments_v2.py's Hungarian merge/overlap resolution)
+
+# Appearance embedding OSNet (optional -- `--no-osnet` on run_pipeline.py/
+# merge_fragments_v2.py disables it; see pose/appearance_embedding.py).
+# NOT listed as a normal pip line above on purpose: torch is a heavy
+# (hundreds of MB) dependency and the import is delayed inside
+# OSNetEmbedder.__init__, so the rest of the pipeline works without it.
+# Given the current direction (SAM3 + OSNet + heuristic), install it:
 #   pip install torch torchreid
-# Il primo utilizzo di un model_name noto (es. 'osnet_x1_0') senza un
-# model_path esplicito fa scaricare a torchreid i pesi pre-addestrati dal suo
-# model zoo -- richiede una connessione internet al primo avvio. Nessuna GPU
-# richiesta (default device='cpu', piu' lento ma funziona anche su un Mac
-# senza CUDA); una GPU CUDA disponibile puo' essere passata esplicitamente
-# per velocizzare l'inferenza per-persona.
+# First use of a known model_name (default 'osnet_x1_0') without an
+# explicit model_path downloads pretrained weights from torchreid's
+# model zoo -- needs an internet connection on first run. No GPU
+# required (default device='cpu'); pass a CUDA device explicitly to
+# speed up per-person inference if available.
 #
-# Insidie note di 'pip install torchreid' (verificate, non ipotetiche):
-# - manca la dipendenza 'gdown' (usata per scaricare i pesi): se l'import
-#   fallisce con "ModuleNotFoundError: No module named 'gdown'", installare
-#   anche quello a parte (pip install gdown).
-# - manca anche 'tensorboard': 'torchreid.reid.engine' (importato gia'
-#   a livello di package init, anche se si usa solo FeatureExtractor per
-#   inferenza) fa 'from torch.utils.tensorboard import SummaryWriter',
-#   che fallisce con "ModuleNotFoundError: No module named 'tensorboard'"
-#   se non e' installato a parte (pip install tensorboard).
-# - UserWarning "Cython evaluation ... unavailable" all'import: benigno,
-#   riguarda solo il modulo di evaluation CMC/mAP (rank_cy), non usato da
-#   FeatureExtractor -- si puo' ignorare.
-# - 'pip install torchreid' installa di default "torchreid-pip", un
-#   repackaging PyPI di terzi (non il progetto originale
-#   github.com/KaiyangZhou/deep-person-reid) con un layout dei moduli
-#   diverso: `import torchreid` funziona, ma `torchreid.utils` non e' un
-#   vero sottopacchetto importabile con `from torchreid.utils import ...`
-#   (fallisce con "ModuleNotFoundError: No module named 'torchreid.utils'"
-#   anche a installazione riuscita). Il codice qui (vedi
-#   `pose/appearance_embedding.py::_resolve_feature_extractor`) gestisce
-#   gia' questo caso accedendo per attributo dopo l'import invece che con
-#   un sotto-import diretto -- nessuna azione richiesta, documentato qui
-#   solo per chi indaga un errore di import in questa dipendenza.
+# Known 'pip install torchreid' pitfalls (verified, not hypothetical):
+# - missing 'gdown' dependency (used to download weights): if the import
+#   fails with "ModuleNotFoundError: No module named 'gdown'", install it
+#   separately (pip install gdown).
+# - missing 'tensorboard': 'torchreid.reid.engine' (imported at package
+#   init even if only FeatureExtractor is used for inference) does
+#   'from torch.utils.tensorboard import SummaryWriter', which fails with
+#   "ModuleNotFoundError: No module named 'tensorboard'" unless installed
+#   separately (pip install tensorboard).
+# - UserWarning "Cython evaluation ... unavailable" on import: benign,
+#   only affects the CMC/mAP evaluation module (rank_cy), not used by
+#   FeatureExtractor -- safe to ignore.
+# - 'pip install torchreid' installs "torchreid-pip" by default, a
+#   third-party PyPI repackaging (not the original
+#   github.com/KaiyangZhou/deep-person-reid) with a different module
+#   layout: `import torchreid` works, but `torchreid.utils` isn't a real
+#   importable subpackage via `from torchreid.utils import ...` (fails
+#   with "ModuleNotFoundError: No module named 'torchreid.utils'" even on
+#   a successful install). `pose/appearance_embedding.py`'s
+#   `_resolve_feature_extractor` already handles this by accessing the
+#   attribute after import instead of a direct sub-import -- no action
+#   needed, documented here only for whoever investigates an import
+#   error in this dependency.
