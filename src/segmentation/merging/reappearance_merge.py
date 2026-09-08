@@ -71,6 +71,7 @@ def _resolve_group_merges(
     group_sigs: dict[int, tuple],
     orphan_sigs: dict[int, tuple],
     merge_threshold: float,
+    orphan_groups: dict[int, list[int]] | None = None,
 ) -> list[dict]:
     """Pass 2: global Hungarian assignment between orphan start tracks
     (rows -- ones pass one left unmatched) and candidate GROUPS
@@ -79,7 +80,15 @@ def _resolve_group_merges(
     real person can't be two simultaneous tracks) and at least one
     member genuinely ends before the orphan starts. Same global-
     assignment, "tag every real candidate" conventions as
-    `_resolve_merges`."""
+    `_resolve_merges`.
+
+    `orphan_groups` (`{orphan_id: member_ids}`) is the orphan's OWN
+    pass-one group: an orphan is unmatched on its START side but may
+    already have been merged on its END side (x -> y), so accepting
+    "orphan into group G" really merges its whole chain into G. The
+    overlap check therefore runs on every member of the orphan's chain,
+    not just the orphan -- otherwise a 30-frame fragment can bridge two
+    people who coexist for the entire session."""
     if not orphan_ids or not groups:
         return []
 
@@ -87,6 +96,8 @@ def _resolve_group_merges(
     cost = np.full((len(orphan_ids), len(group_ids)), _IMPOSSIBLE_COST)
     for i, o in enumerate(orphan_ids):
         o_first, o_last = bounds[o]
+        chain = (orphan_groups or {}).get(o, [o])
+        chain_bounds = [bounds[m] for m in chain if m in bounds] or [bounds[o]]
         for j, g in enumerate(group_ids):
             members = groups[g]
             if o in members:
@@ -94,8 +105,10 @@ def _resolve_group_merges(
             member_bounds = [bounds[m] for m in members if m in bounds]
             if not member_bounds:
                 continue  # e.g. every member was too short to have bounds
-            if any(m_first <= o_last and m_last >= o_first for m_first, m_last in member_bounds):
-                continue  # a member of this group is active at the same time as the orphan -- can't be the same person
+            if any(m_first <= c_last and m_last >= c_first
+                   for m_first, m_last in member_bounds
+                   for c_first, c_last in chain_bounds):
+                continue  # a member of this group is active at the same time as the orphan's chain -- can't be the same person
             if not any(m_last < o_first for _m_first, m_last in member_bounds):
                 continue  # no member of this group actually ends before the orphan starts
             sim = _pair_similarity(group_sigs[g], orphan_sigs[o])
@@ -139,3 +152,78 @@ def _group_chains(merges: list[tuple[int, int, float]], all_ids: list[int]) -> d
         union(end_id, start_id)
 
     return {oid: find(oid) for oid in all_ids}
+
+
+def _overlap_frames(a: tuple[int, int], b: tuple[int, int]) -> int:
+    """Number of frames where both `(first, last)` spans are active
+    (0 when they don't overlap)."""
+    return max(0, min(a[1], b[1]) - max(a[0], b[0]) + 1)
+
+
+def _group_chains_with_temporal_veto(
+    merges: list[tuple[int, int, float]],
+    all_ids: list[int],
+    bounds: dict[int, tuple[int, int]],
+    allowed_overlap_pairs: set[frozenset[int]],
+    max_tolerated_overlap_frames: int = 0,
+) -> tuple[dict[int, int], list[dict]]:
+    """Same union-find as `_group_chains`, but every union is applied
+    ONLY if the resulting group stays temporally consistent: a real
+    person can't be two tracks alive at the same time, so a merge that
+    would put two simultaneously-active ids into the same group is
+    vetoed -- unless that exact pair was accepted by the zeroth pass
+    (`allowed_overlap_pairs`), which is the one legitimate case of
+    same-body simultaneous fragments (a garment being put on/taken
+    off). Overlaps of at most `max_tolerated_overlap_frames` are
+    ignored (tracker jitter at a fragment boundary, not real
+    coexistence).
+
+    This is the whole-video counterpart of the zeroth pass's
+    one-match-per-fragment rule: pass 1/2 only ever check the two ids
+    of a pair against each other, so a short ambiguous fragment can
+    still bridge two different people by transitivity (A->x and x->B
+    both look plausible even though A and B coexist for thousands of
+    frames). Merges are applied in the order given -- put the most
+    trusted ones first, they win any conflict.
+
+    Returns `({original_id: canonical_id}, vetoed)` where `vetoed`
+    lists every merge skipped, with the conflicting pair and its
+    overlap length, for the report."""
+    parent = {oid: oid for oid in all_ids}
+    members: dict[int, list[int]] = {oid: [oid] for oid in all_ids}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    vetoed: list[dict] = []
+    for end_id, start_id, sim in merges:
+        ra, rb = find(end_id), find(start_id)
+        if ra == rb:
+            continue
+        conflict = None
+        for a in members[ra]:
+            if a not in bounds:
+                continue
+            for b in members[rb]:
+                if b not in bounds or frozenset((a, b)) in allowed_overlap_pairs:
+                    continue
+                ov = _overlap_frames(bounds[a], bounds[b])
+                if ov > max_tolerated_overlap_frames:
+                    conflict = (a, b, ov)
+                    break
+            if conflict:
+                break
+        if conflict:
+            vetoed.append({
+                "from_id": end_id, "into_id": start_id, "similarity": round(sim, 3),
+                "conflict_ids": [conflict[0], conflict[1]], "conflict_overlap_frames": conflict[2],
+            })
+            continue
+        keep, drop = min(ra, rb), max(ra, rb)
+        parent[drop] = keep
+        members[keep].extend(members.pop(drop))
+
+    return {oid: find(oid) for oid in all_ids}, vetoed

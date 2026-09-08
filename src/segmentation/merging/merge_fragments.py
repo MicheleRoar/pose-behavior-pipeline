@@ -16,9 +16,13 @@ algorithm:
      simultaneously alive that are actually one body split into parts.
   3. `signatures._sample_signature`/`_pooled_group_signature` -- build
      each track's/group's appearance signature.
-  4. `reappearance_merge._resolve_merges`/`_resolve_group_merges`/
-     `_group_chains` -- pass 1/2: match a track that ENDS against one
-     that STARTS later (global Hungarian, never greedy).
+  4. `reappearance_merge._resolve_merges`/`_resolve_group_merges` --
+     pass 1/2: match a track that ENDS against one that STARTS later
+     (global Hungarian, never greedy); unions are applied through
+     `_group_chains_with_temporal_veto`, which refuses any merge that
+     would put two simultaneously-active ids in one group (only
+     zeroth-pass pairs may coexist) -- the whole-video guard against
+     short fragments bridging different people by transitivity.
   5. Write the merged MaskDir (one file per canonical id, union of its
      members) and return the full JSON-able report.
 
@@ -56,7 +60,9 @@ import numpy as np
 from segmentation.merging.mask_io import DEFAULT_MASK_THRESHOLD, _list_mask_files, _scan_track
 from segmentation.merging.overlap_resolution import _resolve_overlap_merges
 from segmentation.merging.signatures import _pooled_group_signature, _sample_signature
-from segmentation.merging.reappearance_merge import _group_chains, _resolve_group_merges, _resolve_merges
+from segmentation.merging.reappearance_merge import (
+    _group_chains_with_temporal_veto, _resolve_group_merges, _resolve_merges,
+)
 from pose.appearance_embedding import OSNetEmbedder
 
 DEFAULT_MIN_FRAGMENT_FRAMES = 8
@@ -213,7 +219,16 @@ def merge_fragments(
         (c["from_id"], c["into_id"], c["similarity"])
         for c in candidate_pairs if c["accepted"]
     ]
-    canonical = _group_chains(merges + overlap_merge_tuples, all_ids)
+    # Zeroth-pass pairs are the only legitimate same-time unions; every
+    # other merge is applied through a temporal-consistency veto (see
+    # `_group_chains_with_temporal_veto`). Order = trust: overlap merges
+    # first, then pass 1 by descending similarity.
+    allowed_overlap_pairs = {frozenset((r["id_a"], r["id_b"])) for r in overlap_accepted}
+    pass1_sorted = sorted(merges, key=lambda m: -m[2])
+    canonical, vetoed_merges = _group_chains_with_temporal_veto(
+        overlap_merge_tuples + pass1_sorted, all_ids, bounds, allowed_overlap_pairs,
+        max_tolerated_overlap_frames=min_overlap_frames,
+    )
 
     # --- second pass: pooled-group fallback for orphan start tracks
     # pass one couldn't match against any single fragment (see module
@@ -252,13 +267,18 @@ def merge_fragments(
             orphan_start_ids,
             {g: pass1_groups[g] for g in candidate_group_ids},
             bounds, group_sigs, orphan_sigs, merge_threshold,
+            orphan_groups={o: pass1_groups[canonical[o]] for o in orphan_start_ids},
         )
         extra_merges = [
             (min(pass1_groups[c["group_id"]]), c["orphan_id"], c["similarity"])
             for c in group_candidates if c["accepted"]
         ]
         if extra_merges:
-            canonical = _group_chains(merges + overlap_merge_tuples + extra_merges, all_ids)
+            extra_sorted = sorted(extra_merges, key=lambda m: -m[2])
+            canonical, vetoed_merges = _group_chains_with_temporal_veto(
+                overlap_merge_tuples + pass1_sorted + extra_sorted, all_ids, bounds,
+                allowed_overlap_pairs, max_tolerated_overlap_frames=min_overlap_frames,
+            )
 
     # Write the merged MaskDir: one file per distinct canonical id,
     # union (logical OR) of every member's mask. Streamed lock-step --
@@ -334,6 +354,7 @@ def merge_fragments(
             {"from_id": c["from_id"], "into_id": c["into_id"], "similarity": c["similarity"]}
             for c in candidate_pairs if not c["accepted"]
         ],
+        "vetoed_merges": vetoed_merges,
         "pooled_group_samples_per_member": pooled_samples_per_member,
         "pooled_group_candidates": [
             {"orphan_id": c["orphan_id"], "group_id": c["group_id"],
@@ -427,6 +448,13 @@ def main() -> None:
               f"below --merge-threshold ({report['merge_threshold']}):")
         for c in sorted(report["rejected_candidates"], key=lambda c: -c["similarity"]):
             print(f"  id {c['from_id']} -> id {c['into_id']}  (similarity {c['similarity']})")
+    if report["vetoed_merges"]:
+        print(f"\n{len(report['vetoed_merges'])} merge(s) VETOED for temporal inconsistency "
+              f"(would have put two simultaneously-active ids in one group):")
+        for v in report["vetoed_merges"]:
+            print(f"  id {v['from_id']} -> id {v['into_id']}  (similarity {v['similarity']}) -- "
+                  f"ids {v['conflict_ids'][0]} and {v['conflict_ids'][1]} coexist for "
+                  f"{v['conflict_overlap_frames']} frames")
     if report["pooled_group_candidates"]:
         accepted = [c for c in report["pooled_group_candidates"] if c["accepted"]]
         rejected = [c for c in report["pooled_group_candidates"] if not c["accepted"]]
