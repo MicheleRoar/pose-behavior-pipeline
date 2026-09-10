@@ -1,12 +1,22 @@
 """
 segmentation/classifier/train_overlap_classifier.py
 =====================================================
-Step 2: fits a small logistic-regression classifier (2 features +
-bias -- centroid_dist_norm, pixel_gap_px, matching what
-overlap_resolution._resolve_overlap_merges computes) on labeled rows
-from extract_overlap_candidates.py, and writes a weights JSON that
+Step 2: fits a small logistic-regression classifier (3 features +
+bias -- centroid_dist_norm, pixel_gap_px, centroid_dist_px, matching
+what overlap_resolution._resolve_overlap_merges computes) on labeled
+rows from extract_overlap_candidates.py, and writes a weights JSON that
 merge_fragments.py's --overlap-classifier can load in place of the two
 fixed thresholds.
+
+centroid_dist_px (added 2026-09-10) is the RAW, non-normalized median
+centroid distance -- kept alongside centroid_dist_norm rather than
+replacing it. On the 29 real labeled examples collected so far (5 full
+sessions), centroid_dist_norm alone does NOT separate the two classes
+(a confirmed reject sits below a confirmed merge on the same session,
+0.3749 vs 0.3862 norm), while centroid_dist_px alone perfectly
+separates all 29 with a wide margin (every positive <=81.3px, every
+negative >=119.9px). Feeding both lets the fit lean on whichever
+actually holds up as more sessions come in, instead of hand-picking one.
 
 Gradient descent on standardized features for stable convergence with
 small samples, then folded back into weights that operate on raw
@@ -44,7 +54,7 @@ from pathlib import Path
 
 import numpy as np
 
-FEATURES = ["centroid_dist_norm", "pixel_gap_px"]
+FEATURES = ["centroid_dist_norm", "pixel_gap_px", "centroid_dist_px"]
 
 _TRUE_LABELS = {"1", "true", "same_body", "yes"}
 _FALSE_LABELS = {"0", "false", "different_people", "no"}
@@ -74,6 +84,7 @@ def _load_labeled_rows(paths: list[str]) -> list[dict]:
                     "id_b": row.get("id_b"),
                     "centroid_dist_norm": float(row["median_centroid_dist_norm"]),
                     "pixel_gap_px": float(row["median_pixel_gap_px"]),
+                    "centroid_dist_px": float(row["median_centroid_dist_px"]),
                     "label": label,
                 })
     return rows
@@ -137,7 +148,7 @@ def main() -> None:
             f"(got {n_pos} same-body, {n_neg} different-people)."
         )
 
-    X = np.array([[r["centroid_dist_norm"], r["pixel_gap_px"]] for r in rows])
+    X = np.array([[r["centroid_dist_norm"], r["pixel_gap_px"], r["centroid_dist_px"]] for r in rows])
     y = np.array([r["label"] for r in rows], dtype=float)
 
     weights, bias = _fit_logistic_regression(X, y, l2=args.l2)

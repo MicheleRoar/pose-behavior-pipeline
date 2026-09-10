@@ -11,6 +11,17 @@ thresholds (real pixel-to-pixel mask distance + centroid distance,
 calibrated on real CHUV footage -- see `merge_fragments.py`'s module
 docstring for the calibration history) or a small classifier trained
 by `classifier/train_overlap_classifier.py`.
+
+NOTE (2026-09-10, 29 real labeled examples across 5 full sessions): the
+classifier's `centroid_dist_norm` feature alone does NOT separate the
+two classes (a confirmed reject sits below a confirmed merge on the
+same session at 0.3749 vs 0.3862 norm). The RAW `centroid_dist_px`
+this module already computes as `median_centroid` perfectly separates
+all 29 examples with a wide margin (positives <=81.3px, negatives
+>=119.9px) and is now passed to the classifier as a third feature
+alongside the two above -- see
+`classifier/train_overlap_classifier.py`'s module docstring for the
+full finding.
 """
 
 from __future__ import annotations
@@ -156,6 +167,7 @@ def _resolve_overlap_merges(
                 score = _classifier_score(classifier, {
                     "centroid_dist_norm": median_centroid_norm,
                     "pixel_gap_px": median_pixel,
+                    "centroid_dist_px": median_centroid,
                 })
                 record["classifier_score"] = round(score, 4)
                 if score >= 0.5:
