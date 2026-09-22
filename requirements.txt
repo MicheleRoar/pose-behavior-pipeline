@@ -51,3 +51,36 @@ scipy>=1.12  # linear_sum_assignment (merge_fragments_v2.py's Hungarian merge/ov
 #   attribute after import instead of a direct sub-import -- no action
 #   needed, documented here only for whoever investigates an import
 #   error in this dependency.
+
+# Pose step (pose/extract_keypoints.py, pose/stabilization.py,
+# pose/run_pose.py -- runs AFTER segmentation, see README.md's "Pose"
+# usage section). NOT listed as a normal pip line above on purpose,
+# same treatment as torch/torchreid: this is a real, non-optional
+# dependency of the pose step specifically, delayed-imported so the
+# segmentation-only workflow keeps working without it installed.
+#   pip install mediapipe
+# Verified against mediapipe 0.10.32 (Tasks API: mp.tasks.vision.
+# PoseLandmarker, NOT the older/deprecated mp.solutions.pose). CPU-only
+# is fine and is extract_keypoints.py's default -- BlazePose is light
+# enough for this to be practical without a GPU. The PoseLandmarker
+# `.task` model file is auto-downloaded on first use (public download,
+# unlike the gated SAM3 checkpoint above; default variant is "lite",
+# URL pinned to float16/1/... not .../latest/... -- see
+# pose/model_cache.py and README.md if that can't reach the internet
+# from wherever this runs). Output is remapped to the same COCO-17
+# schema (pose/keypoints.py) as pose-behavior-pipeline_legacy, not
+# BlazePose's raw 33 landmarks -- see README.md's Structure section.
+
+# Depth step (pose/depth.py, pose/movement_metrics.py, pose/run_depth.py
+# -- runs AFTER pose, Azure Kinect sessions only, see README.md's
+# "Depth" usage section). NOT listed as a normal pip line above on
+# purpose, same delayed-import treatment as mediapipe/torch above:
+#   pip install pyk4a
+# This is NOT sufficient by itself -- pyk4a is a thin wrapper around the
+# real Azure Kinect Sensor SDK (libk4a), which must be installed
+# system-wide separately (not a pip package). Azure Kinect DK is an
+# officially discontinued Microsoft product, so there's no current
+# first-party libk4a install guide for a modern Ubuntu -- not yet
+# verified that it installs cleanly here at all; treat a clean
+# `python -c "import pyk4a"` as the real go/no-go signal, not just a
+# successful `pip install`. See README.md's Setup section.
