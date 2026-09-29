@@ -16,3 +16,5 @@ tests/test_outputs/
 src/live_session.csv
 src/segmentation_session.csv
 src/session_seg.csv
+
+/live_demo/live_session.csv
