@@ -33,6 +33,13 @@ post-process.
    `(X, Y, Z)` point to every already-stabilized 2D keypoint, then
    computes per-person distance-traveled/velocity/movement-variability
    from that 3D skeleton -- see the "Depth" usage section below.
+6. **Table-based cross-camera registration** (optional, only for
+   sessions filmed by two Kinect cameras at once -- today just
+   `10_individual_12`): registers `camera_b`'s 3D frame onto
+   `camera_a`'s using the shared table as a common reference, so the
+   two cameras' independently-computed 3D skeletons become directly
+   comparable/mergeable -- see the "Table-based cross-camera
+   registration" usage section below.
 
 ## Structure
 
@@ -69,7 +76,8 @@ pose-behavior-pipeline/
 │       ├── run_pose.py              # MAIN ENTRY POINT for pose -- see Usage below
 │       ├── depth.py                 # step 5a: Azure Kinect depth -> 3D (X,Y,Z) per keypoint
 │       ├── movement_metrics.py      # step 5b: distance traveled / velocity / variability from the 3D skeleton
-│       └── run_depth.py             # MAIN ENTRY POINT for depth -- see Usage below
+│       ├── run_depth.py             # MAIN ENTRY POINT for depth -- see Usage below
+│       └── table_calibration.py     # step 6 (optional): camera_a<->camera_b registration via the shared table
 └── requirements.txt
 ```
 
@@ -301,27 +309,96 @@ Runs, in one resumable pass (same skip-if-output-exists policy as
 2. `movement_metrics` -> `pose/<name>/movement_summary.csv` (one row
    per person: `total_distance_mm`, `mean_velocity_mm_s`,
    `velocity_std_mm_s` -- the movement-variability figure --
-   `frames_with_root`, `total_frames`, `coverage_fraction`) and
-   `pose/<name>/movement_per_frame.csv` (the velocity time series).
-   "Root" position is the `left_hip`/`right_hip` midpoint (COCO-17 has
-   no dedicated pelvis keypoint). **Always read `coverage_fraction`
-   alongside the distance/velocity numbers** -- a gap (missing pose,
-   missing depth, or both) contributes nothing to `total_distance_mm`
-   rather than assuming straight-line motion across it, which
-   *under*-counts true distance whenever coverage is low; velocity at a
-   frame divides by the actual elapsed time since the last valid frame,
-   not a fixed `1/fps`. Same "no made-up signal" principle as
-   `stabilization.py`'s gap handling.
+   `frames_with_root`, `n_outliers_rejected`, `outlier_fraction`,
+   `total_frames`, `coverage_fraction`) and `pose/<name>/movement_per_frame.csv`
+   (the velocity time series, with an `is_outlier` column). "Root"
+   position is the `left_hip`/`right_hip` midpoint (COCO-17 has no
+   dedicated pelvis keypoint). **Always read `coverage_fraction` and
+   `outlier_fraction` alongside the distance/velocity numbers** -- a
+   gap (missing pose, missing depth, or both) contributes nothing to
+   `total_distance_mm` rather than assuming straight-line motion across
+   it, which *under*-counts true distance whenever coverage is low;
+   velocity at a frame divides by the actual elapsed time since the
+   last valid frame, not a fixed `1/fps`. A single-frame jump implying
+   a velocity above `--max-velocity-mm-s` (default 4000 mm/s, a fast
+   jog) is treated as an unreliable depth reading, not real movement --
+   rejected the same way a gap is (NaN, doesn't poison the next
+   frame's displacement either), see `movement_metrics.py`'s module
+   docstring "Rejecting single-frame velocity spikes" for why this was
+   added and how the default was chosen.
 
 `--overwrite` forces both steps to re-run. See `run_depth.py --help`
 for the full parameter list.
 
-**Not yet run on a real session.** The two "test on a video where
-people move a lot vs. one where people are seated" comparison cases
-this step exists for haven't been run yet -- do that before trusting
-these numbers for anything beyond a sanity check, and expect to tune
-things (e.g. `stabilization.py`'s filter is not currently applied to
-`Z`, only `x`/`y` -- see Known limitations).
+**Run on a real session (2026-09-22, `10_individual_12`, a "seated"
+session).** Confirmed on real data: `Z` isn't temporally smoothed the
+way `x`/`y` are (see Known limitations), and a small fraction of frames
+(well under 1% per person) had single-frame velocity spikes of several
+m/s to tens of m/s -- physically impossible, clearly sensor noise, not
+movement. Left unfiltered, that handful of frames distorted
+`total_distance_mm` by 12-17% and (more importantly) `velocity_std_mm_s`
+-- the movement-variability figure Matthew's brief specifically asked
+for -- by 37-65%; the outlier rejection above fixes this. Separately,
+and more encouragingly: a real, brief standing-and-walking episode in
+that same session (confirmed against the actual footage, ~1:30-2:30)
+shows up cleanly even after outlier rejection -- median velocity 1.9-2.9x
+higher in that window than in the rest of the session, sustained across
+many consecutive frames (not a one-frame spike) -- good evidence the
+pipeline is picking up genuine movement, not just noise. The
+group-vs-individual-session comparison this step was originally meant
+to validate with (`9_group_1_3` vs. an individual session) still hasn't
+been run, and is confounded anyway (a group session has inherently more
+activity regardless of any one person's mobility) -- the within-session
+before/after result above is arguably the cleaner validation of the two.
+
+### Table-based cross-camera registration (optional, two-camera sessions)
+
+For a session filmed by two Kinect cameras at once (today: only
+`10_individual_12`), each camera's `pose.run_depth` output is a 3D
+skeleton in THAT camera's own coordinate frame -- not directly
+comparable to the other camera's. This step registers `camera_b`'s
+frame onto `camera_a`'s using the shared LEGO table as a common
+physical reference (Matthew's own suggestion) -- a rigid 3D point-set
+fit (Kabsch/Umeyama) between a few table points read from each
+camera's own depth, not a classic checkerboard stereo calibration (see
+`pose/table_calibration.py`'s module docstring for why this is
+simpler). Five steps, once per session:
+
+```bash
+cd src
+# 1. Grab one clean color+depth capture per camera (pick a --t with a
+#    clear, unobstructed view of the table)
+python -m pose.table_calibration extract --video .../camera_a.mkv --out-prefix /tmp/cal/cam_a --t 30
+python -m pose.table_calibration extract --video .../camera_b.mkv --out-prefix /tmp/cal/cam_b --t 30
+
+# 2. Click the SAME physical table corners, in the SAME order, on each
+#    camera's saved PNG (opens an interactive window)
+python -m pose.table_calibration pick --color-image /tmp/cal/cam_a_color.png --out /tmp/cal/cam_a_points.json --n-points 4 --label "camera A"
+python -m pose.table_calibration pick --color-image /tmp/cal/cam_b_color.png --out /tmp/cal/cam_b_points.json --n-points 4 --label "camera B"
+
+# 3. Resolve those clicks to real 3D points via each camera's own depth
+python -m pose.table_calibration lookup3d --pointcloud /tmp/cal/cam_a_pointcloud.npy --points /tmp/cal/cam_a_points.json --out /tmp/cal/cam_a_points3d.json
+python -m pose.table_calibration lookup3d --pointcloud /tmp/cal/cam_b_pointcloud.npy --points /tmp/cal/cam_b_points.json --out /tmp/cal/cam_b_points3d.json
+
+# 4. Fit the rigid transform (camera_b -> camera_a)
+python -m pose.table_calibration register --source /tmp/cal/cam_b_points3d.json --target /tmp/cal/cam_a_points3d.json --out /tmp/cal/b_to_a_transform.json
+
+# 5. Apply it to camera_b's keypoints_3d.csv -- now directly comparable to camera_a's own
+python -m pose.table_calibration apply --keypoints-3d-csv .../camera_b/pose/.../keypoints_3d.csv --transform /tmp/cal/b_to_a_transform.json --out .../keypoints_3d_in_camera_a_frame.csv
+```
+
+`register` prints the fit's residual RMSE in mm -- a real, rigid table
+surface should fit to a few mm; anything much larger (tens of mm)
+means the clicked points don't actually correspond (wrong order, wrong
+physical point, or a click landed on a spot with no valid depth --
+`lookup3d` warns about that separately, re-pick those before
+registering). **Only the rigid-transform math is tested so far**
+(synthetic point sets with a known transform, exact recovery with no
+noise, ~1.5mm residual with 1.5mm of injected noise, NaN rows correctly
+preserved through the CSV apply step) -- the `extract`/`pick` steps
+need a real two-camera session to try, not yet done. Not required for
+the core movement-metrics validation above; only for comparing or
+fusing the two camera views of the same session.
 
 ### Building/updating the overlap classifier
 
@@ -389,30 +466,35 @@ python -m segmentation.classifier.train_overlap_classifier --csv candidates.csv 
   keypoint/session, not just accepted as-is -- see the Pose usage
   section above.
 - **Depth step (`pose/depth.py`, `pose/movement_metrics.py`,
-  `pose/run_depth.py`) is new and only tested against synthetic data
-  so far** (a fake `pyk4a` module + hand-built captures/point clouds --
-  never real Kinect device data, per this project's privacy policy of
-  not staging real clinical video/derived data off the recording
-  machine). Specifically verified: depth-lookup NaN handling (sensor
-  frame drop, out-of-depth-FOV pixel, in-FOV-but-no-return all counted
-  and NaN'd correctly, not conflated with each other), the movement
-  metrics correctly separate a synthetic "moves a lot" case from a
-  "seated" one and handle gaps as documented (`coverage_fraction`,
-  distance summed only across valid-to-valid spans), and
-  `run_depth.py`'s path resolution/resumable-step skipping. **Not yet
-  verified**: that `pyk4a` + the real `libk4a` SDK actually installs on
-  this project's Ubuntu machine (Azure Kinect DK is discontinued -- see
-  Setup); and the whole pipeline on one real "moves a lot" and one real
-  "seated" session, the actual test this step exists for.
-- **`Z` (depth) is not smoothed by `stabilization.py`.** That module's
-  One Euro Filter only ever ran over `x`/`y` -- `Z` comes straight from
-  the depth sensor's own per-pixel reading with no temporal filtering
-  at all, so `movement_metrics.py`'s distance/velocity numbers will
-  likely be noisier along the depth axis than in the image plane.
-  Whether that matters enough to extend `stabilization.py` to 3D (or
-  filter `keypoints_3d.csv` separately) is worth checking once real
-  numbers exist -- not done here since it wasn't clear yet whether it's
-  needed.
+  `pose/run_depth.py`) -- `pyk4a`+`libk4a` confirmed working on the
+  real project machine (2026-09-22, despite Azure Kinect DK being
+  discontinued -- installed via the Ubuntu 18.04 `.deb` packages, no
+  depth engine needed for playback-only use), and the pipeline has now
+  run end-to-end on one real session (`10_individual_12`, "seated").**
+  Still only synthetic-data-tested for `table_calibration.py` (the
+  rigid-transform math, not the interactive `extract`/`pick` steps,
+  which need a real two-camera session -- see that file's usage
+  section). The originally-planned "moves a lot vs. seated" cross-session
+  comparison (`9_group_1_3` vs. an individual session) hasn't been run
+  yet, and turned out to be confounded anyway (see the Depth usage
+  section) -- a within-session before/after test (a real
+  standing-and-walking episode inside `10_individual_12` itself) served
+  as the cleaner validation instead.
+- **`Z` (depth) is not temporally smoothed by `stabilization.py`.**
+  That module's One Euro Filter only ever ran over `x`/`y` -- `Z` comes
+  straight from the depth sensor's own per-pixel reading with no
+  filtering. Confirmed on the real `10_individual_12` run that this
+  produces occasional single-frame velocity spikes of several to tens
+  of m/s (physically impossible) -- `movement_metrics.py`'s
+  `max_velocity_mm_s` outlier rejection (added 2026-09-22, see its
+  module docstring) catches and drops these specifically, and cut
+  `velocity_std_mm_s` (the movement-variability figure) by 37-65% on
+  that session with under 1% of frames rejected per person. This fixes
+  the worst, most obviously-wrong artifacts but is a coarser tool than
+  real temporal smoothing -- it doesn't reduce ordinary (non-outlier)
+  frame-to-frame `Z` jitter the way a proper filter would. Whether
+  that residual jitter matters enough to extend `stabilization.py` to
+  3D is still worth checking once more real sessions have been run.
 
 ## Ethics & privacy
 

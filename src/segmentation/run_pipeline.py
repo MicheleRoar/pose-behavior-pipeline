@@ -36,11 +36,11 @@ failed) unless `--overwrite` is passed, which forces every step to
 re-run.
 
 Usage:
-    python -m segmentation.run_pipeline --video ~/Bureau/9_group_1_3/camera_a.mkv \\
+    python -m segmentation.run_pipeline --video ~/Bureau/The Sense/Sessions/9_group_1_3/camera_a.mkv \\
         --ss 00:22:34 --to 00:27:40 --device cuda
 
     # whole video (still re-encoded to processed/camera_a.mp4, just not trimmed):
-    python -m segmentation.run_pipeline --video ~/Bureau/9_individual_58/camera_a.mkv
+    python -m segmentation.run_pipeline --video ~/Bureau/The Sense/Sessions/9_individual_58/camera_a.mkv
 """
 
 from __future__ import annotations
