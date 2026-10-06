@@ -83,6 +83,8 @@ def main():
         if not ok:
             break
         frame = frame.astype(np.float32)
+        labels = []  # (text, pos, color) -- drawn after the uint8 conversion below,
+                     # cv2.putText requires a CV_8U image (OpenCV >=5 enforces this)
         for i in ids:
             ok_m, mraw = mask_caps[i].read()
             if not ok_m:
@@ -100,9 +102,12 @@ def main():
             frame = frame * (1 - soft[..., None]) + color[None, None, :] * soft[..., None]
             ys, xs = np.where(hard_mask)
             if len(xs):
-                cv2.putText(frame, str(id_to_seq[i]), (int(xs.min()), int(ys.min()) - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, tuple(float(c) for c in color), 2)
-        writer.write(frame.astype(np.uint8))
+                labels.append((str(id_to_seq[i]), (int(xs.min()), int(ys.min()) - 5),
+                                tuple(float(c) for c in color)))
+        frame = frame.astype(np.uint8)
+        for text, pos, color in labels:
+            cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        writer.write(frame)
  
     writer.release()
     video_cap.release()
