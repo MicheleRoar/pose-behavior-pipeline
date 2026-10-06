@@ -2,8 +2,8 @@
 
 ```bash
 cd src
-python -m segmentation.run_pipeline --video ~/Bureau/The\ Sense/Sessions/9_group_1_3/camera_a.mkv \
-    --ss 00:22:34 --to 00:27:40 --device cuda
+python -m segmentation.run_pipeline --video <path/to/session>/camera_a.mkv \
+    --ss 00:22:34 --to 00:27:40 --device cuda --crop-margin 25
 ```
 
 Runs, in one resumable pass (each step skipped if its output already
@@ -41,7 +41,7 @@ so the two steps agree on `<name>` and this step finds the right
 
 ```bash
 cd src
-python -m pose.run_pose --video ~/Bureau/The\ Sense/Sessions/9_group_1_3/camera_a.mkv \
+python -m pose.run_pose --video <path/to/session>/camera_a.mkv \
     --ss 00:22:34 --to 00:27:40
 ```
 
@@ -91,7 +91,7 @@ a distinct color -- the fastest way to actually *see* whether the
 stabilization is helping (rather than just eyeballing numbers in a CSV):
 
 ```bash
-python -m pose.run_pose --video ~/Bureau/The\ Sense/Sessions/9_group_1_3/camera_a.mkv \
+python -m pose.run_pose --video <path/to/session>/camera_a.mkv \
     --overlay
 ```
 
@@ -120,7 +120,7 @@ module docstring):
 
 ```bash
 cd src
-python -m pose.run_depth --video ~/Bureau/The\ Sense/Sessions/9_group_1_3/camera_a.mkv \
+python -m pose.run_depth --video <path/to/session>/camera_a.mkv \
     --ss 00:22:34 --to 00:27:40
 ```
 

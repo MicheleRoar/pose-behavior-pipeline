@@ -64,8 +64,8 @@ including a known SAM3/PoseLandmarker/Kinect SDK setup gotchas, in
 
 ```bash
 cd src
-python -m segmentation.run_pipeline --video ~/Bureau/The\ Sense/Sessions/9_group_1_3/camera_a.mkv \
-    --ss 00:22:34 --to 00:27:40 --device cuda
+python -m segmentation.run_pipeline --video <path/to/session>/camera_a.mkv \
+    --ss 00:22:34 --to 00:27:40 --device cuda --crop-margin 25
 ```
 
 One resumable pass: transcode -> SAM3 -> merge -> overlay -> crop
