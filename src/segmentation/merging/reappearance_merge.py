@@ -8,21 +8,21 @@ lost/occluded/off-screen who reappears as a brand-new id --
 `overlap_resolution.py` handles the separate case of two ids alive at
 the same time.
 """
-
+ 
 from __future__ import annotations
-
+ 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-
+ 
 from segmentation.merging.signatures import _pair_similarity
-
+ 
 # cost for a temporally-impossible pair (end doesn't precede start) in
 # the Hungarian matrix -- worse than any real similarity score (cost =
 # 1 - similarity, i.e. [0, 1]) but finite, so Hungarian never picks it
 # ahead of a real candidate.
 _IMPOSSIBLE_COST = 10.0
-
-
+ 
+ 
 def _resolve_merges(
     end_ids: list[int],
     start_ids: list[int],
@@ -30,6 +30,7 @@ def _resolve_merges(
     end_sigs: dict[int, tuple],
     start_sigs: dict[int, tuple],
     merge_threshold: float,
+    blacklist: set[tuple[int, int]] | None = None,
 ) -> list[dict]:
     """Pass 1: global Hungarian assignment between `end_ids` (rows) and
     `start_ids` (columns). Returns every temporally-valid pair Hungarian
@@ -37,18 +38,25 @@ def _resolve_merges(
     `"accepted": similarity >= merge_threshold` -- including near-misses,
     useful when tuning the threshold. A single global assignment (not
     pairwise greedy) so two simultaneous fragmentation events don't
-    steal each other's correct match."""
+    steal each other's correct match.
+ 
+    `blacklist` is a set of `(end_id, start_id)` pairs forced to
+    `_IMPOSSIBLE_COST` -- used by the caller to retry the assignment
+    after a temporal veto, so the vetoed edge can't win the same slot
+    twice and the next-best (possibly temporally-sensible) candidate
+    gets a chance instead. See `merge_fragments`'s veto-retry loop."""
     if not end_ids or not start_ids:
         return []
-
+ 
+    blacklist = blacklist or set()
     cost = np.full((len(end_ids), len(start_ids)), _IMPOSSIBLE_COST)
     for i, e in enumerate(end_ids):
         for j, s in enumerate(start_ids):
-            if e == s or bounds[e][1] >= bounds[s][0]:
-                continue  # same track, or start doesn't come after end
+            if e == s or bounds[e][1] >= bounds[s][0] or (e, s) in blacklist:
+                continue  # same track, start doesn't come after end, or vetoed earlier
             sim = _pair_similarity(end_sigs[e], start_sigs[s])
             cost[i, j] = 1.0 - sim
-
+ 
     row_idx, col_idx = linear_sum_assignment(cost)
     candidates = []
     for r, c in zip(row_idx, col_idx):
@@ -62,8 +70,8 @@ def _resolve_merges(
             "accepted": bool(similarity >= merge_threshold),
         })
     return candidates
-
-
+ 
+ 
 def _resolve_group_merges(
     orphan_ids: list[int],
     groups: dict[int, list[int]],
@@ -72,6 +80,7 @@ def _resolve_group_merges(
     orphan_sigs: dict[int, tuple],
     merge_threshold: float,
     orphan_groups: dict[int, list[int]] | None = None,
+    blacklist: set[tuple[int, int]] | None = None,
 ) -> list[dict]:
     """Pass 2: global Hungarian assignment between orphan start tracks
     (rows -- ones pass one left unmatched) and candidate GROUPS
@@ -81,17 +90,21 @@ def _resolve_group_merges(
     member genuinely ends before the orphan starts. Same global-
     assignment, "tag every real candidate" conventions as
     `_resolve_merges`.
-
+ 
     `orphan_groups` (`{orphan_id: member_ids}`) is the orphan's OWN
     pass-one group: an orphan is unmatched on its START side but may
     already have been merged on its END side (x -> y), so accepting
     "orphan into group G" really merges its whole chain into G. The
     overlap check therefore runs on every member of the orphan's chain,
     not just the orphan -- otherwise a 30-frame fragment can bridge two
-    people who coexist for the entire session."""
+    people who coexist for the entire session.
+ 
+    `blacklist` is a set of `(orphan_id, group_id)` pairs forced to
+    `_IMPOSSIBLE_COST`, same veto-retry purpose as in `_resolve_merges`."""
     if not orphan_ids or not groups:
         return []
-
+ 
+    blacklist = blacklist or set()
     group_ids = list(groups.keys())
     cost = np.full((len(orphan_ids), len(group_ids)), _IMPOSSIBLE_COST)
     for i, o in enumerate(orphan_ids):
@@ -100,8 +113,8 @@ def _resolve_group_merges(
         chain_bounds = [bounds[m] for m in chain if m in bounds] or [bounds[o]]
         for j, g in enumerate(group_ids):
             members = groups[g]
-            if o in members:
-                continue  # orphan is (trivially) already part of this group
+            if o in members or (o, g) in blacklist:
+                continue  # orphan is (trivially) already part of this group, or vetoed earlier
             member_bounds = [bounds[m] for m in members if m in bounds]
             if not member_bounds:
                 continue  # e.g. every member was too short to have bounds
@@ -113,7 +126,7 @@ def _resolve_group_merges(
                 continue  # no member of this group actually ends before the orphan starts
             sim = _pair_similarity(group_sigs[g], orphan_sigs[o])
             cost[i, j] = 1.0 - sim
-
+ 
     row_idx, col_idx = linear_sum_assignment(cost)
     candidates = []
     for r, c in zip(row_idx, col_idx):
@@ -127,8 +140,8 @@ def _resolve_group_merges(
             "accepted": bool(similarity >= merge_threshold),
         })
     return candidates
-
-
+ 
+ 
 def _group_chains(merges: list[tuple[int, int, float]], all_ids: list[int]) -> dict[int, int]:
     """Turns a list of accepted (end_id -> start_id) merges into
     `{original_id: canonical_id}` via union-find, following chains (A
@@ -136,30 +149,30 @@ def _group_chains(merges: list[tuple[int, int, float]], all_ids: list[int]) -> d
     canonical id is the group's SMALLEST original id -- a stable,
     deterministic output filename, no other meaning."""
     parent = {oid: oid for oid in all_ids}
-
+ 
     def find(x: int) -> int:
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
-
+ 
     def union(a: int, b: int) -> None:
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
-
+ 
     for end_id, start_id, _sim in merges:
         union(end_id, start_id)
-
+ 
     return {oid: find(oid) for oid in all_ids}
-
-
+ 
+ 
 def _overlap_frames(a: tuple[int, int], b: tuple[int, int]) -> int:
     """Number of frames where both `(first, last)` spans are active
     (0 when they don't overlap)."""
     return max(0, min(a[1], b[1]) - max(a[0], b[0]) + 1)
-
-
+ 
+ 
 def _group_chains_with_temporal_veto(
     merges: list[tuple[int, int, float]],
     all_ids: list[int],
@@ -177,7 +190,7 @@ def _group_chains_with_temporal_veto(
     off). Overlaps of at most `max_tolerated_overlap_frames` are
     ignored (tracker jitter at a fragment boundary, not real
     coexistence).
-
+ 
     This is the whole-video counterpart of the zeroth pass's
     one-match-per-fragment rule: pass 1/2 only ever check the two ids
     of a pair against each other, so a short ambiguous fragment can
@@ -185,19 +198,19 @@ def _group_chains_with_temporal_veto(
     both look plausible even though A and B coexist for thousands of
     frames). Merges are applied in the order given -- put the most
     trusted ones first, they win any conflict.
-
+ 
     Returns `({original_id: canonical_id}, vetoed)` where `vetoed`
     lists every merge skipped, with the conflicting pair and its
     overlap length, for the report."""
     parent = {oid: oid for oid in all_ids}
     members: dict[int, list[int]] = {oid: [oid] for oid in all_ids}
-
+ 
     def find(x: int) -> int:
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
-
+ 
     vetoed: list[dict] = []
     for end_id, start_id, sim in merges:
         ra, rb = find(end_id), find(start_id)
@@ -225,5 +238,5 @@ def _group_chains_with_temporal_veto(
         keep, drop = min(ra, rb), max(ra, rb)
         parent[drop] = keep
         members[keep].extend(members.pop(drop))
-
+ 
     return {oid: find(oid) for oid in all_ids}, vetoed

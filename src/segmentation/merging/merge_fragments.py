@@ -6,7 +6,7 @@ MaskDir, using appearance (OSNet embedding + hue-color) instead of the
 geometric chunk-boundary matching real psifx's own cross-chunk
 stitching relies on. Called by
 `run_pipeline.py` as step 3 of 4; also runnable standalone.
-
+ 
 Orchestration only: `merge_fragments()` below
 just calls, in order -- see each module's own docstring for the actual
 algorithm:
@@ -25,12 +25,12 @@ algorithm:
      short fragments bridging different people by transitivity.
   5. Write the merged MaskDir (one file per canonical id, union of its
      members) and return the full JSON-able report.
-
+ 
 Streams every mask video from disk instead of preloading the whole
 MaskDir into RAM (a full clinical session doesn't fit in memory) --
 `signature_frames` in the report records exactly which frames built
 each signature, so a suspicious similarity can be checked by hand.
-
+ 
 Zeroth-pass overlap thresholds were calibrated on 4 real cases from
 9_group_1_3/9_individual_58 (positives -- same body: centroids
 12-158px; negatives -- real occlusion/different people: centroids
@@ -45,18 +45,18 @@ that, one small ambiguous fragment (e.g. a static jacket near two
 different people at different times) can bridge two real people
 together by transitivity even though comparing them directly correctly
 rejects the match.
-
+ 
 """
-
+ 
 from __future__ import annotations
-
+ 
 import argparse
 import json
 from pathlib import Path
-
+ 
 import cv2
 import numpy as np
-
+ 
 from segmentation.merging.mask_io import DEFAULT_MASK_THRESHOLD, _list_mask_files, _scan_track
 from segmentation.merging.overlap_resolution import _resolve_overlap_merges
 from segmentation.merging.signatures import _pooled_group_signature, _sample_signature
@@ -64,12 +64,12 @@ from segmentation.merging.reappearance_merge import (
     _group_chains_with_temporal_veto, _resolve_group_merges, _resolve_merges,
 )
 from pose.appearance_embedding import OSNetEmbedder
-
+ 
 DEFAULT_MIN_FRAGMENT_FRAMES = 8
 DEFAULT_MERGE_THRESHOLD = 0.6
 DEFAULT_SIGNATURE_SAMPLES = 5
 DEFAULT_POOLED_SAMPLES_PER_MEMBER = 5
-
+ 
 # --- zeroth pass: same-time overlap (see module docstring) ---
 # real pixel-to-pixel minimum distance between two masks, in px --
 # small = the two masks' silhouettes actually touch/nearly touch.
@@ -87,8 +87,8 @@ DEFAULT_OVERLAP_CENTROID_THRESHOLD = 115.0
 # for a pair's median to be trusted at all -- same role as
 # min_fragment_frames for pass 1/2.
 DEFAULT_MIN_OVERLAP_FRAMES = 8
-
-
+ 
+ 
 def merge_fragments(
     *,
     video_path: str,
@@ -113,7 +113,7 @@ def merge_fragments(
     mask_paths = _list_mask_files(mask_dir)
     if not mask_paths:
         raise ValueError(f"No <id>.mp4 mask files found in {mask_dir}")
-
+ 
     all_ids = sorted(mask_paths.keys())
     bounds: dict[int, tuple[int, int]] = {}
     excluded_short: list[int] = []
@@ -139,13 +139,13 @@ def merge_fragments(
             excluded_short.append(obj_id)
             continue
         bounds[obj_id] = (first, last)
-
+ 
     if not bounds:
         raise ValueError(
             f"No id in {mask_dir} has at least {min_fragment_frames} non-empty "
             f"frames -- nothing to merge (every id was too short/noisy)."
         )
-
+ 
     # --- zeroth pass: same-body fragments that coexist in time, see
     # module docstring's ATTENZIONE section. Computed before pass 1/2 so
     # its unions are already folded into `canonical` by the time pass 2
@@ -163,7 +163,7 @@ def merge_fragments(
         classifier=classifier,
     )
     overlap_merge_tuples = [(r["id_a"], r["id_b"], 0.0) for r in overlap_accepted]
-
+ 
     embedder = None
     if use_osnet:
         try:
@@ -171,23 +171,23 @@ def merge_fragments(
         except ImportError as exc:
             print(f"[merge_fragments] OSNet unavailable ({exc}) -- "
                   f"falling back to color-only matching.")
-
+ 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video: {video_path}")
-
+ 
     end_ids = list(bounds.keys())
     # a track starting at frame 0 is the video's first sighting of that
     # id, not a "reappearance" -- nothing plausible for it to resume, so
     # it's excluded from the START side (it can still be an END, i.e.
     # something else can resume INTO it later).
     start_ids = [oid for oid in bounds if bounds[oid][0] > 0]
-
+ 
     # per-signature frame indices actually used, for transparency (see
     # module docstring's "Border-touching frames" section) -- filled in
     # below, included in the report as `signature_frames`.
     signature_frames: dict[str, dict] = {"end": {}, "start": {}, "pooled_groups": {}}
-
+ 
     try:
         end_sigs = {}
         for obj_id in end_ids:
@@ -201,7 +201,7 @@ def merge_fragments(
             emb, hist, frames_used = _sample_signature(cap, mask_paths[obj_id], candidates, signature_samples, embedder)
             end_sigs[obj_id] = (emb, hist)
             signature_frames["end"][obj_id] = frames_used
-
+ 
         start_sigs = {}
         for obj_id in start_ids:
             first, last = bounds[obj_id]
@@ -213,7 +213,7 @@ def merge_fragments(
             signature_frames["start"][obj_id] = frames_used
     finally:
         cap.release()
-
+ 
     candidate_pairs = _resolve_merges(end_ids, start_ids, bounds, end_sigs, start_sigs, merge_threshold)
     merges = [
         (c["from_id"], c["into_id"], c["similarity"])
@@ -229,13 +229,13 @@ def merge_fragments(
         overlap_merge_tuples + pass1_sorted, all_ids, bounds, allowed_overlap_pairs,
         max_tolerated_overlap_frames=min_overlap_frames,
     )
-
+ 
     # --- second pass: pooled-group fallback for orphan start tracks
     # pass one couldn't match against any single fragment (see module
     # docstring's "Second pass" section) ---
     merged_start_ids = {c["into_id"] for c in candidate_pairs if c["accepted"]}
     orphan_start_ids = [s for s in start_ids if s not in merged_start_ids]
-
+ 
     group_candidates: list[dict] = []
     if orphan_start_ids:
         pass1_groups: dict[int, list[int]] = {}
@@ -247,7 +247,7 @@ def merge_fragments(
         # just for themselves. Self-matching is already excluded below
         # via `if o in members: continue`.
         candidate_group_ids = list(pass1_groups.keys())
-
+ 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise FileNotFoundError(f"Could not open video: {video_path}")
@@ -262,7 +262,7 @@ def merge_fragments(
         finally:
             cap.release()
         orphan_sigs = {o: start_sigs[o] for o in orphan_start_ids}
-
+ 
         group_candidates = _resolve_group_merges(
             orphan_start_ids,
             {g: pass1_groups[g] for g in candidate_group_ids},
@@ -279,7 +279,7 @@ def merge_fragments(
                 overlap_merge_tuples + pass1_sorted + extra_sorted, all_ids, bounds,
                 allowed_overlap_pairs, max_tolerated_overlap_frames=min_overlap_frames,
             )
-
+ 
     # Write the merged MaskDir: one file per distinct canonical id,
     # union (logical OR) of every member's mask. Streamed lock-step --
     # every member's file is already padded to the same total_frames
@@ -290,11 +290,26 @@ def merge_fragments(
     groups: dict[int, list[int]] = {}
     for oid in all_ids:
         groups.setdefault(canonical[oid], []).append(oid)
-
+ 
+    # The canonical id (smallest original id in the group) is what
+    # `groups`/`vetoed_merges`/etc below are keyed by -- kept as-is so
+    # every OTHER field in the report still means what it always has,
+    # comparable across runs. But as an OUTPUT FILENAME it skips
+    # whenever an id got absorbed into an earlier group (e.g. 0,2,4,6),
+    # and downstream consumers that label by raw filename stem with no
+    # remapping of their own (psifx's `TrackingTool.visualize`, used by
+    # `run_pipeline.py`'s overlay step) show those same gaps. Assign
+    # each group a separate, purely sequential OUTPUT id (0,1,2,3...,
+    # same ascending order as the canonical ids) for the written
+    # filenames only -- `output_id_remap` in the report records the
+    # mapping back to the canonical id so nothing is lost.
+    sorted_canon_ids = sorted(groups.keys())
+    output_id_remap = {canon: seq for seq, canon in enumerate(sorted_canon_ids)}
+ 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     cap.release()
-
+ 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     for canon_id, members in groups.items():
         member_caps = [cv2.VideoCapture(str(mask_paths[m])) for m in members]
@@ -303,14 +318,14 @@ def merge_fragments(
                 for c in member_caps:
                     c.release()
                 raise FileNotFoundError(f"Could not open mask video: {mask_paths[member]}")
-
-        out_path = out_dir_path / f"{canon_id}.mp4"
+ 
+        out_path = out_dir_path / f"{output_id_remap[canon_id]}.mp4"
         writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
         if not writer.isOpened():
             for c in member_caps:
                 c.release()
             raise RuntimeError(f"Could not open mask writer at {out_path}")
-
+ 
         try:
             for _t in range(total_frames):
                 merged_frame = np.zeros((height, width), dtype=bool)
@@ -328,7 +343,7 @@ def merge_fragments(
             writer.release()
             for mcap in member_caps:
                 mcap.release()
-
+ 
     report = {
         "source_mask_dir": str(mask_dir),
         "output_mask_dir": str(out_mask_dir),
@@ -362,6 +377,7 @@ def merge_fragments(
             for c in group_candidates
         ],
         "groups": {str(canon): members for canon, members in groups.items()},
+        "output_id_remap": {str(canon): seq for canon, seq in output_id_remap.items()},
         "signature_frames": {
             "end": {str(oid): frames for oid, frames in signature_frames["end"].items()},
             "start": {str(oid): frames for oid, frames in signature_frames["start"].items()},
@@ -372,8 +388,8 @@ def merge_fragments(
         },
     }
     return report
-
-
+ 
+ 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Merges fragmented identities across a whole MaskDir using appearance "
@@ -411,7 +427,7 @@ def main() -> None:
     parser.add_argument("--no-osnet", dest="use_osnet", action="store_false", default=True,
                          help="Disable OSNet, use color (hue histogram) only")
     args = parser.parse_args()
-
+ 
     report = merge_fragments(
         video_path=args.video, mask_dir=args.mask_dir, out_mask_dir=args.out_dir,
         min_fragment_frames=args.min_fragment_frames, merge_threshold=args.merge_threshold,
@@ -422,7 +438,7 @@ def main() -> None:
         overlap_classifier_path=args.overlap_classifier,
         device=args.device, use_osnet=args.use_osnet,
     )
-
+ 
     print(f"\n{report['original_id_count']} original ids -> {report['merged_id_count']} after merging "
           f"({len(report['accepted_merges'])} pass-1 merge(s), "
           f"{len(report['accepted_overlap_merges'])} zeroth-pass overlap merge(s) accepted, "
@@ -463,12 +479,12 @@ def main() -> None:
         for c in sorted(report["pooled_group_candidates"], key=lambda c: -c["similarity"]):
             tag = "accepted" if c["accepted"] else "rejected"
             print(f"  id {c['orphan_id']} -> group {c['group_id']}  (similarity {c['similarity']}, {tag})")
-
+ 
     report_path = Path(args.out_dir) / "merge_report.json"
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"\nFull report written to {report_path}")
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
