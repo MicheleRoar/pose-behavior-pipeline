@@ -1,12 +1,13 @@
 """
 segmentation/run_pipeline.py
 =============================
-Single entry point chaining the 4 steps otherwise ran by hand
+Single entry point chaining the 5 steps otherwise ran by hand
 (ffmpeg trim -> `run_sam3_baseline` -> `merge_fragments` -> psifx's own
-`TrackingTool.visualize` overlay) into one resumable run.
+`TrackingTool.visualize` overlay -> crop_outputs + overlay-on-cropped)
+into one resumable run.
 
-Everything lives next to the source video, inside three top-level
-subfolders of the video's own directory (not a separate output root):
+Everything lives next to the source video, inside top-level subfolders
+of the video's own directory (not a separate output root):
 
     <video_dir>/
         processed/<name>.mp4          # always: ffmpeg re-encode (trimmed if --ss/--to given, full video otherwise)
@@ -15,6 +16,10 @@ subfolders of the video's own directory (not a separate output root):
             <id>.mp4 ...              # merged MaskDir (merge_fragments)
             merge_report.json
             overlay.mp4                # TrackingTool.visualize output
+        merged/<name>_cropped<margin>/
+            <id>.mp4 ...              # same MaskDir, cropped `margin`px on all 4 sides (psifx ManipulationTool)
+            _source/<name>_cropped.mp4
+            overlay.mp4                # TrackingTool.visualize output, on the cropped version
 
 `<name>` is the video's filename stem, plus an exact range suffix when
 `--ss`/`--to` are given (digits only, taken directly from the two
@@ -34,6 +39,11 @@ Each step is skipped if its output already exists (resumable -- SAM3
 can take a long time, no reason to redo it because a later step
 failed) unless `--overwrite` is passed, which forces every step to
 re-run.
+
+Step 5 (crop) is purely additive: it never touches merged/<name>/
+(the un-cropped merge output stays exactly as merge_fragments.py wrote
+it), it writes to a separate merged/<name>_cropped<margin>/ sibling
+instead. Pass `--no-crop` to skip it entirely.
 
 Usage:
     python -m segmentation.run_pipeline --video ~/Bureau/The Sense/Sessions/9_group_1_3/camera_a.mkv \\
@@ -69,9 +79,12 @@ def resolve_name(video_path: str, ss: str | None, to: str | None) -> str:
     return f"{stem}_{_sanitize_timestamp(ss)}-{_sanitize_timestamp(to)}"
 
 
-def resolve_paths(video_path: str, ss: str | None, to: str | None) -> dict[str, Path]:
+def resolve_paths(video_path: str, ss: str | None, to: str | None, crop_margin: int | None = 25) -> dict[str, Path]:
     """All the folder/file paths for one pipeline run, all rooted at
-    the source video's own directory -- see module docstring."""
+    the source video's own directory -- see module docstring.
+    `crop_margin=None` still resolves the cropped_* paths (needed so
+    callers can see what WOULD be produced) but run_pipeline() simply
+    skips step 5 when crop_margin is None."""
     video_path = Path(video_path)
     video_dir = video_path.parent
     name = resolve_name(str(video_path), ss, to)
@@ -85,6 +98,11 @@ def resolve_paths(video_path: str, ss: str | None, to: str | None) -> dict[str, 
     paths["overlay"] = paths["merged_dir"] / "overlay.mp4"
 
     paths["processed_clip"] = video_dir / "processed" / f"{name}.mp4"
+
+    margin_suffix = crop_margin if crop_margin is not None else 25
+    paths["cropped_dir"] = video_dir / "merged" / f"{name}_cropped{margin_suffix}"
+    paths["cropped_source"] = paths["cropped_dir"] / "_source" / f"{name}_cropped.mp4"
+    paths["cropped_overlay"] = paths["cropped_dir"] / "overlay.mp4"
 
     return paths
 
@@ -138,15 +156,17 @@ def run_pipeline(
     overlap_centroid_threshold: float | None = None,
     min_overlap_frames: int | None = None,
     overlap_classifier_path: str | None = None,
+    # crop pass-through (step 5+6; crop_margin=None skips both steps entirely)
+    crop_margin: int | None = 25,
 ) -> dict[str, str]:
-    """Runs the 4-step pipeline for one video (optionally trimmed to
-    `[ss, to]` first), resuming past any step whose output already
-    exists unless `overwrite=True`. Returns the resolved output paths.
-    See module docstring for the folder layout and naming."""
+    """Runs the pipeline for one video (optionally trimmed to `[ss, to]`
+    first), resuming past any step whose output already exists unless
+    `overwrite=True`. Returns the resolved output paths. See module
+    docstring for the folder layout and naming."""
     if (ss is None) != (to is None):
         raise ValueError("--ss and --to must be given together, or not at all")
 
-    paths = resolve_paths(video_path, ss, to)
+    paths = resolve_paths(video_path, ss, to, crop_margin=crop_margin)
 
     # Step 1: re-encode/normalize (always -- see module docstring on why
     # this can't be conditional on a range being given)
@@ -210,6 +230,37 @@ def run_pipeline(
             blackout=False, color=True, labels=True,
         )
 
+    # Step 5: crop -> merged/<name>_cropped<margin>/ (psifx's own ManipulationTool,
+    # see segmentation.tools.crop_outputs -- purely additive, never touches merged/<name>/)
+    if crop_margin is None:
+        print("[run_pipeline] crop_margin=None, skipping crop step (--no-crop)")
+    else:
+        if paths["cropped_source"].exists() and not overwrite and any(paths["cropped_dir"].glob("*.mp4")):
+            print(f"[run_pipeline] cropped output already exists, skipping crop -> {paths['cropped_dir']}")
+        else:
+            from segmentation.tools.crop_outputs import crop_mask_dir
+
+            print(f"[run_pipeline] cropping (margin={crop_margin}px) -> {paths['cropped_dir']}")
+            crop_mask_dir(
+                video_path=sam3_input, mask_dir=paths["merged_dir"], out_dir=paths["cropped_dir"],
+                margin=crop_margin, overwrite=overwrite,
+            )
+
+        # Step 6: overlay on cropped -> merged/<name>_cropped<margin>/overlay.mp4
+        if paths["cropped_overlay"].exists() and not overwrite:
+            print(f"[run_pipeline] cropped overlay already exists, skipping -> {paths['cropped_overlay']}")
+        else:
+            from psifx.video.tracking.tool import TrackingTool
+
+            cropped_mask_paths = sorted(p for p in paths["cropped_dir"].glob("*.mp4"))
+            tool = TrackingTool(device=visualize_device, overwrite=overwrite, verbose=True)
+            print(f"[run_pipeline] rendering cropped overlay -> {paths['cropped_overlay']}")
+            tool.visualize(
+                video_path=paths["cropped_source"], mask_paths=cropped_mask_paths,
+                visualization_path=paths["cropped_overlay"],
+                blackout=False, color=True, labels=True,
+            )
+
     return {k: str(v) for k, v in paths.items()}
 
 
@@ -244,6 +295,15 @@ def main() -> None:
                         help="Path to a weights JSON trained by train_overlap_classifier.py; "
                              "replaces the two fixed thresholds above when given.")
 
+    crop = parser.add_argument_group("crop (step 5+6)")
+    crop.add_argument("--crop-margin", type=int, default=25,
+                       help="Pixels to crop on all 4 sides of the merged MaskDir + source video, "
+                            "to exclude camera_a's border artifact (default 25). "
+                            "Writes to a separate merged/<name>_cropped<margin>/ dir, never touches "
+                            "merged/<name>/.")
+    crop.add_argument("--no-crop", dest="crop_margin", action="store_const", const=None,
+                       help="Skip the crop step (and the overlay-on-cropped step) entirely.")
+
     args = parser.parse_args()
     if (args.ss is None) != (args.to is None):
         parser.error("--ss and --to must be given together")
@@ -260,6 +320,7 @@ def main() -> None:
         overlap_centroid_threshold=args.overlap_centroid_threshold,
         min_overlap_frames=args.min_overlap_frames,
         overlap_classifier_path=args.overlap_classifier_path,
+        crop_margin=args.crop_margin,
     )
     print("\nDone:")
     for key, path in result.items():
