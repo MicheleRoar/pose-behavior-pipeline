@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session digital twin</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --text:#e7e9ee; --muted:#9aa3b2; --accent:#4d8dff; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text);
+              font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; overflow:hidden; }
+  #view { position:fixed; inset:0; }
+  #hud { position:fixed; left:16px; top:14px; pointer-events:none; }
+  #hud h1 { font-size:15px; font-weight:600; margin:0 0 4px; }
+  #hud .t { color:var(--muted); font-variant-numeric:tabular-nums; }
+  #legend { margin-top:8px; display:flex; gap:14px; color:var(--muted); font-size:12px; }
+  #legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+  #bar { position:fixed; left:16px; right:16px; bottom:14px; background:var(--panel); border-radius:10px;
+         padding:10px 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #bar button, #bar select { background:#232834; color:var(--text); border:1px solid #2e3442; border-radius:6px;
+         padding:6px 10px; font:inherit; cursor:pointer; }
+  #bar button:hover { border-color:var(--accent); }
+  #scrub { flex:1 1 240px; accent-color:var(--accent); }
+  #people { position:fixed; right:16px; top:14px; background:rgba(24,27,34,.85); border-radius:10px;
+            padding:8px 12px; font-size:12px; font-variant-numeric:tabular-nums; min-width:190px; }
+  #people div { display:flex; justify-content:space-between; gap:12px; }
+  .lbl { position:absolute; transform:translate(-50%,-100%); pointer-events:none; font-size:11px;
+         padding:2px 6px; border-radius:4px; color:#fff; white-space:nowrap; }
+  @media (max-width:600px){ #people{display:none} }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="view"></div>
+<div id="hud"><h1 id="title"></h1><div class="t" id="time"></div>
+  <div id="legend"><span><i style="background:#e8473a"></i>adult</span><span><i style="background:#2f7fe0"></i>child</span><span><i style="background:#9a9a9a"></i>uncertain</span></div>
+</div>
+<div id="people"></div>
+<div id="bar">
+  <button id="play">⏸</button>
+  <input id="scrub" type="range" min="0" value="0" step="1">
+  <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select>
+  <button data-view="top">top view</button>
+  <button data-view="A">camera A</button>
+  <button data-view="B" id="btnB">camera B</button>
+  <button id="trails">trails: on</button>
+  <button id="mode">people: avatar</button>
+  <button id="prox">distances: on</button>
+  <button id="room">room: on</button>
+  <label style="display:flex;align-items:center;gap:6px;color:var(--muted)">walls
+    <input id="cut" type="range" min="0.4" max="2.3" step="0.05" value="2.3" style="width:90px;accent-color:var(--accent)"></label>
+</div>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const D = /*__PAYLOAD__*/null;
+const b64 = (s, T) => { const b = atob(s), u = new Uint8Array(b.length); for (let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return new T(u.buffer); };
+document.getElementById("title").textContent = D.title;
+if (!D.cams.B) document.getElementById("btnB").style.display = "none";
+
+const view = document.getElementById("view");
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.localClippingEnabled = true;
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f1115);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 100);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// room
+const cp = b64(D.cloud, Float32Array), cc = b64(D.cloud_colors, Uint8Array);
+const g = new THREE.BufferGeometry();
+g.setAttribute("position", new THREE.BufferAttribute(cp, 3));
+g.setAttribute("color", new THREE.BufferAttribute(new Float32Array(cc).map(v => v/255), 3));
+const cutPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 2.3);   // keeps y < constant
+const room = new THREE.Points(g, new THREE.PointsMaterial({ size:0.018, vertexColors:true, clippingPlanes:[cutPlane] }));
+scene.add(room);
+const grid = new THREE.GridHelper(10, 20, 0x2a3040, 0x1c212c); scene.add(grid);
+
+// centre of the room for the orbit target
+let cx=0, cz=0, n=0; for (let i=0;i<cp.length;i+=30){ cx+=cp[i]; cz+=cp[i+2]; n++; } cx/=n; cz/=n;
+controls.target.set(cx, 0.8, cz);
+
+// people
+const N = D.n_frames, J = 17;
+const people = D.people.map(p => {
+  const arr = b64(p.data, Float32Array);
+  const anc = p.anchor ? b64(p.anchor, Float32Array) : null;
+  const color = new THREE.Color(p.color);
+  const joints = new THREE.InstancedMesh(new THREE.SphereGeometry(0.025, 12, 8), new THREE.MeshBasicMaterial({ color }), J);
+  const bones = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color, linewidth:2 }));
+  bones.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(D.edges.length*6), 3));
+  const trailN = Math.round(D.fps*8);
+  const trail = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color, transparent:true, opacity:0.55 }));
+  trail.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(trailN*3), 3));
+  // avatar: a body column up to the shoulders, a head, a disc on the floor
+  const mat = new THREE.MeshLambertMaterial({ color });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 1, 20), mat);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.1, 20, 14), mat);
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(0.28, 32), new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.35 }));
+  disc.rotation.x = -Math.PI/2;
+  scene.add(joints, bones, trail, body, head, disc);
+  const lbl = document.createElement("div"); lbl.className = "lbl"; lbl.style.background = p.color; view.appendChild(lbl);
+  return { ...p, arr, anc, joints, bones, trail, trailN, lbl, body, head, disc };
+});
+// child <-> adult distance lines (proxemics)
+const kids = people.filter(P => P.role === "child");
+const links = [];
+for (const K of kids) for (const A of people) if (A.role !== "child") {
+  const line = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color:0x8a93a6, dashSize:0.08, gapSize:0.05 }));
+  line.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+  scene.add(line);
+  const tag = document.createElement("div"); tag.className = "lbl"; view.appendChild(tag);
+  links.push({ K, A, line, tag });
+}
+scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2); sun.position.set(2, 5, 3); scene.add(sun);
+
+const J3 = (P, f, j) => { const o = (f*J + j)*3; const x = P.arr[o]; return x < -900 ? null : [x, P.arr[o+1], P.arr[o+2]]; };
+const torso = (P, f) => { let s=[0,0,0], k=0; for (const j of [5,6,11,12]) { const v = J3(P,f,j); if (v){ s[0]+=v[0]; s[1]+=v[1]; s[2]+=v[2]; k++; } } return k ? s.map(x=>x/k) : null; };
+const M = new THREE.Matrix4(), hide = new THREE.Matrix4().makeScale(0,0,0);
+const IT = { standing:"standing", seated:"seated", floor:"on the floor" }, RT = { adult:"adult", child:"child", uncertain:"?" };
+
+const anchor = (P, f) => { if (!P.anc) return null; const o = f*3; return P.anc[o] < -900 ? null : [P.anc[o], P.anc[o+1], P.anc[o+2]]; };
+const shoulders = (P, f) => { let s=0, k=0; for (const j of [5,6]) { const v = J3(P,f,j); if (v){ s+=v[1]; k++; } } return k ? s/k : null; };
+const headPos = (P, f) => { for (const j of [0,1,2,3,4]) { const v = J3(P,f,j); if (v) return v; } return null; };
+
+function draw(f) {
+  const rows = [];
+  for (const P of people) {
+    const an = anchor(P, f);
+    const c0 = an ?? torso(P, f), sh = an ? an[1] : shoulders(P, f);
+    const av = mode === "avatar" && c0 != null;
+    P.body.visible = P.head.visible = P.disc.visible = av;
+    P.joints.visible = P.bones.visible = mode === "skeleton";
+    if (av) {
+      const top = Math.max(0.3, sh ?? c0[1] + 0.25);
+      P.body.scale.set(1, top, 1); P.body.position.set(c0[0], top/2, c0[2]);
+      const hy = top + 0.2;
+      P.head.position.set(c0[0], hy, c0[2]);
+      P.disc.position.set(c0[0], 0.005, c0[2]);
+    }
+    for (let j=0;j<J;j++){ const v = J3(P,f,j); P.joints.setMatrixAt(j, v ? M.makeTranslation(v[0],v[1],v[2]) : hide); }
+    P.joints.instanceMatrix.needsUpdate = true;
+    const bp = P.bones.geometry.attributes.position.array; let k = 0;
+    for (const [a,b] of D.edges) { const va=J3(P,f,a), vb=J3(P,f,b);
+      if (va && vb) { bp.set(va,k); bp.set(vb,k+3); } else { bp.fill(0,k,k+6); } k+=6; }
+    P.bones.geometry.attributes.position.needsUpdate = true;
+    const tp = P.trail.geometry.attributes.position.array; let last=null, m=0;
+    for (let i=Math.max(0,f-P.trailN+1); i<=f; i++){ const c = anchor(P,i) ?? torso(P,i); if (c) last=[c[0],0.01,c[2]]; if (last){ tp.set(last, m*3); m++; } }
+    P.trail.geometry.setDrawRange(0, showTrails ? m : 0); P.trail.geometry.attributes.position.needsUpdate = true;
+    const c = anchor(P,f) ?? torso(P,f);
+    if (c) {
+      const v = new THREE.Vector3(c[0], (mode === "avatar" ? c[1] + 0.45 : (torso(P,f) ?? c)[1] + 0.55), c[2]).project(camera);
+      const visible = v.z < 1;
+      P.lbl.style.display = visible ? "block" : "none";
+      P.lbl.style.left = ((v.x+1)/2*innerWidth)+"px"; P.lbl.style.top = ((1-v.y)/2*innerHeight)+"px";
+      const post = P.posture[f] ? IT[P.posture[f]] || P.posture[f] : "", sp = P.speed[f], dt = P.dist ? P.dist[f] : null;
+      P.lbl.textContent = `${P.label} ${RT[P.role]||""}${post ? " · "+post : ""}`;
+      rows.push(`<div><span style="color:${P.color}">${P.label} ${RT[P.role]||""}</span><span>${post}${sp!=null ? " · "+sp.toFixed(2)+" m/s" : ""}${dt!=null ? " · "+dt.toFixed(1)+" m" : ""}</span></div>`);
+    } else P.lbl.style.display = "none";
+  }
+  for (const L of links) {
+    const a = anchor(L.K, f), b = anchor(L.A, f);
+    const ok = showProx && a && b;
+    L.line.visible = !!ok; L.tag.style.display = ok ? "block" : "none";
+    if (!ok) continue;
+    const pos = L.line.geometry.attributes.position.array;
+    pos.set([a[0], 0.03, a[2], b[0], 0.03, b[2]]); L.line.geometry.attributes.position.needsUpdate = true;
+    L.line.computeLineDistances();
+    const d = Math.hypot(a[0]-b[0], a[2]-b[2]);
+    const close = d <= 1.0;
+    L.line.material.color.set(close ? 0xf5a524 : 0x8a93a6);
+    const v = new THREE.Vector3((a[0]+b[0])/2, 0.05, (a[2]+b[2])/2).project(camera);
+    L.tag.style.left = ((v.x+1)/2*innerWidth)+"px"; L.tag.style.top = ((1-v.y)/2*innerHeight)+"px";
+    L.tag.style.background = close ? "#c97f00" : "#4a5263";
+    L.tag.textContent = d.toFixed(2) + " m";
+  }
+  document.getElementById("people").innerHTML = rows.join("") || "<div>nobody in view</div>";
+  const t = (D.start_frame + f) / D.fps;
+  document.getElementById("time").textContent = `t = ${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,"0")}`;
+}
+
+// views
+const cut = document.getElementById("cut");
+const setCut = h => { cutPlane.constant = +h; cut.value = h; };
+cut.oninput = () => setCut(cut.value);
+function setView(which) {
+  if (which === "top") { camera.position.set(cx, 7, cz + 0.01); controls.target.set(cx, 0, cz); setCut(1.0); }
+  else { const p = D.cams[which]; camera.position.set(p[0], p[1], p[2]); controls.target.set(cx, 0.8, cz); setCut(2.3); }
+  controls.update();
+}
+document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => setView(b.dataset.view));
+setView("A");
+
+// playback
+const scrub = document.getElementById("scrub"); scrub.max = N-1;
+let frame = 0, playing = true, acc = 0, lastT = performance.now(), showTrails = true, mode = "avatar", showProx = true;
+document.getElementById("prox").onclick = e => { showProx = !showProx; e.target.textContent = "distances: " + (showProx ? "on" : "off"); };
+document.getElementById("mode").onclick = e => { mode = mode === "avatar" ? "skeleton" : "avatar"; e.target.textContent = "people: " + mode; };
+const playBtn = document.getElementById("play");
+playBtn.onclick = () => { playing = !playing; playBtn.textContent = playing ? "⏸" : "▶"; };
+scrub.oninput = () => { frame = +scrub.value; };
+document.getElementById("trails").onclick = e => { showTrails = !showTrails; e.target.textContent = "trails: " + (showTrails ? "on" : "off"); };
+document.getElementById("room").onclick = e => { room.visible = !room.visible; e.target.textContent = "room: " + (room.visible ? "on" : "off"); };
+addEventListener("keydown", e => { if (e.code === "Space") { playBtn.click(); e.preventDefault(); } });
+
+function resize(){ renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); }
+addEventListener("resize", resize); resize();
+
+function loop(now) {
+  const dt = (now - lastT)/1000; lastT = now;
+  if (playing) { acc += dt * D.fps * +document.getElementById("speed").value;
+    while (acc >= 1) { frame = (frame + 1) % N; acc -= 1; } scrub.value = frame; }
+  controls.update(); draw(frame); renderer.render(scene, camera); requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

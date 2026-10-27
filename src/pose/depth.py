@@ -82,10 +82,21 @@ def _read_person_keypoints(keypoints_csv: str) -> pd.DataFrame:
     or `keypoints_raw.csv` as a fallback -- renamed to a common
     `x_smooth`/`y_smooth` shape either way, so the rest of this module
     doesn't need to care which one it got."""
-    df = pd.read_csv(keypoints_csv)
+    df = pd.read_csv(keypoints_csv, low_memory=False)
     if "x_smooth" in df.columns:
         return df
     return df.rename(columns={"x": "x_smooth", "y": "y_smooth"})
+
+
+def _is_false(flag) -> bool:
+    """True only for an explicit False -- the CSV column can come back as
+    bools, as the strings 'True'/'False' (pandas' chunked type inference
+    on a column that also holds NaN), or as NaN for interpolated rows."""
+    if flag is None or (isinstance(flag, float) and np.isnan(flag)):
+        return False
+    if isinstance(flag, str):
+        return flag.strip().lower() == "false"
+    return not bool(flag)
 
 
 def _timestamp_to_usec(ts: str) -> int:
@@ -132,6 +143,14 @@ def extract_depth(
     if ss is not None:
         playback.seek(_timestamp_to_usec(ss), SeekOrigin.BEGIN)
 
+    # Optional gate (column written by pose/extract_keypoints_vitpose.py): a
+    # keypoint outside its own person's mask is usually a hidden body part
+    # the pose model completed -- the depth at that pixel is the occluder's
+    # (e.g. the table), not the person's, so it is not read. Interpolated
+    # rows (no detection, flag NaN) keep the previous behaviour.
+    has_mask_flag = "in_own_mask" in df.columns
+    n_outside_mask = 0
+
     rows: list[dict] = []
     n_out_of_fov = 0
     n_no_return = 0
@@ -158,7 +177,10 @@ def extract_depth(
 
                     X = Y = Z = np.nan
                     px, py = int(round(x)), int(round(y))
-                    if point_cloud is None:
+                    flag = getattr(row, "in_own_mask") if has_mask_flag else None
+                    if _is_false(flag):
+                        n_outside_mask += 1  # hidden part: 2D kept, no depth read (see above)
+                    elif point_cloud is None:
                         pass  # whole frame had no depth capture -- already counted in n_no_capture above
                     elif not (0 <= px < pw and 0 <= py < ph):
                         n_out_of_fov += 1  # narrower depth FOV than color -- keypoint pixel isn't in it at all
@@ -181,6 +203,9 @@ def extract_depth(
     finally:
         playback.close()
 
+    if has_mask_flag:
+        print(f"[depth] {n_outside_mask} keypoint(s) outside their own person's mask (hidden parts) -- "
+              f"kept in 2D, depth not read (NaN)")
     if n_no_capture:
         print(f"[depth] {n_no_capture} frame(s) had no depth capture at all (sensor drop) -- "
               f"those frames' keypoints got NaN X/Y/Z")
